@@ -56,6 +56,8 @@ struct CellState {
     index: usize,
     selected: bool,
     active: bool,
+    /// Show LrC's "metadata needs saving to file" badge.
+    show_dirty: bool,
 }
 
 /// Stars centered on `center`; `size` is roughly the glyph height.
@@ -202,6 +204,26 @@ fn paint_cell(
             theme::MISSING,
         );
     }
+    if st.show_dirty && style != GridStyle::Minimal {
+        paint_needs_saving(&painter, cell.right_bottom() - egui::vec2(12.0, 10.0 + footer.max(4.0) / 2.0));
+    }
+}
+
+/// A small page with a down arrow: catalog metadata not yet saved to the sidecar.
+fn paint_needs_saving(painter: &egui::Painter, center: egui::Pos2) {
+    let page = Rect::from_center_size(center, egui::vec2(8.0, 10.0));
+    let color = theme::TEXT_WEAK;
+    painter.rect_stroke(page, 1.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+    let tip = page.center_bottom() - egui::vec2(0.0, 2.0);
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, tip + egui::vec2(-2.5, -3.0), tip + egui::vec2(2.5, -3.0)],
+        color,
+        Stroke::NONE,
+    ));
+    painter.line_segment(
+        [page.center_top() + egui::vec2(0.0, 2.0), tip - egui::vec2(0.0, 2.5)],
+        Stroke::new(1.0, color),
+    );
 }
 
 fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &PhotoRow) {
@@ -282,6 +304,7 @@ fn handle_click(
 
 pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let style = app.ui.grid_style;
+    let auto_write = app.ui.auto_write_xmp;
     let cell_w = app.ui.thumb_size.clamp(80.0, 360.0);
     let cell_h = cell_w * if style == GridStyle::Expanded { 1.18 } else { 1.0 };
     let avail = ui.available_width() - 8.0;
@@ -338,6 +361,7 @@ pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     index: i,
                     selected: s.selected.contains(&photo.id),
                     active: s.active == Some(photo.id),
+                    show_dirty: photo.metadata_dirty && !auto_write,
                 };
                 paint_cell(ui, rect, &photo, tex.as_ref(), s.thumbs.is_failed(photo.id), style, &st);
                 let resp = ui.interact(rect, egui::Id::unique(("cell", photo.id)), Sense::click());

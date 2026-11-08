@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/catalog", "crates/imaging", "crates/libraw"]
+members = ["crates/app", "crates/catalog", "crates/imaging", "crates/libraw", "crates/xmp"]
 resolver = "3"
 
 [workspace.package]
@@ -23,6 +23,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 catalog = { path = "crates/catalog" }
 libraw = { path = "crates/libraw" }
 imaging = { path = "crates/imaging" }
+xmp = { path = "crates/xmp" }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

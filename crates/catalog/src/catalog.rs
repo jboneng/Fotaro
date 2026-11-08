@@ -62,6 +62,8 @@ pub struct PhotoRow {
     /// Extra rotation applied in the catalog (LrC "Rotate Left/Right"), in clockwise
     /// quarter turns 0..=3, on top of the file's own orientation. Files are never changed.
     pub rotation: u8,
+    /// Changed in the catalog since it was last written to the XMP sidecar.
+    pub metadata_dirty: bool,
 }
 
 /// Camera/exposure metadata stored per photo. `capture_time` is "naive local"
@@ -78,6 +80,8 @@ pub struct PhotoMetadata {
     pub capture_time: Option<i64>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// The file's own orientation in clockwise quarter turns (EXIF / RAW flip), if known.
+    pub orientation: Option<u8>,
 }
 
 /// Where the grid's photos come from (the LrC "source").
@@ -158,7 +162,7 @@ pub struct SortOrder {
 }
 
 const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, f.missing,
-     p.rating, p.flag, p.color_label, p.capture_time, p.orientation";
+     p.rating, p.flag, p.color_label, p.capture_time, p.orientation, p.metadata_dirty";
 
 /// `photos.orientation` holds the catalog rotation as an EXIF/XMP orientation code
 /// (1 = none, 6 = 90° CW, 3 = 180°, 8 = 90° CCW), the form XMP sidecars will use.
@@ -192,6 +196,7 @@ fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         color_label: r.get(9)?,
         capture_time: r.get(10)?,
         rotation: rotation_from_orientation(r.get(11)?),
+        metadata_dirty: r.get(12)?,
     })
 }
 
@@ -341,7 +346,7 @@ impl Catalog {
             .conn
             .query_row(
                 "SELECT e.camera_make, e.camera_model, e.lens, e.iso, e.shutter, e.aperture,
-                        e.focal_len, p.capture_time, e.width, e.height
+                        e.focal_len, p.capture_time, e.width, e.height, e.orientation
                    FROM exif e JOIN photos p ON p.id = e.photo_id WHERE e.photo_id = ?1",
                 [photo_id],
                 |r| {
@@ -356,6 +361,7 @@ impl Catalog {
                         capture_time: r.get(7)?,
                         width: r.get(8)?,
                         height: r.get(9)?,
+                        orientation: r.get(10)?,
                     })
                 },
             )
@@ -368,19 +374,25 @@ impl Catalog {
     }
     pub fn set_rating(&self, photo_id: i64, rating: u8) -> Result<()> {
         anyhow::ensure!(rating <= 5, "rating must be 0-5, got {rating}");
-        self.conn.execute("UPDATE photos SET rating = ?1 WHERE id = ?2", params![rating, photo_id])?;
+        self.conn.execute(
+            "UPDATE photos SET rating = ?1, metadata_dirty = 1 WHERE id = ?2",
+            params![rating, photo_id],
+        )?;
         Ok(())
     }
 
     pub fn set_flag(&self, photo_id: i64, flag: Flag) -> Result<()> {
-        self.conn.execute("UPDATE photos SET flag = ?1 WHERE id = ?2", params![flag as i64, photo_id])?;
+        self.conn.execute(
+            "UPDATE photos SET flag = ?1, metadata_dirty = 1 WHERE id = ?2",
+            params![flag as i64, photo_id],
+        )?;
         Ok(())
     }
 
     /// Set the catalog rotation in clockwise quarter turns (taken modulo 4).
     pub fn set_rotation(&self, photo_id: i64, quarter_turns: u8) -> Result<()> {
         self.conn.execute(
-            "UPDATE photos SET orientation = ?1 WHERE id = ?2",
+            "UPDATE photos SET orientation = ?1, metadata_dirty = 1 WHERE id = ?2",
             params![orientation_from_rotation(quarter_turns), photo_id],
         )?;
         Ok(())
@@ -388,7 +400,10 @@ impl Catalog {
 
     /// Colour label name (`"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`) or `None`.
     pub fn set_color_label(&self, photo_id: i64, label: Option<&str>) -> Result<()> {
-        self.conn.execute("UPDATE photos SET color_label = ?1 WHERE id = ?2", params![label, photo_id])?;
+        self.conn.execute(
+            "UPDATE photos SET color_label = ?1, metadata_dirty = 1 WHERE id = ?2",
+            params![label, photo_id],
+        )?;
         Ok(())
     }
 
@@ -410,8 +425,8 @@ pub(crate) fn write_metadata(conn: &Connection, photo_id: i64, m: &PhotoMetadata
     conn.execute(
         "INSERT OR REPLACE INTO exif
              (photo_id, camera_make, camera_model, lens, iso, shutter, aperture,
-              focal_len, width, height)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              focal_len, width, height, orientation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             photo_id,
             m.make,
@@ -422,7 +437,8 @@ pub(crate) fn write_metadata(conn: &Connection, photo_id: i64, m: &PhotoMetadata
             m.aperture,
             m.focal_len,
             m.width,
-            m.height
+            m.height,
+            m.orientation
         ],
     )?;
     conn.execute("UPDATE photos SET capture_time = ?1 WHERE id = ?2", params![m.capture_time, photo_id])?;

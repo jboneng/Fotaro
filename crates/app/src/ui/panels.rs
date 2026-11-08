@@ -31,7 +31,7 @@ impl SectionStack {
         self.open.get(title).copied().unwrap_or(default_open)
     }
 
-    fn set_open(&mut self, title: &str, open: bool, all_titles: &[&str]) {
+    pub fn set_open(&mut self, title: &str, open: bool, all_titles: &[&str]) {
         if open && self.solo {
             for t in all_titles {
                 self.open.insert((*t).to_owned(), false);

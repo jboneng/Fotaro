@@ -53,6 +53,7 @@ pub enum Action {
     EditIn,
     Keywording,
     ShowShortcuts,
+    SaveMetadata,
 }
 
 /// Is the action wired up yet, or does it arrive in a later roadmap phase?
@@ -219,7 +220,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
     planned(k(K::B), A::QuickCollection, ORG, "Add to / remove from Quick Collection", "Phase 4"),
     planned(ctrl(K::G), A::Stack, ORG, "Group into stack", "Phase 4"),
     planned(ctrl_shift(K::G), A::Unstack, ORG, "Unstack", "Phase 4"),
-    planned(ctrl(K::K), A::Keywording, ORG, "Add keywords", "Phase 3"),
+    s(ctrl(K::K), A::Keywording, ORG, "Add keywords (Keywording panel)"),
+    s(ctrl(K::S), A::SaveMetadata, ORG, "Save metadata to files (XMP sidecars)"),
     planned(ctrl(K::E), A::EditIn, ORG, "Edit in default external editor", "Phase 7"),
     s(ctrl(K::Slash), A::ShowShortcuts, ORG, "Show keyboard shortcuts"),
 ];

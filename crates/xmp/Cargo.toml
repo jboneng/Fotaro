@@ -1,0 +1,16 @@
+[package]
+name = "xmp"
+description = "Read and update XMP sidecar files without losing what other apps wrote"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+quick-xml = "0.37"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

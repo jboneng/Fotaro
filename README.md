@@ -31,6 +31,7 @@ cargo run -p libraw --example rawinfo --release -- <raw files>   # RAW decode ch
 | `crates/catalog` | SQLite catalog: schema, migrations, folder sync, queries |
 | `crates/imaging` | Decoding (RAW/images), ICC to sRGB, EXIF, preview cache |
 | `crates/libraw`  | Safe Rust wrapper + C++ shim over vendored LibRaw 0.22.3 |
+| `crates/xmp`     | XMP sidecars: read and update in place (LrC, Bridge, darktable) |
 
 ## Third-party licences
 

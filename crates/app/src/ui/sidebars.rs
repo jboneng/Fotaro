@@ -7,11 +7,12 @@ use imaging::PreviewSize;
 
 use super::panels::Side;
 use super::theme;
-use crate::app::{Command, MetadataPreset, PhotoLibraryApp, View, ZoomLevel};
+use crate::app::{Command, FieldValue, MetadataPreset, PhotoLibraryApp, View, ZoomLevel};
 use crate::platform;
+use catalog::IptcField;
 
 const LEFT: &[&str] = &["Navigator", "Catalog", "Folders", "Collections"];
-const RIGHT: &[&str] = &["Histogram", "Keywording", "Keyword List", "Metadata"];
+pub const RIGHT: &[&str] = &["Histogram", "Keywording", "Keyword List", "Metadata"];
 
 fn weak(text: impl Into<String>) -> RichText {
     RichText::new(text).color(theme::TEXT_WEAK)
@@ -287,11 +288,9 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         stack.section(ui, Side::Right, "Histogram", RIGHT, true, |ui| {
             super::layout::timed("histogram", || histogram(app, ui))
         });
-        stack.section(ui, Side::Right, "Keywording", RIGHT, false, |ui| {
-            ui.label(weak("Keyword tags arrive in Phase 3."));
-        });
-        stack.section(ui, Side::Right, "Keyword List", RIGHT, false, |ui| {
-            ui.label(weak("Keyword list arrives in Phase 3."));
+        stack.section(ui, Side::Right, "Keywording", RIGHT, true, |ui| super::keywords::keywording(app, ui));
+        stack.section(ui, Side::Right, "Keyword List", RIGHT, true, |ui| {
+            super::layout::timed("keyword list", || super::keywords::keyword_list(app, ui))
         });
         stack.section(ui, Side::Right, "Metadata", RIGHT, true, |ui| {
             super::layout::timed("metadata", || metadata(app, ui))
@@ -371,20 +370,22 @@ pub fn format_capture_time(t: i64) -> String {
 
 fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let preset = &mut app.ui.metadata_preset;
+    let name = |p: MetadataPreset| match p {
+        MetadataPreset::Default => "Default",
+        MetadataPreset::Exif => "EXIF",
+        MetadataPreset::Iptc => "IPTC",
+    };
     ui.horizontal(|ui| {
         ui.label(weak("Preset"));
-        egui::ComboBox::from_id_salt("metadata_preset")
-            .selected_text(match preset {
-                MetadataPreset::Default => "Default",
-                MetadataPreset::Exif => "EXIF",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(preset, MetadataPreset::Default, "Default");
-                ui.selectable_value(preset, MetadataPreset::Exif, "EXIF");
-            });
+        egui::ComboBox::from_id_salt("metadata_preset").selected_text(name(*preset)).show_ui(ui, |ui| {
+            for p in [MetadataPreset::Default, MetadataPreset::Exif, MetadataPreset::Iptc] {
+                ui.selectable_value(preset, p, name(p));
+            }
+        });
     });
     ui.add_space(4.0);
     let preset = *preset;
+    let view = app.view;
 
     let Some(s) = &mut app.session else { return };
     let Some(photo) = s.active_photo().cloned() else {
@@ -392,24 +393,38 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         return;
     };
     let m = s.active_metadata().unwrap_or_default();
+    let selection = s.selection_meta(view).clone();
+    let n = selection.ids.len();
+    if n > 1 {
+        ui.label(weak(format!("Editing {n} photos")).size(11.0));
+    }
 
-    let mut rows: Vec<(&str, String)> = Vec::new();
-    rows.push(("File Name", photo.file_name.clone()));
-    rows.push((
-        "Folder",
-        photo
-            .path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    ));
+    // Rows are either read-only text or an editable IPTC field.
+    enum Row {
+        Text(&'static str, String),
+        Edit(IptcField),
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    let text = |k: &'static str, v: String| Row::Text(k, v);
+    rows.push(text("File Name", photo.file_name.clone()));
+    if preset != MetadataPreset::Iptc {
+        rows.push(text(
+            "Folder",
+            photo
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ));
+    }
     if photo.missing {
-        rows.push(("Status", "File is missing".into()));
+        rows.push(text("Status", "File is missing".into()));
     }
     match preset {
         MetadataPreset::Default => {
-            rows.push((
+            rows.extend(IptcField::ALL.map(Row::Edit));
+            rows.push(text(
                 "Rating",
                 match photo.rating {
                     0 => "None".into(),
@@ -417,7 +432,7 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     n => format!("{n} Stars"),
                 },
             ));
-            rows.push((
+            rows.push(text(
                 "Label",
                 photo
                     .color_label
@@ -429,7 +444,7 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     })
                     .unwrap_or_default(),
             ));
-            rows.push((
+            rows.push(text(
                 "Pick",
                 match photo.flag {
                     Flag::Picked => "Flagged",
@@ -438,25 +453,25 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 }
                 .into(),
             ));
-            rows.push(("Capture Time", photo.capture_time.map(format_capture_time).unwrap_or_default()));
+            rows.push(text("Capture Time", photo.capture_time.map(format_capture_time).unwrap_or_default()));
             if let Some(d) = dimensions(&m, photo.rotation) {
-                rows.push(("Dimensions", d));
+                rows.push(text("Dimensions", d));
             }
-            rows.push((
+            rows.push(text(
                 "Camera",
                 [m.make.clone(), m.model.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "),
             ));
         }
         MetadataPreset::Exif => {
-            rows.push(("File Size", platform::human_bytes(photo.size_bytes)));
-            rows.push((
+            rows.push(text("File Size", platform::human_bytes(photo.size_bytes)));
+            rows.push(text(
                 "File Type",
                 photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default(),
             ));
             if let Some(d) = dimensions(&m, photo.rotation) {
-                rows.push(("Dimensions", d));
+                rows.push(text("Dimensions", d));
             }
-            rows.push((
+            rows.push(text(
                 "Date Time Original",
                 photo.capture_time.map(format_capture_time).unwrap_or_default(),
             ));
@@ -465,22 +480,56 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 (Some(t), None) => format_shutter(t),
                 _ => String::new(),
             };
-            rows.push(("Exposure", exposure));
-            rows.push(("Focal Length", m.focal_len.map(|f| format!("{f:.0} mm")).unwrap_or_default()));
-            rows.push(("ISO Speed Rating", m.iso.map(|i| format!("ISO {i:.0}")).unwrap_or_default()));
-            rows.push(("Make", m.make.clone().unwrap_or_default()));
-            rows.push(("Model", m.model.clone().unwrap_or_default()));
-            rows.push(("Lens", m.lens.clone().unwrap_or_default()));
+            rows.push(text("Exposure", exposure));
+            rows.push(text("Focal Length", m.focal_len.map(|f| format!("{f:.0} mm")).unwrap_or_default()));
+            rows.push(text("ISO Speed Rating", m.iso.map(|i| format!("ISO {i:.0}")).unwrap_or_default()));
+            rows.push(text("Make", m.make.clone().unwrap_or_default()));
+            rows.push(text("Model", m.model.clone().unwrap_or_default()));
+            rows.push(text("Lens", m.lens.clone().unwrap_or_default()));
         }
+        MetadataPreset::Iptc => rows.extend(IptcField::ALL.map(Row::Edit)),
     }
 
+    let mut commands = Vec::new();
     egui::Grid::new("metadata_grid").num_columns(2).spacing([10.0, 3.0]).striped(false).show(ui, |ui| {
-        for (k, v) in rows {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(weak(k).size(11.5)));
-            ui.label(RichText::new(v).size(11.5));
+        for row in rows {
+            match row {
+                Row::Text(k, v) => {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(weak(k).size(11.5)));
+                    ui.label(RichText::new(v).size(11.5));
+                }
+                Row::Edit(field) => {
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        ui.add_space(2.0);
+                        ui.label(weak(field.label()).size(11.5))
+                    });
+                    let value =
+                        selection.iptc.get(&field).cloned().unwrap_or(FieldValue::Same(String::new()));
+                    let (current, hint) = match value {
+                        FieldValue::Same(v) => (v, ""),
+                        FieldValue::Mixed => (String::new(), "< mixed >"),
+                    };
+                    let id = egui::Id::unique(("iptc", field));
+                    let multiline = field == IptcField::Caption;
+                    let edited = super::keywords::commit_on_blur(ui, id, &current, |t| {
+                        let edit = if multiline {
+                            egui::TextEdit::multiline(t).desired_rows(2)
+                        } else {
+                            egui::TextEdit::singleline(t)
+                        };
+                        edit.hint_text(hint).desired_width(f32::INFINITY).font(egui::TextStyle::Small)
+                    });
+                    if let Some((_, value)) = edited {
+                        commands.push(Command::SetIptc { field, value });
+                    }
+                }
+            }
             ui.end_row();
         }
     });
+    for c in commands {
+        app.run(c);
+    }
 }
 
 /// "6032 x 4032" as displayed: swapped when the photo is rotated a quarter turn.

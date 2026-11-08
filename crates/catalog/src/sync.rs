@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 
 use crate::catalog::{Catalog, PhotoMetadata, write_metadata};
 use crate::scan::{FileKind, file_kind};
+use crate::xmp_sync::apply_xmp;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SyncReport {
@@ -56,17 +57,24 @@ struct FileChange {
     /// `None` for new files.
     existing_id: Option<i64>,
     metadata: Option<PhotoMetadata>,
+    /// An XMP sidecar found next to a new file (from LrC, darktable, or an earlier catalog).
+    sidecar: Option<xmp::XmpData>,
 }
 
-/// Read metadata for `files` on all cores.
-fn read_metadata_parallel(files: &mut [FileChange], reader: MetadataReader) {
+/// Read metadata (and, for new files, XMP sidecars) for `files` on all cores.
+fn read_metadata_parallel(files: &mut [FileChange], reader: Option<MetadataReader>) {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let chunk = files.len().div_ceil(threads).max(1);
     std::thread::scope(|scope| {
         for part in files.chunks_mut(chunk) {
             scope.spawn(move || {
                 for f in part {
-                    f.metadata = reader(&f.path, f.kind);
+                    if let Some(reader) = reader {
+                        f.metadata = reader(&f.path, f.kind);
+                    }
+                    if f.existing_id.is_none() {
+                        f.sidecar = read_sidecar(&f.path, f.kind);
+                    }
                 }
             });
         }
@@ -140,6 +148,7 @@ impl Catalog {
                 mtime_ms,
                 existing_id,
                 metadata: None,
+                sidecar: None,
             };
             match known.remove(path) {
                 Some(k) if k.size != size || k.mtime_ms != mtime_ms => changes.push(change(Some(k.id))),
@@ -152,9 +161,7 @@ impl Catalog {
         let walk_time = t_walk.elapsed();
         let t_meta = std::time::Instant::now();
         // Phase 2: metadata for new/changed files, in parallel, without holding a lock.
-        if let Some(reader) = reader {
-            read_metadata_parallel(&mut changes, reader);
-        }
+        read_metadata_parallel(&mut changes, reader);
 
         let meta_time = t_meta.elapsed();
         let t_write = std::time::Instant::now();
@@ -206,6 +213,10 @@ impl Catalog {
             };
             if let Some(m) = &c.metadata {
                 write_metadata(&tx, photo_id, m)?;
+            }
+            if let Some(sidecar) = &c.sidecar {
+                let file_turns = c.metadata.as_ref().and_then(|m| m.orientation).unwrap_or(0);
+                apply_xmp(&tx, photo_id, sidecar, file_turns)?;
             }
         }
         for id in &restored {
@@ -262,6 +273,16 @@ fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Resul
     }
     tx.execute("INSERT INTO folders (path, parent_id) VALUES (?1, ?2)", params![path_str(path), parent_id])?;
     Ok(tx.last_insert_rowid())
+}
+
+fn read_sidecar(path: &Path, kind: FileKind) -> Option<xmp::XmpData> {
+    match xmp::read_sidecar(path, kind == FileKind::Raw) {
+        Ok(found) => found.map(|s| s.data),
+        Err(e) => {
+            log::warn!("ignoring unreadable sidecar of {}: {e:#}", path.display());
+            None
+        }
+    }
 }
 
 #[cfg(test)]

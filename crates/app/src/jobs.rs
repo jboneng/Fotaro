@@ -54,6 +54,10 @@ pub enum Job {
     /// Delete previews that no catalog photo will ask for again (crash leftovers, old
     /// versions, photos removed by older app versions). Run once per catalog open.
     PurgeOrphanPreviews,
+    /// LrC "Save Metadata to File(s)": write XMP sidecars.
+    WriteXmp { photo_ids: Vec<i64>, quiet: bool },
+    /// LrC "Read Metadata from File(s)": replace catalog metadata with the sidecars'.
+    ReadXmp { photo_ids: Vec<i64> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -68,7 +72,9 @@ impl Job {
             Job::Sync { .. }
             | Job::CheckFolders { .. }
             | Job::PurgePreviews { .. }
-            | Job::PurgeOrphanPreviews => None,
+            | Job::PurgeOrphanPreviews
+            | Job::WriteXmp { .. }
+            | Job::ReadXmp { .. } => None,
             Job::Load { photo, size } => Some(JobKey::Load(photo.id, *size)),
             Job::BuildPreviews { photo } => Some(JobKey::Build(photo.id)),
         }
@@ -128,6 +134,16 @@ pub enum Event {
     /// Metadata (capture time, camera...) was read and stored for a photo.
     MetadataUpdated {
         photo_id: i64,
+    },
+    /// Sidecars were written (`read: false`) or read for these photos.
+    XmpDone {
+        read: bool,
+        /// Automatic write: only report failures.
+        quiet: bool,
+        done: Vec<i64>,
+        /// Photos without a sidecar (reading only).
+        skipped: usize,
+        failed: Vec<(i64, String)>,
     },
 }
 
@@ -351,6 +367,7 @@ fn to_catalog_metadata(m: imaging::Metadata) -> PhotoMetadata {
         capture_time: m.capture_time,
         width: m.width,
         height: m.height,
+        orientation: m.orientation,
     }
 }
 
@@ -430,6 +447,8 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                 shared.cache.remove(id);
             }
         }
+        Job::WriteXmp { photo_ids, quiet } => run_xmp(shared, cat, photo_ids, false, quiet),
+        Job::ReadXmp { photo_ids } => run_xmp(shared, cat, photo_ids, true, false),
         Job::PurgeOrphanPreviews => {
             let started = std::time::Instant::now();
             // Previews written after this moment are kept whatever the snapshot says.
@@ -496,6 +515,38 @@ fn sync_and_queue(shared: &Shared, cat: &mut Catalog, root: &std::path::Path) ->
     Ok(report)
 }
 
+/// Write (or read) XMP sidecars for `photo_ids` and report back to the UI.
+fn run_xmp(shared: &Shared, cat: &mut Catalog, photo_ids: Vec<i64>, read: bool, quiet: bool) {
+    let started = std::time::Instant::now();
+    // Older catalogs don't know files' own orientation; read it on demand.
+    let orientation_of: catalog::OrientationReader =
+        &|path, kind| imaging::read_metadata(path, source_kind(kind)).ok().and_then(|m| m.orientation);
+    let (mut done, mut skipped, mut failed) = (Vec::new(), 0, Vec::new());
+    for id in photo_ids {
+        let result = if read {
+            cat.read_xmp(id, orientation_of).map(|found| found.then_some(()))
+        } else {
+            cat.write_xmp(id, orientation_of).map(|_| Some(()))
+        };
+        match result {
+            Ok(Some(())) => done.push(id),
+            Ok(None) => skipped += 1,
+            Err(e) => {
+                log::warn!("{} metadata of photo {id}: {e:#}", if read { "reading" } else { "saving" });
+                failed.push((id, format!("{e:#}")));
+            }
+        }
+    }
+    log::info!(
+        "{} {} sidecars in {:.0?} ({skipped} without sidecar, {} failed)",
+        if read { "read" } else { "wrote" },
+        done.len(),
+        started.elapsed(),
+        failed.len()
+    );
+    let _ = shared.events.send(Event::XmpDone { read, quiet, done, skipped, failed });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,9 +568,11 @@ mod tests {
                 Job::Load { photo, .. } => format!("load{}", photo.id),
                 Job::Sync { .. } => "sync".into(),
                 Job::BuildPreviews { photo } => format!("build{}", photo.id),
-                Job::CheckFolders { .. } | Job::PurgePreviews { .. } | Job::PurgeOrphanPreviews => {
-                    "other".into()
-                }
+                Job::CheckFolders { .. }
+                | Job::PurgePreviews { .. }
+                | Job::PurgeOrphanPreviews
+                | Job::WriteXmp { .. }
+                | Job::ReadXmp { .. } => "other".into(),
             })
             .collect();
         assert_eq!(order, ["load3", "load2", "sync", "build1"]);

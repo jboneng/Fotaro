@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use catalog::{Catalog, Flag, Folder, PhotoMetadata, PhotoRow, Source};
+use catalog::{Catalog, Flag, Folder, IptcField, Keyword, PhotoMetadata, PhotoRow, Source};
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use imaging::{PreviewCache, PreviewSize};
@@ -44,6 +44,7 @@ pub enum MetadataPreset {
     #[default]
     Default,
     Exif,
+    Iptc,
 }
 
 /// The Loupe zoom level that Z / a click toggles to from Fit (Navigator header: FIT FILL 1:1 2:1 3:1).
@@ -138,6 +139,8 @@ pub struct UiState {
     pub zoom_level: ZoomLevel,
     /// Photo ▸ Auto Advance: rating, flagging and labelling move to the next photo.
     pub auto_advance: bool,
+    /// LrC Catalog Settings ▸ "Automatically write changes into XMP".
+    pub auto_write_xmp: bool,
 }
 
 impl Default for UiState {
@@ -159,6 +162,7 @@ impl Default for UiState {
             sort: catalog::SortOrder::default(),
             zoom_level: ZoomLevel::default(),
             auto_advance: false,
+            auto_write_xmp: false,
         }
     }
 }
@@ -199,6 +203,38 @@ pub enum Command {
     },
     /// Build standard previews for the selected photos.
     BuildPreviews,
+    /// Keywording panel: add keywords typed as text (LrC syntax) to the target photos.
+    AddKeywords(String),
+    /// Keyword List checkbox / Recent Keywords: tag (true) or untag the target photos.
+    SetKeyword {
+        id: i64,
+        on: bool,
+    },
+    /// The Keyword Tags text was edited: apply additions and removals.
+    SetKeywordTags {
+        before: String,
+        after: String,
+    },
+    SetIptc {
+        field: IptcField,
+        value: String,
+    },
+    CreateKeyword(Option<i64>),
+    ApplyCreateKeyword {
+        parent: Option<i64>,
+        name: String,
+    },
+    RenameKeyword(i64),
+    ApplyRenameKeyword {
+        id: i64,
+        name: String,
+    },
+    DeleteKeyword(i64),
+    ConfirmDeleteKeyword(i64),
+    /// Metadata ▸ Read Metadata from Files (asks first) for the target photos.
+    ReadMetadata,
+    ConfirmReadMetadata(Vec<i64>),
+    ToggleAutoWriteXmp,
     Reveal(PathBuf),
     SetLights(Lights),
     /// A not-yet-implemented feature; shows when it arrives.
@@ -209,6 +245,60 @@ pub enum Command {
 pub struct Toast {
     pub text: String,
     pub at: Instant,
+}
+
+/// A metadata field across several photos: LrC shows `< mixed >` when they differ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue {
+    Same(String),
+    Mixed,
+}
+
+/// What the Keywording and Metadata panels show for the target photos.
+#[derive(Debug, Clone, Default)]
+pub struct SelectionMeta {
+    key: (Vec<i64>, u64),
+    pub ids: Vec<i64>,
+    pub iptc: HashMap<IptcField, FieldValue>,
+    /// Keyword id -> how many of the target photos carry it.
+    pub keyword_counts: HashMap<i64, usize>,
+    /// Keywords on any target photo, sorted by name: (id, name, on all targets).
+    pub tags: Vec<(i64, String, bool)>,
+}
+
+impl SelectionMeta {
+    fn load(catalog: &Catalog, keywords: &[Keyword], ids: Vec<i64>) -> Result<Self> {
+        let mut iptc = HashMap::new();
+        let all: Vec<catalog::Iptc> = ids.iter().map(|&id| catalog.iptc(id)).collect::<Result<_>>()?;
+        for field in IptcField::ALL {
+            let mut values = all.iter().map(|i| i.get(field).unwrap_or_default());
+            let value = match values.next() {
+                Some(first) if values.all(|v| v == first) => FieldValue::Same(first.to_owned()),
+                Some(_) => FieldValue::Mixed,
+                None => FieldValue::Same(String::new()),
+            };
+            iptc.insert(field, value);
+        }
+        let keyword_counts = catalog.keyword_counts_for(&ids)?;
+        let mut tags: Vec<(i64, String, bool)> = keyword_counts
+            .iter()
+            .filter_map(|(&kw, &n)| {
+                let name = keywords.iter().find(|k| k.id == kw)?.name.clone();
+                Some((kw, name, n == ids.len()))
+            })
+            .collect();
+        tags.sort_by_key(|(_, name, _)| name.to_lowercase());
+        Ok(SelectionMeta { key: Default::default(), ids, iptc, keyword_counts, tags })
+    }
+
+    /// LrC's Keyword Tags text: `a, b, c*` (`*` = only on some of the photos).
+    pub fn tags_text(&self) -> String {
+        self.tags
+            .iter()
+            .map(|(_, n, all)| if *all { n.clone() } else { format!("{n}*") })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// An open catalog and everything derived from it.
@@ -235,6 +325,14 @@ pub struct Session {
     /// Full-resolution textures for 1:1 zoom (~100 MB each for 24 MP, so only a few).
     pub full: TextureCache,
     pub histograms: HashMap<i64, Box<Histogram>>,
+    /// The keyword tree, refreshed whenever keywords change.
+    pub keywords: Vec<Keyword>,
+    pub collapsed_keywords: HashSet<i64>,
+    /// Most recently used keywords first (LrC's "Recent Keywords" set).
+    pub recent_keywords: Vec<i64>,
+    /// Bumped on every metadata change, to refresh cached panel contents.
+    pub meta_gen: u64,
+    selection_meta: Option<SelectionMeta>,
     metadata: Option<(i64, Option<PhotoMetadata>)>,
     pub scroll_to_active: bool,
     reload_due: Option<Instant>,
@@ -265,12 +363,18 @@ impl Session {
             previews: TextureCache::new("preview", 12),
             full: TextureCache::new("full", 3),
             histograms: HashMap::new(),
+            keywords: Vec::new(),
+            collapsed_keywords: HashSet::new(),
+            recent_keywords: Vec::new(),
+            meta_gen: 0,
+            selection_meta: None,
             metadata: None,
             scroll_to_active: false,
             reload_due: None,
         };
         s.refresh_tree()?;
         s.reload_photos()?;
+        s.refresh_keywords()?;
         s.jobs.submit_normal(Job::PurgeOrphanPreviews);
         Ok(s)
     }
@@ -392,7 +496,49 @@ impl Session {
     }
 
     /// Photos a rating/flag/label applies to: all selected in Grid, else the active one.
-    fn targets(&self, view: View) -> Vec<i64> {
+    pub fn refresh_keywords(&mut self) -> Result<()> {
+        self.keywords = self.catalog.keywords()?;
+        let known: HashSet<i64> = self.keywords.iter().map(|k| k.id).collect();
+        self.recent_keywords.retain(|id| known.contains(id));
+        self.meta_gen += 1;
+        Ok(())
+    }
+
+    pub fn note_recent_keyword(&mut self, id: i64) {
+        self.recent_keywords.retain(|&k| k != id);
+        self.recent_keywords.insert(0, id);
+        self.recent_keywords.truncate(9);
+    }
+
+    /// Root-first names of a keyword, e.g. `["Places", "Norway"]`.
+    pub fn keyword_path(&self, id: i64) -> Vec<String> {
+        let mut path = Vec::new();
+        let mut next = Some(id);
+        while let Some(id) = next {
+            let Some(k) = self.keywords.iter().find(|k| k.id == id) else { break };
+            path.push(k.name.clone());
+            next = k.parent_id;
+        }
+        path.reverse();
+        path
+    }
+
+    /// IPTC values and keywords of the photos the panels edit (cached until the
+    /// selection or any metadata changes).
+    pub fn selection_meta(&mut self, view: View) -> &SelectionMeta {
+        let ids = self.targets(view);
+        let key = (ids.clone(), self.meta_gen);
+        if self.selection_meta.as_ref().is_none_or(|m| m.key != key) {
+            let meta = SelectionMeta::load(&self.catalog, &self.keywords, ids).unwrap_or_else(|e| {
+                log::warn!("reading selection metadata: {e:#}");
+                SelectionMeta::default()
+            });
+            self.selection_meta = Some(SelectionMeta { key, ..meta });
+        }
+        self.selection_meta.as_ref().expect("just set")
+    }
+
+    pub fn targets(&self, view: View) -> Vec<i64> {
         if view == View::Grid && self.selected.len() > 1 {
             let mut ids: Vec<i64> = self.selected.iter().copied().collect();
             ids.sort_by_key(|id| self.index_of.get(id));
@@ -454,6 +600,30 @@ impl Session {
                 }
                 Event::ImageFailed { photo_id, size } => self.cache_for(size).mark_failed(photo_id),
                 Event::FoldersChecked { missing } => self.missing_folders = missing,
+                Event::XmpDone { read, quiet, done, skipped, failed } => {
+                    if read {
+                        // Ratings, labels, rotation, keywords... may all have changed.
+                        if let Err(e) = self.refresh_keywords().and_then(|()| self.reload_photos()) {
+                            messages.push(format!("Catalog error: {e:#}"));
+                        }
+                    } else {
+                        self.update_rows(&done, |p| p.metadata_dirty = false);
+                    }
+                    self.meta_gen += 1;
+                    let verb = if read { "Read metadata from" } else { "Saved metadata to" };
+                    let n = done.len();
+                    let mut msg = format!("{verb} {n} file{}", if n == 1 { "" } else { "s" });
+                    if skipped > 0 {
+                        msg += &format!(", {skipped} without a sidecar");
+                    }
+                    if let Some((_, first)) = failed.first() {
+                        msg += &format!(", {} failed: {first}", failed.len());
+                    }
+                    // Quiet when auto-writing succeeds; LrC doesn't announce those either.
+                    if !quiet || !failed.is_empty() {
+                        messages.push(msg);
+                    }
+                }
                 Event::MetadataUpdated { photo_id } => {
                     if self.active == Some(photo_id) {
                         self.metadata = None;
@@ -487,6 +657,8 @@ pub struct PhotoLibraryApp {
     pub lights: Lights,
     pub fullscreen: bool,
     pub zoom: Zoom,
+    /// Ctrl+K: put the cursor in the Keywording panel's entry field next frame.
+    pub focus_keywording: bool,
     pub show_shortcuts: bool,
     pub toast: Option<Toast>,
     pub error: Option<String>,
@@ -516,6 +688,7 @@ impl PhotoLibraryApp {
             lights: Lights::On,
             fullscreen: false,
             zoom: Zoom::default(),
+            focus_keywording: false,
             show_shortcuts: false,
             toast: None,
             error: None,
@@ -603,6 +776,7 @@ impl PhotoLibraryApp {
             s.move_active(1);
         }
         let n = ids.len();
+        self.metadata_changed(&ids);
         self.notify(describe(n));
     }
 
@@ -787,14 +961,21 @@ impl PhotoLibraryApp {
             Action::SelectNone => self.with_session(|s| s.selected.clear()),
             Action::Import => self.add_folder(),
             Action::ShowShortcuts => self.show_shortcuts ^= true,
+            Action::SaveMetadata => self.save_metadata(),
+            Action::Keywording => {
+                if self.session.as_ref().and_then(|s| s.active).is_some() {
+                    self.ui.show_right = true;
+                    self.ui.right.set_open("Keywording", true, crate::ui::sidebars::RIGHT);
+                    self.focus_keywording = true;
+                }
+            }
             // Planned actions are handled above via their Status.
             Action::CompareView
             | Action::SurveyView
             | Action::QuickCollection
             | Action::Stack
             | Action::Unstack
-            | Action::EditIn
-            | Action::Keywording => {}
+            | Action::EditIn => {}
         }
     }
 
@@ -816,9 +997,104 @@ impl PhotoLibraryApp {
             }
             s.photos[i].rotation = rotation;
         }
+        self.metadata_changed(&ids);
         let dir = if quarter_turns == 1 { "Right" } else { "Left" };
         let n = ids.len();
         self.notify(if n > 1 { format!("Rotate {dir} for {n} Photos") } else { format!("Rotate {dir}") });
+    }
+
+    /// After any catalog metadata edit: flag the photos as needing saving (the grid
+    /// badge), refresh cached panel contents, and write sidecars if auto-write is on.
+    fn metadata_changed(&mut self, ids: &[i64]) {
+        let Some(s) = &mut self.session else { return };
+        s.meta_gen += 1;
+        s.update_rows(ids, |p| p.metadata_dirty = true);
+        if self.ui.auto_write_xmp && !ids.is_empty() {
+            s.jobs.submit_normal(Job::WriteXmp { photo_ids: ids.to_vec(), quiet: true });
+        }
+    }
+
+    /// LrC Metadata ▸ Save Metadata to Files (Ctrl+S) for the target photos.
+    fn save_metadata(&mut self) {
+        let Some(s) = &self.session else { return };
+        let ids: Vec<i64> = s
+            .targets(self.view)
+            .into_iter()
+            .filter(|id| s.index_of.get(id).is_some_and(|&i| !s.photos[i].missing))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len();
+        s.jobs.submit_normal(Job::WriteXmp { photo_ids: ids, quiet: false });
+        self.notify(if n == 1 {
+            "Saving metadata".to_string()
+        } else {
+            format!("Saving metadata for {n} photos")
+        });
+    }
+
+    /// Tag (or untag) the target photos with keyword `id`.
+    fn set_keyword(&mut self, id: i64, on: bool) {
+        let view = self.view;
+        let Some(s) = &mut self.session else { return };
+        let ids = s.targets(view);
+        let result = if on { s.catalog.add_keyword(&ids, id) } else { s.catalog.remove_keyword(&ids, id) };
+        if let Err(e) = result.and_then(|()| s.refresh_keywords()) {
+            self.error = Some(format!("{e:#}"));
+            return;
+        }
+        if on {
+            s.note_recent_keyword(id);
+        }
+        self.metadata_changed(&ids);
+    }
+
+    /// Add keywords typed in LrC syntax (`a, b < parent`) to the target photos.
+    fn add_keywords(&mut self, text: &str) {
+        let paths = catalog::parse_keyword_input(text);
+        let Some(s) = &mut self.session else { return };
+        let mut ids = Vec::new();
+        for path in &paths {
+            match s.catalog.ensure_keyword(path) {
+                Ok(id) => ids.push(id),
+                Err(e) => {
+                    self.error = Some(format!("{e:#}"));
+                    return;
+                }
+            }
+        }
+        if let Err(e) = s.refresh_keywords() {
+            self.error = Some(format!("{e:#}"));
+        }
+        for id in ids {
+            self.set_keyword(id, true);
+        }
+    }
+
+    /// The Keyword Tags text was edited: removed names are untagged, new ones added.
+    /// Names marked `*` (on only some photos) are left as they are.
+    fn set_keyword_tags(&mut self, before: &str, after: &str) {
+        let names = |s: &str| -> Vec<String> {
+            s.split([',', ';']).map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()).collect()
+        };
+        let (before, after) = (names(before), names(after));
+        let Some(s) = &mut self.session else { return };
+        let tags = s.selection_meta(self.view).tags.clone();
+        let mut removed = Vec::new();
+        for name in before.iter().filter(|n| !after.contains(n)) {
+            let plain = name.trim_end_matches('*');
+            if let Some((id, ..)) = tags.iter().find(|(_, n, _)| n == plain) {
+                removed.push(*id);
+            }
+        }
+        let added: Vec<String> = after.into_iter().filter(|n| !before.contains(n)).collect();
+        for id in removed {
+            self.set_keyword(id, false);
+        }
+        if !added.is_empty() {
+            self.add_keywords(&added.join(", "));
+        }
     }
 
     fn with_session(&mut self, f: impl FnOnce(&mut Session)) {
@@ -953,6 +1229,108 @@ impl PhotoLibraryApp {
                 s.catalog.rename_folder(id, &name)?;
                 Ok(format!("Renamed folder to {}", name.trim()))
             }),
+            Command::AddKeywords(text) => self.add_keywords(&text),
+            Command::SetKeyword { id, on } => self.set_keyword(id, on),
+            Command::SetKeywordTags { before, after } => self.set_keyword_tags(&before, &after),
+            Command::SetIptc { field, value } => {
+                let view = self.view;
+                let Some(s) = &mut self.session else { return };
+                let ids = s.targets(view);
+                match s.catalog.set_iptc(&ids, field, &value) {
+                    Ok(()) => self.metadata_changed(&ids),
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Command::CreateKeyword(parent) => {
+                self.dialog = Some(Dialog::CreateKeyword { parent, name: String::new() })
+            }
+            Command::ApplyCreateKeyword { parent, name } => {
+                let Some(s) = &mut self.session else { return };
+                match s.catalog.create_keyword(parent, &name).and_then(|_| s.refresh_keywords()) {
+                    Ok(()) => {
+                        if let Some(p) = parent {
+                            s.collapsed_keywords.remove(&p);
+                        }
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Command::RenameKeyword(id) => {
+                let Some(s) = &self.session else { return };
+                if let Some(k) = s.keywords.iter().find(|k| k.id == id) {
+                    self.dialog = Some(Dialog::RenameKeyword { id, name: k.name.clone() });
+                }
+            }
+            Command::ApplyRenameKeyword { id, name } => {
+                let Some(s) = &mut self.session else { return };
+                let result = s
+                    .catalog
+                    .rename_keyword(id, &name)
+                    .and_then(|()| s.refresh_keywords())
+                    .and_then(|()| s.catalog.dirty_photo_ids());
+                match result {
+                    Ok(dirty) => self.metadata_changed(&dirty),
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Command::DeleteKeyword(id) => {
+                let Some(s) = &self.session else { return };
+                if let Some(k) = s.keywords.iter().find(|k| k.id == id) {
+                    // Count photos with this keyword or any keyword below it.
+                    let mut below = vec![id];
+                    let mut i = 0;
+                    while i < below.len() {
+                        let parent = below[i];
+                        below.extend(s.keywords.iter().filter(|k| k.parent_id == Some(parent)).map(|k| k.id));
+                        i += 1;
+                    }
+                    let photos = s
+                        .keywords
+                        .iter()
+                        .filter(|k| below.contains(&k.id))
+                        .map(|k| k.photo_count as usize)
+                        .sum();
+                    self.dialog = Some(Dialog::ConfirmDeleteKeyword { id, name: k.name.clone(), photos });
+                }
+            }
+            Command::ConfirmDeleteKeyword(id) => {
+                let Some(s) = &mut self.session else { return };
+                match s.catalog.delete_keyword(id).and_then(|ids| s.refresh_keywords().map(|()| ids)) {
+                    Ok(ids) => self.metadata_changed(&ids),
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Command::ReadMetadata => {
+                let Some(s) = &self.session else { return };
+                let ids = s.targets(self.view);
+                if !ids.is_empty() {
+                    self.dialog = Some(Dialog::ConfirmReadMetadata { ids });
+                }
+            }
+            Command::ConfirmReadMetadata(ids) => {
+                if let Some(s) = &self.session {
+                    s.jobs.submit_normal(Job::ReadXmp { photo_ids: ids });
+                }
+            }
+            Command::ToggleAutoWriteXmp => {
+                self.ui.auto_write_xmp ^= true;
+                if self.ui.auto_write_xmp {
+                    // Like LrC, turning it on writes everything that is waiting.
+                    if let Some(s) = &self.session {
+                        match s.catalog.dirty_photo_ids() {
+                            Ok(ids) if !ids.is_empty() => {
+                                let n = ids.len();
+                                s.jobs.submit_normal(Job::WriteXmp { photo_ids: ids, quiet: false });
+                                self.notify(format!("Writing metadata for {n} photos to XMP"));
+                            }
+                            Ok(_) => self.notify("Changes will be written to XMP automatically"),
+                            Err(e) => self.error = Some(format!("{e:#}")),
+                        }
+                    }
+                } else {
+                    self.notify("Metadata changes stay in the catalog until saved (Ctrl+S)");
+                }
+            }
             Command::BuildPreviews => {
                 if let Some(s) = &self.session {
                     let photos: Vec<PhotoRef> = s
@@ -1077,6 +1455,10 @@ pub enum Dialog {
     ConfirmRemoveFolder { id: i64, name: String, photos: i64 },
     CreateFolder { parent: i64, name: String },
     RenameFolder { id: i64, name: String },
+    CreateKeyword { parent: Option<i64>, name: String },
+    RenameKeyword { id: i64, name: String },
+    ConfirmDeleteKeyword { id: i64, name: String, photos: usize },
+    ConfirmReadMetadata { ids: Vec<i64> },
 }
 
 pub fn folder_name(path: &Path) -> String {

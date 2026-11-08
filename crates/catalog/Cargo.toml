@@ -12,6 +12,7 @@ walkdir.workspace = true
 rusqlite.workspace = true
 dunce.workspace = true
 serde.workspace = true
+xmp.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

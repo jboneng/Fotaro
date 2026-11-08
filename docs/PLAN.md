@@ -170,3 +170,26 @@ building; revisit with 1:1 previews in Phase 2.
 - [x] Auto Advance: Photo ▸ Auto Advance, or Caps Lock (Windows, macOS; Linux has the menu only).
 - [ ] Later: rotate buttons on grid cells (hover), Fill/ratio dropdown with more levels, tiled
       rendering for images larger than the GPU texture limit (currently scaled to fit the limit).
+
+## Progress (Phase 3)
+- [x] `crates/xmp`: reads and updates XMP in place, keeping everything it doesn't manage (LrC develop
+      settings, darktable history, xpacket wrappers, unknown namespaces); namespace-aware (any prefix).
+      Managed: xmp:Rating, xmp:Label, tiff:Orientation, dc:subject + lr:hierarchicalSubject,
+      dc:title/description/creator/rights, and our own pick flag (LrC keeps flags in its catalog only).
+- [x] Sidecar naming: RAW `IMG.xmp` (LrC/Bridge/Capture One; darktable reads it on import), other
+      files `IMG.tif.xmp` (darktable/digiKam), so RAW+JPEG pairs never share a sidecar. Originals
+      are never modified (LrC would embed metadata in JPEG/TIFF/DNG; we don't).
+- [x] Schema v2: IPTC fields, `metadata_dirty`, `xmp_mtime_ms`, file orientation, unique root keywords.
+- [x] Save Metadata to Files (Ctrl+S), Read Metadata from Files (confirmed), Automatically Write
+      Changes into XMP (Metadata menu; off by default as in LrC). "Needs saving" badge on grid cells.
+      Rotation is written as the displayed orientation (file orientation + catalog rotation).
+- [x] Adding photos reads existing sidecars (rating, label, keywords, IPTC, rotation); a broken
+      sidecar is logged and skipped, never overwritten.
+- [x] Keywording panel: Keyword Tags (editable, `*` = on some photos), entry field with LrC syntax
+      (`Child < Parent`, also `Parent > Child`), suggestions while typing, Recent Keywords; Ctrl+K.
+- [x] Keyword List: tree, filter, tri-state checkboxes for the selection, counts, create inside /
+      edit / delete (with confirmation).
+- [x] Metadata panel presets Default / EXIF / IPTC with editable Title, Caption, Creator, Copyright
+      (applied to all target photos; `< mixed >` when they differ).
+- [ ] Later: "metadata changed on disk" conflict badge (xmp_mtime_ms is tracked for it), keyword
+      synonyms and export flags, more IPTC fields (location, headline), GPS.

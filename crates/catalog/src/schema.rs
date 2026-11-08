@@ -84,6 +84,22 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (collection_id, photo_id)
     );
     "#,
+    // v2: IPTC text fields, XMP sidecar bookkeeping, the file's own orientation,
+    // and unique top-level keywords (UNIQUE(parent_id, name) ignores NULL parents).
+    r#"
+    ALTER TABLE photos ADD COLUMN title     TEXT;
+    ALTER TABLE photos ADD COLUMN caption   TEXT;
+    ALTER TABLE photos ADD COLUMN creator   TEXT;
+    ALTER TABLE photos ADD COLUMN copyright TEXT;
+    -- Changed in the catalog since last written to the sidecar (LrC's "needs saving").
+    ALTER TABLE photos ADD COLUMN metadata_dirty INTEGER NOT NULL DEFAULT 0;
+    -- Sidecar modification time when we last read or wrote it (ms since epoch).
+    ALTER TABLE photos ADD COLUMN xmp_mtime_ms INTEGER;
+    -- The file's own orientation in clockwise quarter turns, to compose tiff:Orientation.
+    ALTER TABLE exif ADD COLUMN orientation INTEGER;
+    CREATE UNIQUE INDEX keywords_root_name ON keywords(name COLLATE NOCASE) WHERE parent_id IS NULL;
+    CREATE INDEX photo_keywords_keyword ON photo_keywords(keyword_id);
+    "#,
 ];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;

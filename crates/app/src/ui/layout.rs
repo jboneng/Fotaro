@@ -143,8 +143,19 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         });
         ui.menu_button("Metadata", |ui| {
             menu_action(ui, app, "Add Keywords…", Action::Keywording);
-            menu_cmd(ui, app, "Read Metadata from Files", false, Command::Planned("", ""));
-            menu_cmd(ui, app, "Save Metadata to Files", false, Command::Planned("", ""));
+            ui.separator();
+            menu_action(ui, app, "Save Metadata to Files", Action::SaveMetadata);
+            menu_cmd(ui, app, "Read Metadata from Files", has_catalog, Command::ReadMetadata);
+            ui.separator();
+            let auto = app.ui.auto_write_xmp;
+            if ui
+                .add(egui::Button::new("Automatically Write Changes into XMP").selected(auto))
+                .on_hover_text("Write ratings, labels, keywords and IPTC to XMP sidecars as you change them")
+                .clicked()
+            {
+                app.run(Command::ToggleAutoWriteXmp);
+                ui.close();
+            }
         });
         ui.menu_button("View", |ui| {
             menu_toggle(ui, app, "Grid", app.view == View::Grid, Action::GridView);
@@ -494,6 +505,40 @@ pub(super) fn timed<R>(name: &str, f: impl FnOnce() -> R) -> R {
 }
 
 /// Modal dialogs: Remove folder confirmation, Create Folder and Rename prompts.
+/// A keyword name field with validation and an OK button. Returns the name to apply.
+/// `Ok(Some(name))` to apply, `Err(())` on Cancel.
+fn keyword_name_prompt(ui: &mut egui::Ui, name: &mut String, ok_label: &str) -> Result<Option<String>, ()> {
+    ui.label("Keyword Name:");
+    let resp = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+    if !resp.has_focus() && !resp.lost_focus() {
+        resp.request_focus();
+    }
+    let trimmed = name.trim();
+    let error = if trimmed.is_empty() {
+        Some("")
+    } else if trimmed.contains([',', ';', '|', '<', '>']) {
+        Some("Keyword names cannot contain , ; | < or >")
+    } else {
+        None
+    };
+    if let Some(e) = error.filter(|e| !e.is_empty()) {
+        ui.label(RichText::new(e).color(theme::MISSING).size(11.0));
+    }
+    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    ui.add_space(6.0);
+    let mut result = Ok(None);
+    ui.horizontal(|ui| {
+        let ok = ui.add_enabled(error.is_none(), egui::Button::new(ok_label));
+        if (ok.clicked() || enter) && error.is_none() {
+            result = Ok(Some(trimmed.to_owned()));
+        }
+        if ui.button("Cancel").clicked() {
+            result = Err(());
+        }
+    });
+    result
+}
+
 fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     let Some(dialog) = app.dialog.as_mut() else { return };
     let mut close = false;
@@ -503,6 +548,10 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
         Dialog::ConfirmRemoveFolder { .. } => "Remove Folder",
         Dialog::CreateFolder { .. } => "Create Folder",
         Dialog::RenameFolder { .. } => "Rename Folder",
+        Dialog::CreateKeyword { .. } => "Create Keyword Tag",
+        Dialog::RenameKeyword { .. } => "Edit Keyword Tag",
+        Dialog::ConfirmDeleteKeyword { .. } => "Delete Keyword Tag",
+        Dialog::ConfirmReadMetadata { .. } => "Read Metadata from Files",
     };
     egui::Window::new(title)
         .collapsible(false)
@@ -558,6 +607,62 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
                             } else {
                                 Command::ApplyCreateFolder { parent: *parent, name }
                             });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::CreateKeyword { parent, name } => match keyword_name_prompt(ui, name, "Create") {
+                    Ok(Some(name)) => run = Some(Command::ApplyCreateKeyword { parent: *parent, name }),
+                    Ok(None) => {}
+                    Err(()) => close = true,
+                },
+                Dialog::RenameKeyword { id, name } => match keyword_name_prompt(ui, name, "Save") {
+                    Ok(Some(name)) => run = Some(Command::ApplyRenameKeyword { id: *id, name }),
+                    Ok(None) => {}
+                    Err(()) => close = true,
+                },
+                Dialog::ConfirmDeleteKeyword { id, name, photos } => {
+                    ui.label(RichText::new(format!("Delete the keyword \"{name}\"?")).strong());
+                    ui.add_space(4.0);
+                    ui.label(format!(
+                        "It and any keywords inside it will be removed from {photos} photo{}.",
+                        if *photos == 1 { "" } else { "s" }
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            run = Some(Command::ConfirmDeleteKeyword(*id));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::ConfirmReadMetadata { ids } => {
+                    let n = ids.len();
+                    ui.label(
+                        RichText::new(format!(
+                            "Read metadata from {}?",
+                            if n == 1 {
+                                "the selected photo's file".to_string()
+                            } else {
+                                format!("{n} files")
+                            }
+                        ))
+                        .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        "Ratings, labels, rotation, keywords, title, caption, creator and copyright in the \
+                         catalog will be replaced by the values in the XMP sidecars.\nPhotos without a \
+                         sidecar are left unchanged.",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Read").clicked() {
+                            run = Some(Command::ConfirmReadMetadata(ids.clone()));
                         }
                         if ui.button("Cancel").clicked() {
                             close = true;

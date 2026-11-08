@@ -28,6 +28,9 @@ pub struct Metadata {
     /// Final (oriented) pixel dimensions of the full image.
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// The file's own orientation in clockwise quarter turns (EXIF / RAW flip).
+    /// Mirrored EXIF orientations are not represented.
+    pub orientation: Option<u8>,
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -58,6 +61,12 @@ pub(crate) fn from_raw_info(info: &libraw::RawInfo) -> Metadata {
         }),
         width: (w > 0).then_some(w),
         height: (h > 0).then_some(h),
+        orientation: Some(match info.orientation {
+            libraw::Orientation::Normal => 0,
+            libraw::Orientation::Rotate90Cw => 1,
+            libraw::Orientation::Rotate180 => 2,
+            libraw::Orientation::Rotate90Ccw => 3,
+        }),
     }
 }
 
@@ -124,5 +133,11 @@ pub(crate) fn read_exif(path: &Path) -> Result<Metadata> {
         capture_time,
         width: None,
         height: None,
+        orientation: Some(match field(Tag::Orientation).and_then(|f| f.value.get_uint(0)) {
+            Some(6) => 1,
+            Some(3) => 2,
+            Some(8) => 3,
+            _ => 0,
+        }),
     })
 }

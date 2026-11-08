@@ -94,7 +94,8 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `B` | Add to / remove from Quick Collection | planned (Phase 4) |
 | `Ctrl+G` | Group into stack | planned (Phase 4) |
 | `Ctrl+Shift+G` | Unstack | planned (Phase 4) |
-| `Ctrl+K` | Add keywords | planned (Phase 3) |
+| `Ctrl+K` | Add keywords (Keywording panel) | ✅ |
+| `Ctrl+S` | Save metadata to files (XMP sidecars) | ✅ |
 | `Ctrl+E` | Edit in default external editor | planned (Phase 7) |
 | `Ctrl+/` | Show keyboard shortcuts | ✅ |
 
