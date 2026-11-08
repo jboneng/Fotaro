@@ -141,6 +141,7 @@ pub struct UiState {
     pub auto_advance: bool,
     /// LrC Catalog Settings ▸ "Automatically write changes into XMP".
     pub auto_write_xmp: bool,
+    pub filter: crate::filter::FilterBar,
 }
 
 impl Default for UiState {
@@ -163,6 +164,7 @@ impl Default for UiState {
             zoom_level: ZoomLevel::default(),
             auto_advance: false,
             auto_write_xmp: false,
+            filter: crate::filter::FilterBar::default(),
         }
     }
 }
@@ -235,6 +237,39 @@ pub enum Command {
     ReadMetadata,
     ConfirmReadMetadata(Vec<i64>),
     ToggleAutoWriteXmp,
+    /// Open the dialog to create a collection, smart collection or set (inside `parent`).
+    CreateCollection {
+        parent: Option<i64>,
+        kind: catalog::CollectionKind,
+    },
+    ApplyCreateCollection {
+        parent: Option<i64>,
+        kind: catalog::CollectionKind,
+        name: String,
+        include_selected: bool,
+        rules: Option<catalog::SmartRules>,
+    },
+    RenameCollection(i64),
+    ApplyRenameCollection {
+        id: i64,
+        name: String,
+    },
+    DeleteCollection(i64),
+    ConfirmDeleteCollection(i64),
+    EditSmartCollection(i64),
+    ApplySmartCollection {
+        id: i64,
+        name: String,
+        rules: catalog::SmartRules,
+    },
+    /// Add photos (`None`: the target photos) to a regular collection.
+    AddToCollection {
+        id: i64,
+        photos: Option<Vec<i64>>,
+    },
+    ToggleSeparateRawJpeg,
+    /// Photos dropped on the Quick Collection.
+    QuickCollectionAdd(Vec<i64>),
     Reveal(PathBuf),
     SetLights(Lights),
     /// A not-yet-implemented feature; shows when it arrives.
@@ -245,6 +280,13 @@ pub enum Command {
 pub struct Toast {
     pub text: String,
     pub at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FacetKey {
+    source: Source,
+    bar: crate::filter::FilterBar,
+    meta_gen: u64,
 }
 
 /// A metadata field across several photos: LrC shows `< mixed >` when they differ.
@@ -313,6 +355,15 @@ pub struct Session {
     pub collapsed_folders: HashSet<i64>,
     pub free_space: crate::platform::FreeSpaceCache,
     pub counts: (i64, i64),
+    pub quick_count: i64,
+    /// The Library Filter in effect for `photos`.
+    pub filter: catalog::Criterion,
+    pub collections: Vec<catalog::Collection>,
+    pub collapsed_collections: HashSet<i64>,
+    /// `meta_gen` when `collections` (and their counts) were last read.
+    collections_gen: Option<u64>,
+    /// Metadata filter columns, cached for (source, filter bar, meta_gen).
+    pub facets: Option<(FacetKey, Vec<Vec<catalog::Facet>>)>,
     pub source: Source,
     pub sort: catalog::SortOrder,
     pub photos: Vec<PhotoRow>,
@@ -352,6 +403,12 @@ impl Session {
             collapsed_folders: HashSet::new(),
             free_space: Default::default(),
             counts: (0, 0),
+            quick_count: 0,
+            filter: catalog::Criterion::AllOf(vec![]),
+            collections: Vec::new(),
+            collapsed_collections: HashSet::new(),
+            collections_gen: None,
+            facets: None,
             source: Source::AllPhotographs,
             sort,
             photos: Vec::new(),
@@ -375,6 +432,7 @@ impl Session {
         s.refresh_tree()?;
         s.reload_photos()?;
         s.refresh_keywords()?;
+        s.collections_fresh();
         s.jobs.submit_normal(Job::PurgeOrphanPreviews);
         Ok(s)
     }
@@ -385,20 +443,25 @@ impl Session {
         let folders = self.folders.iter().map(|f| (f.id, f.path.clone())).collect();
         self.jobs.submit_normal(Job::CheckFolders { folders });
         self.counts = self.catalog.source_counts()?;
+        self.quick_count = self.catalog.quick_collection_count()?;
         Ok(())
     }
 
     /// Reload the grid's photos, keeping selection for photos that are still there.
     pub fn reload_photos(&mut self) -> Result<()> {
         let started = Instant::now();
-        self.photos = self.catalog.photos_sorted(self.source, self.sort)?;
+        let old_index = self.active_index();
+        self.photos = self.catalog.photos_filtered(self.source, self.sort, &self.filter)?;
         if started.elapsed() > Duration::from_millis(50) {
             log::warn!("slow reload: {} photos in {:.0?}", self.photos.len(), started.elapsed());
         }
         self.index_of = self.photos.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
         self.selected.retain(|id| self.index_of.contains_key(id));
         if self.active.is_none_or(|id| !self.index_of.contains_key(&id)) {
-            self.active = self.photos.first().map(|p| p.id);
+            // The active photo left the view (filtered out, stacked away): stay at the
+            // same place in the grid rather than jumping to the start.
+            let i = old_index.unwrap_or(0).min(self.photos.len().saturating_sub(1));
+            self.active = self.photos.get(i).map(|p| p.id);
             self.selected.extend(self.active);
         }
         self.metadata = None;
@@ -445,6 +508,12 @@ impl Session {
         match self.source {
             Source::AllPhotographs => "Catalog : All Photographs".into(),
             Source::PreviousImport => "Catalog : Previous Import".into(),
+            Source::QuickCollection => "Catalog : Quick Collection".into(),
+            Source::Collection { id } => {
+                let name =
+                    self.collections.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_default();
+                format!("Collection : {name}")
+            }
             Source::Folder { id, .. } => {
                 let name = self
                     .folders
@@ -482,6 +551,15 @@ impl Session {
         self.active = Some(id);
     }
 
+    /// Shift+arrow: move to a neighbour and select everything from the anchor to it.
+    pub fn extend_selection(&mut self, delta: isize) {
+        let Some(i) = self.active_index() else { return self.move_active(delta) };
+        let j = (i as isize + delta).clamp(0, self.photos.len() as isize - 1) as usize;
+        let id = self.photos[j].id;
+        self.click(id, egui::Modifiers::SHIFT);
+        self.scroll_to_active = true;
+    }
+
     pub fn move_active(&mut self, delta: isize) {
         let Some(i) = self.active_index() else {
             if let Some(p) = self.photos.first() {
@@ -496,6 +574,54 @@ impl Session {
     }
 
     /// Photos a rating/flag/label applies to: all selected in Grid, else the active one.
+    /// Collections with fresh counts (smart collection counts follow every edit).
+    pub fn collections_fresh(&mut self) -> &[catalog::Collection] {
+        if self.collections_gen != Some(self.meta_gen) {
+            match self.catalog.collections() {
+                Ok(c) => self.collections = c,
+                Err(e) => log::warn!("reading collections: {e:#}"),
+            }
+            self.quick_count = self.catalog.quick_collection_count().unwrap_or(self.quick_count);
+            self.collections_gen = Some(self.meta_gen);
+        }
+        &self.collections
+    }
+
+    /// Something about collections changed: re-read them, and the grid if it shows one.
+    pub fn collections_changed(&mut self) -> Result<()> {
+        self.meta_gen += 1;
+        self.collections_gen = None;
+        self.collections_fresh();
+        if matches!(self.source, Source::Collection { .. } | Source::QuickCollection) {
+            self.reload_photos()?;
+        }
+        Ok(())
+    }
+
+    /// Values of each Metadata filter column, computed only when the filter, source or
+    /// metadata change.
+    pub fn facets(&mut self, bar: &crate::filter::FilterBar) -> &[Vec<catalog::Facet>] {
+        let key = FacetKey { source: self.source, bar: bar.clone(), meta_gen: self.meta_gen };
+        if self.facets.as_ref().is_none_or(|(k, _)| *k != key) {
+            let started = Instant::now();
+            let columns = (0..crate::filter::COLUMNS)
+                .map(|i| {
+                    self.catalog.facets(self.source, &bar.criterion_before(i), bar.columns[i]).unwrap_or_else(
+                        |e| {
+                            log::warn!("metadata filter column: {e:#}");
+                            Vec::new()
+                        },
+                    )
+                })
+                .collect();
+            if started.elapsed() > Duration::from_millis(50) {
+                log::warn!("slow metadata filter columns: {:.0?}", started.elapsed());
+            }
+            self.facets = Some((key, columns));
+        }
+        &self.facets.as_ref().expect("just set").1
+    }
+
     pub fn refresh_keywords(&mut self) -> Result<()> {
         self.keywords = self.catalog.keywords()?;
         let known: HashSet<i64> = self.keywords.iter().map(|k| k.id).collect();
@@ -659,6 +785,8 @@ pub struct PhotoLibraryApp {
     pub zoom: Zoom,
     /// Ctrl+K: put the cursor in the Keywording panel's entry field next frame.
     pub focus_keywording: bool,
+    /// Ctrl+F: put the cursor in the Text filter next frame.
+    pub focus_find: bool,
     pub show_shortcuts: bool,
     pub toast: Option<Toast>,
     pub error: Option<String>,
@@ -689,6 +817,7 @@ impl PhotoLibraryApp {
             fullscreen: false,
             zoom: Zoom::default(),
             focus_keywording: false,
+            focus_find: false,
             show_shortcuts: false,
             toast: None,
             error: None,
@@ -939,6 +1068,16 @@ impl PhotoLibraryApp {
                 self.ui.auto_advance ^= true;
                 self.notify(if self.ui.auto_advance { "Auto Advance on" } else { "Auto Advance off" });
             }
+            Action::ExtendSelection(step) => {
+                // Rows: isize::MAX / MIN stand for "a row down / up" in the Grid.
+                let cols = if self.view == View::Grid { self.grid_cols.max(1) as isize } else { 1 };
+                let delta = match step {
+                    isize::MAX => cols,
+                    isize::MIN => -cols,
+                    d => d,
+                };
+                self.with_session(|s| s.extend_selection(delta));
+            }
             Action::Next => self.with_session(|s| s.move_active(1)),
             Action::Previous => self.with_session(|s| s.move_active(-1)),
             Action::Up | Action::Down => {
@@ -962,6 +1101,82 @@ impl PhotoLibraryApp {
             Action::Import => self.add_folder(),
             Action::ShowShortcuts => self.show_shortcuts ^= true,
             Action::SaveMetadata => self.save_metadata(),
+            Action::QuickCollection => {
+                let view = self.view;
+                let Some(s) = &mut self.session else { return };
+                let ids = s.targets(view);
+                if ids.is_empty() {
+                    return;
+                }
+                match s.catalog.toggle_quick_collection(&ids) {
+                    Ok(added) => {
+                        s.update_rows(&ids, |p| p.in_quick_collection = added);
+                        if let Err(e) = s.collections_changed() {
+                            self.error = Some(format!("{e:#}"));
+                        }
+                        let what =
+                            if added { "Added to Quick Collection" } else { "Removed from Quick Collection" };
+                        self.notify(what);
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Action::NewCollection => self.execute(
+                ctx,
+                Command::CreateCollection { parent: None, kind: catalog::CollectionKind::Collection },
+            ),
+            Action::ShowQuickCollection => self.execute(ctx, Command::SetSource(Source::QuickCollection)),
+            Action::ClearQuickCollection => {
+                let Some(s) = &mut self.session else { return };
+                let result = s.catalog.clear_quick_collection().and_then(|()| {
+                    for p in &mut s.photos {
+                        p.in_quick_collection = false;
+                    }
+                    s.collections_changed()
+                });
+                match result {
+                    Ok(()) => self.notify("Quick Collection cleared"),
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Action::Stack | Action::Unstack | Action::ToggleStack | Action::MoveToTopOfStack => {
+                self.stacking(action)
+            }
+            Action::ToggleFilters => {
+                self.ui.filter.enabled ^= true;
+                self.notify(if self.ui.filter.enabled { "Filters on" } else { "Filters off" });
+            }
+            Action::Find => {
+                self.ui.show_filter_bar = true;
+                self.ui.filter.enabled = true;
+                self.ui.filter.text_on = true;
+                self.focus_find = true;
+                self.view = View::Grid;
+            }
+            Action::RemoveFromCollection => {
+                let view = self.view;
+                let Some(s) = &mut self.session else { return };
+                let Source::Collection { id } = s.source else {
+                    self.notify("Delete removes photos from a collection; removing photos from the catalog arrives later");
+                    return;
+                };
+                if s.collections.iter().any(|c| c.id == id && c.kind != catalog::CollectionKind::Collection) {
+                    self.notify("Smart collections choose their photos from their rules");
+                    return;
+                }
+                let ids = s.targets(view);
+                match s
+                    .catalog
+                    .remove_from_collection(id, &ids)
+                    .and_then(|n| s.collections_changed().map(|()| n))
+                {
+                    Ok(n) => self.notify(format!(
+                        "Removed {n} photo{} from the collection",
+                        if n == 1 { "" } else { "s" }
+                    )),
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
             Action::Keywording => {
                 if self.session.as_ref().and_then(|s| s.active).is_some() {
                     self.ui.show_right = true;
@@ -970,12 +1185,7 @@ impl PhotoLibraryApp {
                 }
             }
             // Planned actions are handled above via their Status.
-            Action::CompareView
-            | Action::SurveyView
-            | Action::QuickCollection
-            | Action::Stack
-            | Action::Unstack
-            | Action::EditIn => {}
+            Action::CompareView | Action::SurveyView | Action::EditIn => {}
         }
     }
 
@@ -1003,6 +1213,47 @@ impl PhotoLibraryApp {
         self.notify(if n > 1 { format!("Rotate {dir} for {n} Photos") } else { format!("Rotate {dir}") });
     }
 
+    /// LrC Photo ▸ Stacking: group (Ctrl+G), unstack (Ctrl+Shift+G), collapse/expand
+    /// (S) and move to top (Shift+S).
+    fn stacking(&mut self, action: Action) {
+        let view = self.view;
+        let Some(s) = &mut self.session else { return };
+        let ids = s.targets(view);
+        let active_stack = s.active_photo().and_then(|p| p.stack);
+        let result: Result<Option<String>> = match action {
+            Action::Stack if ids.len() < 2 => Ok(Some("Select two or more photos to stack".into())),
+            Action::Stack => {
+                s.catalog.stack_photos(&ids).map(|_| Some(format!("Stacked {} photos", ids.len())))
+            }
+            Action::Unstack => s.catalog.unstack(&ids).map(|n| (n > 0).then(|| "Unstacked".to_string())),
+            Action::ToggleStack => match active_stack {
+                Some(st) => s.catalog.set_stack_collapsed(st.id, !st.collapsed).map(|()| None),
+                None => Ok(None),
+            },
+            Action::MoveToTopOfStack => match (s.active, active_stack) {
+                (Some(id), Some(_)) => {
+                    s.catalog.move_to_top_of_stack(id).map(|()| Some("Moved to top of stack".into()))
+                }
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        };
+        let reloaded = result.and_then(|msg| s.reload_photos().map(|()| msg));
+        // LrC selects the top of a new stack (its other photos are now folded away).
+        if action == Action::Stack
+            && reloaded.is_ok()
+            && let Some(&top) = ids.first()
+            && s.index_of.contains_key(&top)
+        {
+            s.click(top, egui::Modifiers::NONE);
+        }
+        match reloaded {
+            Ok(Some(msg)) => self.notify(msg),
+            Ok(None) => {}
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
     /// After any catalog metadata edit: flag the photos as needing saving (the grid
     /// badge), refresh cached panel contents, and write sidecars if auto-write is on.
     fn metadata_changed(&mut self, ids: &[i64]) {
@@ -1011,6 +1262,14 @@ impl PhotoLibraryApp {
         s.update_rows(ids, |p| p.metadata_dirty = true);
         if self.ui.auto_write_xmp && !ids.is_empty() {
             s.jobs.submit_normal(Job::WriteXmp { photo_ids: ids.to_vec(), quiet: true });
+        }
+        // Filtered views and smart collections follow edits immediately, as in LrC.
+        let smart = matches!(s.source, Source::Collection { id }
+            if s.collections.iter().any(|c| c.id == id && c.kind == catalog::CollectionKind::Smart));
+        if (s.filter != catalog::Criterion::AllOf(vec![]) || smart)
+            && let Err(e) = s.reload_photos()
+        {
+            self.error = Some(format!("{e:#}"));
         }
     }
 
@@ -1331,6 +1590,126 @@ impl PhotoLibraryApp {
                     self.notify("Metadata changes stay in the catalog until saved (Ctrl+S)");
                 }
             }
+            Command::CreateCollection { parent, kind } => {
+                let has_selection = self.session.as_ref().is_some_and(|s| !s.selected.is_empty());
+                self.dialog = Some(Dialog::NewCollection {
+                    parent,
+                    kind,
+                    name: String::new(),
+                    include_selected: has_selection && kind == catalog::CollectionKind::Collection,
+                    rules: catalog::SmartRules::default(),
+                });
+            }
+            Command::ApplyCreateCollection { parent, kind, name, include_selected, rules } => {
+                let view = self.view;
+                let Some(s) = &mut self.session else { return };
+                let result =
+                    s.catalog.create_collection(parent, &name, kind, rules.as_ref()).and_then(|id| {
+                        if include_selected {
+                            let ids = s.targets(view);
+                            s.catalog.add_to_collection(id, &ids)?;
+                        }
+                        if let Some(p) = parent {
+                            s.collapsed_collections.remove(&p);
+                        }
+                        s.collections_changed()
+                    });
+                if let Err(e) = result {
+                    self.error = Some(format!("{e:#}"));
+                }
+            }
+            Command::RenameCollection(id) => {
+                let Some(s) = &self.session else { return };
+                if let Some(c) = s.collections.iter().find(|c| c.id == id) {
+                    self.dialog = Some(Dialog::RenameCollection { id, name: c.name.clone() });
+                }
+            }
+            Command::ApplyRenameCollection { id, name } => {
+                let Some(s) = &mut self.session else { return };
+                if let Err(e) = s.catalog.rename_collection(id, &name).and_then(|()| s.collections_changed())
+                {
+                    self.error = Some(format!("{e:#}"));
+                }
+            }
+            Command::DeleteCollection(id) => {
+                let Some(s) = &self.session else { return };
+                if let Some(c) = s.collections.iter().find(|c| c.id == id) {
+                    self.dialog = Some(Dialog::ConfirmDeleteCollection { id, name: c.name.clone() });
+                }
+            }
+            Command::ConfirmDeleteCollection(id) => {
+                let Some(s) = &mut self.session else { return };
+                let showing = matches!(s.source, Source::Collection { id: shown } if shown == id
+                    || s.collections.iter().any(|c| c.id == shown && c.parent_id == Some(id)));
+                let result = s.catalog.delete_collection(id).and_then(|()| {
+                    if showing {
+                        s.source = Source::AllPhotographs;
+                        s.reload_photos()?;
+                    }
+                    s.collections_changed()
+                });
+                if let Err(e) = result {
+                    self.error = Some(format!("{e:#}"));
+                }
+            }
+            Command::EditSmartCollection(id) => {
+                let Some(s) = &self.session else { return };
+                if let Some(c) = s.collections.iter().find(|c| c.id == id) {
+                    self.dialog = Some(Dialog::EditSmartCollection {
+                        id,
+                        name: c.name.clone(),
+                        rules: c.rules.clone().unwrap_or_default(),
+                    });
+                }
+            }
+            Command::ApplySmartCollection { id, name, rules } => {
+                let Some(s) = &mut self.session else { return };
+                let result = s
+                    .catalog
+                    .rename_collection(id, &name)
+                    .and_then(|()| s.catalog.set_smart_rules(id, &rules))
+                    .and_then(|()| s.collections_changed());
+                if let Err(e) = result {
+                    self.error = Some(format!("{e:#}"));
+                }
+            }
+            Command::AddToCollection { id, photos } => {
+                let view = self.view;
+                let Some(s) = &mut self.session else { return };
+                let ids = photos.unwrap_or_else(|| s.targets(view));
+                let name =
+                    s.collections.iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_default();
+                match s.catalog.add_to_collection(id, &ids).and_then(|n| s.collections_changed().map(|()| n))
+                {
+                    Ok(n) => {
+                        self.notify(format!("Added {n} photo{} to \"{name}\"", if n == 1 { "" } else { "s" }))
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Command::QuickCollectionAdd(ids) => {
+                let Some(s) = &mut self.session else { return };
+                let result = s.catalog.add_to_quick_collection(&ids).and_then(|()| {
+                    s.update_rows(&ids, |p| p.in_quick_collection = true);
+                    s.collections_changed()
+                });
+                match result {
+                    Ok(()) => self.notify("Added to Quick Collection"),
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Command::ToggleSeparateRawJpeg => {
+                let Some(s) = &mut self.session else { return };
+                let separate = !s.catalog.separate_raw_jpeg().unwrap_or(false);
+                match s.catalog.set_separate_raw_jpeg(separate) {
+                    Ok(()) => self.notify(if separate {
+                        "New JPEGs next to raw files will be imported as separate photos"
+                    } else {
+                        "New JPEGs next to raw files will be kept with the raw photo (RAW+JPEG)"
+                    }),
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
             Command::BuildPreviews => {
                 if let Some(s) = &self.session {
                     let photos: Vec<PhotoRef> = s
@@ -1359,6 +1738,15 @@ impl eframe::App for PhotoLibraryApp {
             s.full.begin_frame();
             for msg in s.process_events(&ctx) {
                 self.toast = Some(Toast { text: msg, at: Instant::now() });
+            }
+            // Apply Library Filter changes.
+            let wanted = self.ui.filter.criterion();
+            if s.filter != wanted {
+                s.filter = wanted;
+                if let Err(e) = s.reload_photos() {
+                    self.error = Some(format!("{e:#}"));
+                }
+                s.scroll_to_active = true;
             }
         }
 
@@ -1452,13 +1840,55 @@ mod tests {
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 pub enum Dialog {
-    ConfirmRemoveFolder { id: i64, name: String, photos: i64 },
-    CreateFolder { parent: i64, name: String },
-    RenameFolder { id: i64, name: String },
-    CreateKeyword { parent: Option<i64>, name: String },
-    RenameKeyword { id: i64, name: String },
-    ConfirmDeleteKeyword { id: i64, name: String, photos: usize },
-    ConfirmReadMetadata { ids: Vec<i64> },
+    ConfirmRemoveFolder {
+        id: i64,
+        name: String,
+        photos: i64,
+    },
+    CreateFolder {
+        parent: i64,
+        name: String,
+    },
+    RenameFolder {
+        id: i64,
+        name: String,
+    },
+    CreateKeyword {
+        parent: Option<i64>,
+        name: String,
+    },
+    RenameKeyword {
+        id: i64,
+        name: String,
+    },
+    ConfirmDeleteKeyword {
+        id: i64,
+        name: String,
+        photos: usize,
+    },
+    ConfirmReadMetadata {
+        ids: Vec<i64>,
+    },
+    NewCollection {
+        parent: Option<i64>,
+        kind: catalog::CollectionKind,
+        name: String,
+        include_selected: bool,
+        rules: catalog::SmartRules,
+    },
+    RenameCollection {
+        id: i64,
+        name: String,
+    },
+    ConfirmDeleteCollection {
+        id: i64,
+        name: String,
+    },
+    EditSmartCollection {
+        id: i64,
+        name: String,
+        rules: catalog::SmartRules,
+    },
 }
 
 pub fn folder_name(path: &Path) -> String {

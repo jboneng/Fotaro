@@ -96,6 +96,50 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 app.run(Command::SetSource(source));
             }
             ui.separator();
+            menu_cmd(
+                ui,
+                app,
+                "New Collection…",
+                has_catalog,
+                Command::CreateCollection { parent: None, kind: catalog::CollectionKind::Collection },
+            );
+            menu_cmd(
+                ui,
+                app,
+                "New Smart Collection…",
+                has_catalog,
+                Command::CreateCollection { parent: None, kind: catalog::CollectionKind::Smart },
+            );
+            menu_cmd(
+                ui,
+                app,
+                "New Collection Set…",
+                has_catalog,
+                Command::CreateCollection { parent: None, kind: catalog::CollectionKind::Set },
+            );
+            ui.separator();
+            menu_action(ui, app, "Find", Action::Find);
+            let filters_on = app.ui.filter.enabled;
+            menu_toggle(ui, app, "Enable Filters", filters_on, Action::ToggleFilters);
+            ui.separator();
+            menu_action(ui, app, "Show Quick Collection", Action::ShowQuickCollection);
+            menu_action(ui, app, "Clear Quick Collection", Action::ClearQuickCollection);
+            ui.separator();
+            let separate =
+                app.session.as_ref().is_some_and(|s| s.catalog.separate_raw_jpeg().unwrap_or(false));
+            if ui
+                .add_enabled(
+                    has_catalog,
+                    egui::Button::new("Treat JPEG Files Next to Raw Files as Separate Photos")
+                        .selected(separate),
+                )
+                .on_hover_text("Applies to photos added from now on (as in Lightroom Classic)")
+                .clicked()
+            {
+                app.run(Command::ToggleSeparateRawJpeg);
+                ui.close();
+            }
+            ui.separator();
             menu_action(ui, app, "Previous Photo", Action::Previous);
             menu_action(ui, app, "Next Photo", Action::Next);
             ui.separator();
@@ -127,6 +171,14 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 {
                     menu_action(ui, app, name, Action::ColorLabel { label, advance: false });
                 }
+            });
+            ui.separator();
+            menu_action(ui, app, "Add to Quick Collection", Action::QuickCollection);
+            ui.menu_button("Stacking", |ui| {
+                menu_action(ui, app, "Group into Stack", Action::Stack);
+                menu_action(ui, app, "Unstack", Action::Unstack);
+                menu_action(ui, app, "Collapse / Expand Stack", Action::ToggleStack);
+                menu_action(ui, app, "Move to Top of Stack", Action::MoveToTopOfStack);
             });
             ui.separator();
             menu_action(ui, app, "Rotate Left (CCW)", Action::RotateLeft);
@@ -340,9 +392,9 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let central = egui::CentralPanel::default().frame(panel_frame(theme::CENTER)).show(ui, |ui| {
         if app.view == View::Grid && app.ui.show_filter_bar {
             let r = egui::Panel::top("filter_bar")
-                .exact_size(26.0)
+                .exact_size(super::filter_bar::height(&app.ui.filter))
                 .frame(panel_frame(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 0)))
-                .show(ui, |ui| views::filter_bar(app, ui));
+                .show(ui, |ui| super::filter_bar::show(app, ui));
             app.panel_rects.push(r.response.rect);
         }
         if app.ui.show_toolbar {
@@ -541,6 +593,13 @@ fn keyword_name_prompt(ui: &mut egui::Ui, name: &mut String, ok_label: &str) -> 
 
 fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     let Some(dialog) = app.dialog.as_mut() else { return };
+    // Live "N photos match" for the smart collection editor.
+    type Counter<'a> = Box<dyn Fn(&catalog::SmartRules) -> i64 + 'a>;
+    let app_session_count: Option<Counter> = app.session.as_ref().map(|s| {
+        Box::new(move |r: &catalog::SmartRules| {
+            s.catalog.count_filtered(catalog::Source::AllPhotographs, &r.criterion()).unwrap_or(0)
+        }) as Counter
+    });
     let mut close = false;
     let mut run = None;
 
@@ -552,6 +611,12 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
         Dialog::RenameKeyword { .. } => "Edit Keyword Tag",
         Dialog::ConfirmDeleteKeyword { .. } => "Delete Keyword Tag",
         Dialog::ConfirmReadMetadata { .. } => "Read Metadata from Files",
+        Dialog::NewCollection { kind: catalog::CollectionKind::Set, .. } => "Create Collection Set",
+        Dialog::NewCollection { kind: catalog::CollectionKind::Smart, .. } => "Create Smart Collection",
+        Dialog::NewCollection { .. } => "Create Collection",
+        Dialog::RenameCollection { .. } => "Rename",
+        Dialog::ConfirmDeleteCollection { .. } => "Delete",
+        Dialog::EditSmartCollection { .. } => "Edit Smart Collection",
     };
     egui::Window::new(title)
         .collapsible(false)
@@ -640,6 +705,88 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
                         }
                     });
                 }
+                Dialog::NewCollection { parent, kind, name, include_selected, rules } => {
+                    ui.label("Name:");
+                    let resp = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    if !resp.has_focus() && !resp.lost_focus() && name.is_empty() {
+                        resp.request_focus();
+                    }
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    match kind {
+                        catalog::CollectionKind::Collection => {
+                            ui.checkbox(include_selected, "Include selected photos");
+                        }
+                        catalog::CollectionKind::Smart => {
+                            ui.add_space(6.0);
+                            super::collections::rules_editor(ui, rules);
+                        }
+                        catalog::CollectionKind::Set => {}
+                    }
+                    ui.add_space(8.0);
+                    let valid = !name.trim().is_empty();
+                    ui.horizontal(|ui| {
+                        let create = ui.add_enabled(valid, egui::Button::new("Create"));
+                        if valid && (create.clicked() || (enter && *kind != catalog::CollectionKind::Smart)) {
+                            run = Some(Command::ApplyCreateCollection {
+                                parent: *parent,
+                                kind: *kind,
+                                name: name.trim().to_owned(),
+                                include_selected: *include_selected,
+                                rules: (*kind == catalog::CollectionKind::Smart).then(|| rules.clone()),
+                            });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::RenameCollection { id, name } => match keyword_name_prompt(ui, name, "Rename") {
+                    Ok(Some(name)) => run = Some(Command::ApplyRenameCollection { id: *id, name }),
+                    Ok(None) => {}
+                    Err(()) => close = true,
+                },
+                Dialog::ConfirmDeleteCollection { id, name } => {
+                    ui.label(RichText::new(format!("Delete \"{name}\"?")).strong());
+                    ui.add_space(4.0);
+                    ui.label("Photos stay in the catalog and on disk; only the collection goes.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            run = Some(Command::ConfirmDeleteCollection(*id));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::EditSmartCollection { id, name, rules } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    });
+                    ui.add_space(6.0);
+                    super::collections::rules_editor(ui, rules);
+                    if let Some(s) = &app_session_count {
+                        let n = s(rules);
+                        ui.label(
+                            RichText::new(format!("{n} photos match")).color(theme::TEXT_WEAK).size(11.0),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let valid = !name.trim().is_empty();
+                        if ui.add_enabled(valid, egui::Button::new("Save")).clicked() {
+                            run = Some(Command::ApplySmartCollection {
+                                id: *id,
+                                name: name.trim().to_owned(),
+                                rules: rules.clone(),
+                            });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
                 Dialog::ConfirmReadMetadata { ids } => {
                     let n = ids.len();
                     ui.label(
@@ -672,6 +819,7 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
             }
         });
 
+    drop(app_session_count);
     if let Some(cmd) = run {
         app.run(cmd);
         close = true;

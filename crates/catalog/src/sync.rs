@@ -22,6 +22,8 @@ pub struct SyncReport {
     pub restored: usize,
     pub missing: usize,
     pub errors: usize,
+    /// JPEGs attached to a raw photo of the same name (RAW+JPEG).
+    pub paired: usize,
 }
 
 struct Known {
@@ -166,6 +168,7 @@ impl Catalog {
         let meta_time = t_meta.elapsed();
         let t_write = std::time::Instant::now();
         // Phase 3: apply everything in one transaction.
+        let separate_raw_jpeg = self.separate_raw_jpeg()?;
         let tx = self.conn.transaction()?;
         let now = unix_ms(SystemTime::now()) / 1000;
         let mut folder_ids: HashMap<PathBuf, i64> = HashMap::new();
@@ -180,7 +183,17 @@ impl Catalog {
             folder_ids.insert(path.clone(), id);
         }
 
-        for c in &changes {
+        // New JPEGs next to a raw file of the same name become part of that raw photo
+        // (unless the catalog treats them separately); handle them after the raws.
+        let pair_jpegs = !separate_raw_jpeg;
+        let is_pair_candidate = |c: &FileChange| {
+            pair_jpegs && c.existing_id.is_none() && c.kind == FileKind::Image && is_jpeg(&c.path)
+        };
+        let ordered = changes
+            .iter()
+            .filter(|c| !is_pair_candidate(c))
+            .chain(changes.iter().filter(|c| is_pair_candidate(c)));
+        for c in ordered {
             let photo_id = match c.existing_id {
                 Some(file_id) => {
                     tx.execute(
@@ -188,7 +201,13 @@ impl Catalog {
                         params![c.size, c.mtime_ms, file_id],
                     )?;
                     report.updated += 1;
-                    tx.query_row("SELECT id FROM photos WHERE master_file_id = ?1", [file_id], |r| r.get(0))?
+                    let photo: Option<i64> = tx
+                        .query_row("SELECT id FROM photos WHERE master_file_id = ?1", [file_id], |r| r.get(0))
+                        .optional()?;
+                    match photo {
+                        Some(p) => p,
+                        None => continue, // a paired JPEG: no photo of its own
+                    }
                 }
                 None => {
                     let folder_id = *c
@@ -198,6 +217,17 @@ impl Catalog {
                         .context("file outside walked folders")?;
                     let name = c.path.file_name().unwrap_or_default().to_string_lossy();
                     let ext = c.path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+                    if is_pair_candidate(c)
+                        && let Some(raw_photo) = raw_partner(&tx, folder_id, &c.path)?
+                    {
+                        tx.execute(
+                            "INSERT INTO files (folder_id, name, ext, kind, size, mtime_ms, sidecar_of)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![folder_id, name, ext, c.kind.as_str(), c.size, c.mtime_ms, raw_photo],
+                        )?;
+                        report.paired += 1;
+                        continue;
+                    }
                     tx.execute(
                         "INSERT INTO files (folder_id, name, ext, kind, size, mtime_ms)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -273,6 +303,27 @@ fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Resul
     }
     tx.execute("INSERT INTO folders (path, parent_id) VALUES (?1, ?2)", params![path_str(path), parent_id])?;
     Ok(tx.last_insert_rowid())
+}
+
+fn is_jpeg(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+}
+
+/// The raw photo in `folder_id` with the same base name as `jpeg`, if any.
+fn raw_partner(tx: &Transaction, folder_id: i64, jpeg: &Path) -> Result<Option<i64>> {
+    let stem = jpeg.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+    let mut stmt = tx.prepare_cached(
+        "SELECT p.id, f.name FROM files f JOIN photos p ON p.master_file_id = f.id
+          WHERE f.folder_id = ?1 AND f.kind = 'raw'",
+    )?;
+    let rows = stmt.query_map([folder_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, name) = row?;
+        if Path::new(&name).file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == stem) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 fn read_sidecar(path: &Path, kind: FileKind) -> Option<xmp::XmpData> {

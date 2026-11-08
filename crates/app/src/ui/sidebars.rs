@@ -19,7 +19,7 @@ fn weak(text: impl Into<String>) -> RichText {
 }
 
 /// A full-width selectable row with a right-aligned count, like LrC's panel rows.
-fn source_row(
+pub(super) fn source_row(
     ui: &mut egui::Ui,
     indent: f32,
     label: &str,
@@ -64,14 +64,7 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             super::layout::timed("folders", || folders(app, ui))
         });
         stack.section(ui, Side::Left, "Collections", LEFT, true, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(weak("No collections yet."));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("+").on_hover_text("Create Collection…").clicked() {
-                        app.run(Command::Planned("Collections", "Phase 4"));
-                    }
-                });
-            });
+            super::layout::timed("collections", || super::collections::panel(app, ui))
         });
         app.ui.left = stack;
     });
@@ -105,7 +98,8 @@ fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0x22, 0x22, 0x22));
     let Some(s) = &mut app.session else { return };
     let Some(photo) = s.active_photo().cloned() else { return };
-    let Some(tex) = s.previews.get(photo.id).or_else(|| s.thumbs.get(photo.id)) else {
+    // The thumbnail is about the Navigator's size; the 2048 px preview would alias.
+    let Some(tex) = s.thumbs.get(photo.id).or_else(|| s.previews.get(photo.id)) else {
         if !photo.missing {
             s.request(&photo, PreviewSize::Thumb);
         }
@@ -113,7 +107,7 @@ fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     };
     let size = super::views::rotated_size(tex.size_vec2(), photo.rotation);
     let img_rect = super::views::fit_rect(size, rect.shrink(4.0));
-    super::views::paint_image(ui.painter(), tex.id(), img_rect, photo.rotation, Color32::WHITE);
+    super::views::paint_image(ui.painter(), &tex, img_rect, photo.rotation, Color32::WHITE);
 
     // Click / drag: zoom in (if needed) and center the Loupe on that point.
     if let Some(p) = resp.interact_pointer_pos()
@@ -147,12 +141,18 @@ fn zoom_choice(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
 fn catalog_section(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let Some(s) = &app.session else { return };
     let (all, prev) = s.counts;
+    let quick = s.quick_count;
     let source = s.source;
     if source_row(ui, 4.0, "All Photographs", Some(all), source == Source::AllPhotographs).clicked() {
         app.run(Command::SetSource(Source::AllPhotographs));
     }
-    if source_row(ui, 4.0, "Quick Collection +", Some(0), false).clicked() {
-        app.run(Command::Planned("Quick Collection", "Phase 4"));
+    let resp = source_row(ui, 4.0, "Quick Collection +", Some(quick), source == Source::QuickCollection)
+        .on_hover_text("B adds or removes the selected photos; drag photos here too");
+    if resp.clicked() {
+        app.run(Command::SetSource(Source::QuickCollection));
+    }
+    if let Some(photos) = super::collections::accept_photos(&resp, ui) {
+        app.run(Command::QuickCollectionAdd(photos));
     }
     if source_row(ui, 4.0, "Previous Import", Some(prev), source == Source::PreviousImport).clicked() {
         app.run(Command::SetSource(Source::PreviousImport));

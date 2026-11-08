@@ -27,7 +27,42 @@ pub fn rotated_size(size: Vec2, rotation: u8) -> Vec2 {
 
 /// Paint `tex` into `rect` (given in displayed orientation), rotated clockwise by
 /// `rotation` quarter turns. Rotation is display-only: previews are never re-rendered.
-pub fn paint_image(painter: &egui::Painter, tex: egui::TextureId, rect: Rect, rotation: u8, tint: Color32) {
+///
+/// The GPU samples textures without mipmaps here, so an image drawn noticeably smaller
+/// than its texture aliases (thin bright lines like whiskers turn into dotted lines).
+/// Then it is drawn four times with sub-pixel offsets and blended to their average:
+/// 2×2 supersampling, cheap on the GPU.
+pub fn paint_image(
+    painter: &egui::Painter,
+    tex: &egui::TextureHandle,
+    rect: Rect,
+    rotation: u8,
+    tint: Color32,
+) {
+    let ppp = painter.ctx().pixels_per_point();
+    let shown_px = rect.size() * ppp;
+    let tex_px = rotated_size(tex.size_vec2(), rotation);
+    let minification = (tex_px.x / shown_px.x.max(1.0)).max(tex_px.y / shown_px.y.max(1.0));
+    if minification < 1.25 || tint.a() < 255 {
+        paint_once(painter, tex.id(), rect, rotation, tint);
+        return;
+    }
+    // "Over" blending with alphas 1, 1/2, 1/3, 1/4 leaves each pass weighted 1/4.
+    let d = 0.25 / ppp;
+    let offsets = [egui::vec2(-d, -d), egui::vec2(d, -d), egui::vec2(-d, d), egui::vec2(d, d)];
+    for (i, offset) in offsets.into_iter().enumerate() {
+        let alpha = (255.0 / (i as f32 + 1.0)).round() as u8;
+        let pass = Color32::from_rgba_premultiplied(
+            (u16::from(tint.r()) * u16::from(alpha) / 255) as u8,
+            (u16::from(tint.g()) * u16::from(alpha) / 255) as u8,
+            (u16::from(tint.b()) * u16::from(alpha) / 255) as u8,
+            alpha,
+        );
+        paint_once(painter, tex.id(), rect.translate(offset), rotation, pass);
+    }
+}
+
+fn paint_once(painter: &egui::Painter, tex: egui::TextureId, rect: Rect, rotation: u8, tint: Color32) {
     let r = usize::from(rotation % 4);
     if r == 0 {
         painter.image(tex, rect, UV, tint);
@@ -130,7 +165,10 @@ fn paint_cell(
             FontId::proportional(13.0),
             text_color,
         );
-        let ext = photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+        let mut ext = photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+        if let Some(pair) = &photo.paired_ext {
+            ext = format!("{ext}+{pair}");
+        }
         painter.text(
             egui::pos2(cell.right() - 6.0, y),
             Align2::RIGHT_CENTER,
@@ -159,7 +197,7 @@ fn paint_cell(
             painter.rect_filled(r.translate(egui::vec2(1.5, 1.5)), 0.0, Color32::from_black_alpha(90));
             let tint =
                 if photo.flag == Flag::Rejected { Color32::from_white_alpha(90) } else { Color32::WHITE };
-            paint_image(&painter, tex.id(), r, photo.rotation, tint);
+            paint_image(&painter, tex, r, photo.rotation, tint);
             painter.rect_stroke(
                 r,
                 0.0,
@@ -203,6 +241,34 @@ fn paint_cell(
             FontId::proportional(15.0),
             theme::MISSING,
         );
+    }
+    // Quick Collection: a filled dot at the top right (LrC's circle badge).
+    if photo.in_quick_collection {
+        super::collections::paint_quick_marker(
+            &painter,
+            cell.right_top() + egui::vec2(-9.0, header + 9.0),
+            true,
+        );
+    }
+    // Stacks: the top photo shows how many are in the stack; members of an open
+    // stack show their place in it.
+    if let Some(stack) = photo.stack {
+        let text = if stack.position == 0 {
+            stack.size.to_string()
+        } else {
+            format!("{}/{}", stack.position + 1, stack.size)
+        };
+        let font = FontId::proportional(10.5);
+        let galley = painter.layout_no_wrap(text, font, theme::TEXT_STRONG);
+        let pos = cell.left_top() + egui::vec2(5.0, header + 5.0);
+        let r = Rect::from_min_size(pos, galley.size() + egui::vec2(8.0, 4.0));
+        if stack.position == 0 && stack.collapsed {
+            // A second card behind: collapsed stacks look stacked.
+            painter.rect_filled(r.translate(egui::vec2(2.5, 2.5)), 2.0, Color32::from_gray(0x50));
+        }
+        painter.rect_filled(r, 2.0, Color32::from_gray(0x30));
+        painter.rect_stroke(r, 2.0, Stroke::new(1.0, theme::TEXT_WEAK), egui::StrokeKind::Inside);
+        painter.galley(r.min + egui::vec2(4.0, 2.0), galley, theme::TEXT_STRONG);
     }
     if st.show_dirty && style != GridStyle::Minimal {
         paint_needs_saving(&painter, cell.right_bottom() - egui::vec2(12.0, 10.0 + footer.max(4.0) / 2.0));
@@ -261,6 +327,36 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
             {
                 if ui.button(name).clicked() {
                     app.run(Command::Action(Action::ColorLabel { label, advance: false }));
+                    ui.close();
+                }
+            }
+        });
+        ui.separator();
+        let qc = if photo.in_quick_collection {
+            "Remove from Quick Collection"
+        } else {
+            "Add to Quick Collection"
+        };
+        if ui.button(qc).clicked() {
+            app.run(Command::Action(Action::QuickCollection));
+            ui.close();
+        }
+        super::collections::add_to_collection_menu(ui, app);
+        if app.session.as_ref().is_some_and(|s| matches!(s.source, catalog::Source::Collection { .. }))
+            && ui.button("Remove from Collection").clicked()
+        {
+            app.run(Command::Action(Action::RemoveFromCollection));
+            ui.close();
+        }
+        ui.menu_button("Stacking", |ui| {
+            for (name, action) in [
+                ("Group into Stack", Action::Stack),
+                ("Unstack", Action::Unstack),
+                ("Collapse / Expand Stack", Action::ToggleStack),
+                ("Move to Top of Stack", Action::MoveToTopOfStack),
+            ] {
+                if ui.button(name).clicked() {
+                    app.run(Command::Action(action));
                     ui.close();
                 }
             }
@@ -364,7 +460,13 @@ pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     show_dirty: photo.metadata_dirty && !auto_write,
                 };
                 paint_cell(ui, rect, &photo, tex.as_ref(), s.thumbs.is_failed(photo.id), style, &st);
-                let resp = ui.interact(rect, egui::Id::unique(("cell", photo.id)), Sense::click());
+                let resp = ui.interact(rect, egui::Id::unique(("cell", photo.id)), Sense::click_and_drag());
+                // Drag photos onto a collection or the Quick Collection.
+                if resp.drag_started() {
+                    let dragged =
+                        if s.selected.contains(&photo.id) { s.targets(View::Grid) } else { vec![photo.id] };
+                    resp.dnd_set_drag_payload(super::collections::PhotoDrag(dragged));
+                }
                 let resp =
                     if photo.missing { resp.on_hover_text("The file could not be found.") } else { resp };
                 clicks.push((resp, photo));
@@ -377,6 +479,19 @@ pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     for (resp, photo) in clicks {
         handle_click(app, &resp, &photo, true);
         photo_context_menu(&resp, app, &photo);
+    }
+    // While dragging photos, show how many are being moved.
+    if let Some(drag) = egui::DragAndDrop::payload::<super::collections::PhotoDrag>(ui.ctx())
+        && let Some(pos) = ui.ctx().pointer_interact_pos()
+    {
+        let painter =
+            ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("photo_drag")));
+        let n = drag.0.len();
+        let text = if n == 1 { "1 photo".to_string() } else { format!("{n} photos") };
+        let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), theme::TEXT_STRONG);
+        let r = Rect::from_min_size(pos + egui::vec2(14.0, 10.0), galley.size() + egui::vec2(12.0, 6.0));
+        painter.rect_filled(r, 3.0, Color32::from_black_alpha(200));
+        painter.galley(r.min + egui::vec2(6.0, 3.0), galley, theme::TEXT_STRONG);
     }
 }
 
@@ -460,7 +575,7 @@ fn draw_preview(s: &mut Session, ui: &egui::Ui, photo: &PhotoRow, rect: Rect) {
     match fit_texture(s, photo) {
         Some(tex) => {
             let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), rect);
-            paint_image(ui.painter(), tex.id(), r, photo.rotation, Color32::WHITE);
+            paint_image(ui.painter(), &tex, r, photo.rotation, Color32::WHITE);
         }
         None => centered_message(ui, rect, photo),
     }
@@ -559,7 +674,7 @@ pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     });
 
     let painter = ui.painter().with_clip_rect(rect);
-    paint_image(&painter, tex.id(), img_rect, photo.rotation, Color32::WHITE);
+    paint_image(&painter, &tex, img_rect, photo.rotation, Color32::WHITE);
     if loading_full {
         painter.text(
             rect.left_bottom() + egui::vec2(12.0, -12.0),
@@ -669,7 +784,7 @@ pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                         Color32::WHITE
                     };
                     let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), rect.shrink(5.0));
-                    paint_image(ui.painter(), tex.id(), r, photo.rotation, tint);
+                    paint_image(ui.painter(), &tex, r, photo.rotation, tint);
                 }
                 None if !photo.missing => s.request(&photo, PreviewSize::Thumb),
                 None => {}
@@ -793,22 +908,6 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 ui.label(RichText::new("Thumbnails").color(theme::TEXT_WEAK));
             });
         }
-    });
-}
-
-pub fn filter_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
-    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-        ui.add_space((ui.available_width() / 2.0 - 160.0).max(0.0));
-        ui.label(RichText::new("Library Filter :").color(theme::TEXT_WEAK));
-        for name in ["Text", "Attribute", "Metadata"] {
-            if ui.add(egui::Button::new(name).frame(false)).clicked() {
-                app.run(Command::Planned("The Library Filter", "Phase 4"));
-            }
-        }
-        ui.add(egui::Button::new(RichText::new("None").color(theme::TEXT_STRONG)).frame(false));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new("Filters Off").color(theme::TEXT_WEAK));
-        });
     });
 }
 

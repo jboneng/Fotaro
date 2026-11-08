@@ -4,8 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::query::{Criterion, Facet, MetaColumn, SmartRules};
 use crate::scan::FileKind;
 use crate::schema;
 
@@ -28,7 +30,7 @@ pub struct Folder {
 }
 
 /// Pick/reject flag, as in LrC (P / X / U).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum Flag {
     Rejected = -1,
     #[default]
@@ -64,6 +66,20 @@ pub struct PhotoRow {
     pub rotation: u8,
     /// Changed in the catalog since it was last written to the XMP sidecar.
     pub metadata_dirty: bool,
+    pub stack: Option<StackInfo>,
+    pub in_quick_collection: bool,
+    /// Extension of a JPEG paired with this raw file (shown as "NEF+JPG").
+    pub paired_ext: Option<String>,
+}
+
+/// A photo's place in a stack (LrC Photo ▸ Stacking).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackInfo {
+    pub id: i64,
+    /// 0 is the top of the stack.
+    pub position: u32,
+    pub size: u32,
+    pub collapsed: bool,
 }
 
 /// Camera/exposure metadata stored per photo. `capture_time` is "naive local"
@@ -89,7 +105,15 @@ pub struct PhotoMetadata {
 pub enum Source {
     AllPhotographs,
     PreviousImport,
-    Folder { id: i64, include_subfolders: bool },
+    Folder {
+        id: i64,
+        include_subfolders: bool,
+    },
+    /// A collection, smart collection, or collection set (photos of all collections in it).
+    Collection {
+        id: i64,
+    },
+    QuickCollection,
 }
 
 /// Grid sort criteria, following LrC's toolbar "Sort" menu.
@@ -161,8 +185,18 @@ pub struct SortOrder {
     pub descending: bool,
 }
 
+const PHOTOS_FROM: &str = "FROM photos p
+    JOIN files f    ON f.id = p.master_file_id
+    JOIN folders fo ON fo.id = f.folder_id
+    LEFT JOIN exif e ON e.photo_id = p.id";
+
 const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, f.missing,
-     p.rating, p.flag, p.color_label, p.capture_time, p.orientation, p.metadata_dirty";
+     p.rating, p.flag, p.color_label, p.capture_time, p.orientation, p.metadata_dirty,
+     p.stack_id, p.stack_pos,
+     (SELECT COUNT(*) FROM photos ps WHERE ps.stack_id = p.stack_id),
+     (SELECT s.collapsed FROM stacks s WHERE s.id = p.stack_id),
+     EXISTS (SELECT 1 FROM quick_collection q WHERE q.photo_id = p.id),
+     (SELECT upper(sc.ext) FROM files sc WHERE sc.sidecar_of = p.id LIMIT 1)";
 
 /// `photos.orientation` holds the catalog rotation as an EXIF/XMP orientation code
 /// (1 = none, 6 = 90° CW, 3 = 180°, 8 = 90° CCW), the form XMP sidecars will use.
@@ -197,7 +231,64 @@ fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         capture_time: r.get(10)?,
         rotation: rotation_from_orientation(r.get(11)?),
         metadata_dirty: r.get(12)?,
+        stack: match (r.get::<_, Option<i64>>(13)?, r.get::<_, i64>(15)?) {
+            (Some(id), size) if size >= 2 => Some(StackInfo {
+                id,
+                position: r.get::<_, Option<i64>>(14)?.unwrap_or(0).max(0) as u32,
+                size: size as u32,
+                collapsed: r.get::<_, Option<bool>>(16)?.unwrap_or(true),
+            }),
+            _ => None,
+        },
+        in_quick_collection: r.get(17)?,
+        paired_ext: r.get(18)?,
     })
+}
+
+/// Keep each stack's photos together at the place of its top-most photo, in stack
+/// order; a collapsed stack shows only that photo (as in LrC's Grid).
+pub(crate) fn group_stacks(rows: Vec<PhotoRow>) -> Vec<PhotoRow> {
+    use std::collections::HashMap;
+    let mut anchor: HashMap<i64, (u32, usize)> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        if let Some(s) = r.stack {
+            let a = anchor.entry(s.id).or_insert((s.position, i));
+            if s.position < a.0 {
+                *a = (s.position, i);
+            }
+        }
+    }
+    if anchor.is_empty() {
+        return rows;
+    }
+    let mut groups: HashMap<i64, Vec<PhotoRow>> = HashMap::new();
+    let mut order: Vec<Result<PhotoRow, i64>> = Vec::with_capacity(rows.len());
+    for (i, r) in rows.into_iter().enumerate() {
+        match r.stack {
+            Some(s) => {
+                if anchor[&s.id].1 == i {
+                    order.push(Err(s.id));
+                }
+                groups.entry(s.id).or_default().push(r);
+            }
+            None => order.push(Ok(r)),
+        }
+    }
+    let mut out = Vec::with_capacity(order.len());
+    for item in order {
+        match item {
+            Ok(r) => out.push(r),
+            Err(id) => {
+                let mut members = groups.remove(&id).unwrap_or_default();
+                members.sort_by_key(|r| r.stack.map_or(0, |s| s.position));
+                if members.first().and_then(|r| r.stack).is_some_and(|s| s.collapsed) {
+                    members.truncate(1);
+                }
+                out.extend(members);
+            }
+        }
+    }
+    out
 }
 
 impl Catalog {
@@ -226,6 +317,13 @@ impl Catalog {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.create_scalar_function(
+            crate::query::FOLD_FN,
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|s| s.to_lowercase())),
+        )?;
         schema::migrate(&mut conn)?;
         Ok(Catalog { conn, dir: dir.to_path_buf() })
     }
@@ -278,40 +376,182 @@ impl Catalog {
     /// Photos for a source in the given sort order. Ties always fall back to
     /// capture time, then path, so the order is stable.
     pub fn photos_sorted(&self, source: Source, sort: SortOrder) -> Result<Vec<PhotoRow>> {
-        let order = format!("ORDER BY {}", sort.key.order_by());
-        let order = order.as_str();
-        let from = "FROM photos p
-                    JOIN files f    ON f.id = p.master_file_id
-                    JOIN folders fo ON fo.id = f.folder_id
-                    LEFT JOIN exif e ON e.photo_id = p.id";
-        let (sql, args): (String, Vec<i64>) = match source {
-            Source::AllPhotographs => (format!("SELECT {PHOTO_COLUMNS} {from} {order}"), vec![]),
-            Source::PreviousImport => (
-                format!(
-                    "SELECT {PHOTO_COLUMNS} {from}
-                      WHERE p.imported_at = (SELECT MAX(imported_at) FROM photos) {order}"
-                ),
-                vec![],
-            ),
-            Source::Folder { id, include_subfolders } => (
-                format!(
-                    "WITH RECURSIVE tree(id) AS (
-                         SELECT ?1
-                         UNION ALL
-                         SELECT fo.id FROM folders fo JOIN tree ON fo.parent_id = tree.id WHERE ?2
-                     )
-                     SELECT {PHOTO_COLUMNS} {from} WHERE f.folder_id IN tree {order}"
-                ),
-                vec![id, include_subfolders.into()],
-            ),
+        self.photos_filtered(source, sort, &Criterion::AllOf(vec![]))
+    }
+
+    /// SQL condition selecting a source's photos (parameters appended to `args`).
+    fn source_condition(&self, source: Source, args: &mut Vec<Value>) -> Result<String> {
+        let mut bind = |v: Value| {
+            args.push(v);
+            format!("?{}", args.len())
         };
+        Ok(match source {
+            Source::AllPhotographs => "1".into(),
+            Source::PreviousImport => "p.imported_at = (SELECT MAX(imported_at) FROM photos)".into(),
+            Source::Folder { id, include_subfolders } => {
+                let (root, sub) = (bind(id.into()), bind(i64::from(include_subfolders).into()));
+                format!(
+                    "f.folder_id IN (WITH RECURSIVE tree(id) AS (
+                         SELECT {root} UNION ALL
+                         SELECT x.id FROM folders x JOIN tree ON x.parent_id = tree.id WHERE {sub}
+                     ) SELECT id FROM tree)"
+                )
+            }
+            Source::QuickCollection => "p.id IN (SELECT photo_id FROM quick_collection)".into(),
+            Source::Collection { id } => {
+                let kind: Option<(String, Option<String>)> = self
+                    .conn
+                    .query_row("SELECT kind, smart_rules FROM collections WHERE id = ?1", [id], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .optional()?;
+                match kind {
+                    None => "0".into(),
+                    Some((kind, rules)) if kind == "smart" => {
+                        let rules: SmartRules = match rules.as_deref().map(serde_json::from_str).transpose() {
+                            Ok(r) => r.unwrap_or_default(),
+                            Err(e) => {
+                                log::warn!("smart collection {id} has unreadable rules: {e}");
+                                return Ok("0".into());
+                            }
+                        };
+                        rules.criterion().to_sql(args)
+                    }
+                    // A collection, or a set: the photos of every collection inside it.
+                    Some(_) => {
+                        let root = bind(id.into());
+                        format!(
+                            "p.id IN (SELECT photo_id FROM collection_photos WHERE collection_id IN (
+                                 WITH RECURSIVE ct(id) AS (
+                                     SELECT {root} UNION ALL
+                                     SELECT c.id FROM collections c JOIN ct ON c.parent_id = ct.id
+                                 ) SELECT id FROM ct))"
+                        )
+                    }
+                }
+            }
+        })
+    }
+
+    /// Photos of a source that match `filter`, in sort order, with stacks kept
+    /// together (and collapsed stacks showing only their top photo).
+    pub fn photos_filtered(
+        &self,
+        source: Source,
+        sort: SortOrder,
+        filter: &Criterion,
+    ) -> Result<Vec<PhotoRow>> {
+        let mut args = Vec::new();
+        let source = self.source_condition(source, &mut args)?;
+        let filter = filter.to_sql(&mut args);
+        let sql = format!(
+            "SELECT {PHOTO_COLUMNS} {PHOTOS_FROM} WHERE ({source}) AND ({filter}) ORDER BY {}",
+            sort.key.order_by()
+        );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args), photo_row)?;
         let mut photos: Vec<PhotoRow> = rows.collect::<rusqlite::Result<_>>()?;
         if sort.descending {
             photos.reverse();
         }
-        Ok(photos)
+        Ok(group_stacks(photos))
+    }
+
+    /// How many photos match a source and filter.
+    pub fn count_filtered(&self, source: Source, filter: &Criterion) -> Result<i64> {
+        let mut args = Vec::new();
+        let source = self.source_condition(source, &mut args)?;
+        let filter = filter.to_sql(&mut args);
+        let sql = format!("SELECT COUNT(*) {PHOTOS_FROM} WHERE ({source}) AND ({filter})");
+        Ok(self.conn.query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(0))?)
+    }
+
+    /// The values of a Metadata filter column among a source's photos that match
+    /// `filter`, with counts (LrC's column browser).
+    pub fn facets(&self, source: Source, filter: &Criterion, column: MetaColumn) -> Result<Vec<Facet>> {
+        let mut args = Vec::new();
+        let source = self.source_condition(source, &mut args)?;
+        let filter = filter.to_sql(&mut args);
+        let filter = format!("WHERE ({source}) AND ({filter})");
+        let params = rusqlite::params_from_iter(args);
+        let text_facets = |expr: &str, order: &str| -> Result<Vec<(Option<String>, i64)>> {
+            let sql =
+                format!("SELECT {expr} AS v, COUNT(*) {PHOTOS_FROM} {filter} GROUP BY v ORDER BY {order}");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params.clone(), |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        let unknown_last = "v IS NULL OR v = '', v COLLATE NOCASE";
+        Ok(match column {
+            MetaColumn::Keyword => {
+                let sql = format!(
+                    "SELECT k.id, k.name, COUNT(DISTINCT p.id) {PHOTOS_FROM}
+                       JOIN photo_keywords pk ON pk.photo_id = p.id JOIN keywords k ON k.id = pk.keyword_id
+                     {filter} GROUP BY k.id ORDER BY k.name COLLATE NOCASE"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(params, |r| {
+                    Ok(Facet { criterion: Criterion::Keyword(r.get(0)?), label: r.get(1)?, count: r.get(2)? })
+                })?;
+                rows.collect::<rusqlite::Result<_>>()?
+            }
+            MetaColumn::Date => {
+                text_facets("strftime('%Y', p.capture_time, 'unixepoch')", "v IS NULL, v DESC")?
+                    .into_iter()
+                    .map(|(year, count)| {
+                        let year: Option<i32> = year.and_then(|y| y.parse().ok());
+                        Facet {
+                            label: year.map_or_else(|| "Unknown Date".into(), |y| y.to_string()),
+                            count,
+                            criterion: Criterion::Year(year),
+                        }
+                    })
+                    .collect()
+            }
+            MetaColumn::Camera => text_facets(crate::query::CAMERA_SQL, unknown_last)?
+                .into_iter()
+                .map(|(c, count)| {
+                    let c = c.unwrap_or_default();
+                    let label = if c.is_empty() { "Unknown Camera".into() } else { c.clone() };
+                    Facet { label, count, criterion: Criterion::Camera(c) }
+                })
+                .collect(),
+            MetaColumn::Lens => text_facets("coalesce(e.lens, '')", unknown_last)?
+                .into_iter()
+                .map(|(l, count)| {
+                    let l = l.unwrap_or_default();
+                    let label = if l.is_empty() { "Unknown Lens".into() } else { l.clone() };
+                    Facet { label, count, criterion: Criterion::Lens(l) }
+                })
+                .collect(),
+            MetaColumn::FileType => text_facets("upper(f.ext)", "v")?
+                .into_iter()
+                .map(|(ext, count)| {
+                    let ext = ext.unwrap_or_default();
+                    Facet { label: ext.clone(), count, criterion: Criterion::FileType(ext) }
+                })
+                .collect(),
+            MetaColumn::Label => text_facets(
+                "p.color_label",
+                "CASE v WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 WHEN 'green' THEN 3
+                        WHEN 'blue' THEN 4 WHEN 'purple' THEN 5 ELSE 6 END",
+            )?
+            .into_iter()
+            .map(|(l, count)| {
+                let label = match &l {
+                    Some(l) => {
+                        let mut s = l.clone();
+                        if let Some(c) = s.get_mut(..1) {
+                            c.make_ascii_uppercase();
+                        }
+                        s
+                    }
+                    None => "No Label".into(),
+                };
+                Facet { label, count, criterion: Criterion::Label(l) }
+            })
+            .collect(),
+        })
     }
 
     pub fn photo(&self, photo_id: i64) -> Result<Option<PhotoRow>> {

@@ -193,3 +193,26 @@ building; revisit with 1:1 previews in Phase 2.
       (applied to all target photos; `< mixed >` when they differ).
 - [ ] Later: "metadata changed on disk" conflict badge (xmp_mtime_ms is tracked for it), keyword
       synonyms and export flags, more IPTC fields (location, headline), GPS.
+
+## Progress (Phase 4)
+- [x] One criteria language (`catalog::query`) compiled to SQL for both the Library Filter and smart
+      collections; Unicode case-insensitive text matching (custom `plfold` SQL function, so
+      Å/å and Ø/ø match), parameters always bound (no injection, `%`/`_` are plain text).
+- [x] Library Filter bar: Text (field + Contains All/Contains/Doesn't Contain/Starts/Ends With),
+      Attribute (flags, rating with ≥/≤/=, color labels incl. "no label", raw/other), Metadata
+      (4 cascading columns: Date, Camera, Lens, Keyword, File Type, Label, with counts). Click a mode
+      for only it, Shift-click to combine; None; Filters On/Off (Ctrl+L); Find (Ctrl+F). Filtered
+      views and smart collections follow edits immediately.
+- [x] Collections panel: collection sets, collections, smart collections (rule editor with a live
+      match count), rename/delete, drag photos onto a collection, Add to Collection menu, New
+      Collection with the selection (Ctrl+N), Delete removes from the shown collection.
+- [x] Quick Collection: B toggles (all in -> remove, else add), Ctrl+B shows, Ctrl+Shift+B clears,
+      drag onto it; dot badge on cells.
+- [x] Stacks: Ctrl+G (merges existing stacks; top = first selected), Ctrl+Shift+G, S collapse/expand,
+      Shift+S move to top; stacks stay together in any sort; badges "3" / "2/3".
+- [x] RAW+JPEG pairs: a new JPEG next to a raw file with the same name becomes part of that photo
+      ("NEF+JPG"), unless Library ▸ "Treat JPEG Files Next to Raw Files as Separate Photos".
+- [x] Shift+arrows extend the selection (LrC); 2x2 supersampling when drawing images smaller than
+      their texture (egui-wgpu has no mipmaps: thin lines like whiskers aliased into dots).
+- [ ] Later: filter presets and per-source filter locking, target collection (B adds to it),
+      Metadata column hierarchies (year > month > day), dragging collections into sets.

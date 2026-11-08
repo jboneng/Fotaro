@@ -1,5 +1,7 @@
 //! Lightroom Classic–style user interface.
 
+mod collections;
+mod filter_bar;
 mod icons;
 mod keywords;
 pub mod layout;

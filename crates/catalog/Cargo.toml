@@ -13,6 +13,7 @@ rusqlite.workspace = true
 dunce.workspace = true
 serde.workspace = true
 xmp.workspace = true
+serde_json = "1.0.154"
 
 [dev-dependencies]
 tempfile.workspace = true

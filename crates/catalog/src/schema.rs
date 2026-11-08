@@ -100,6 +100,27 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX keywords_root_name ON keywords(name COLLATE NOCASE) WHERE parent_id IS NULL;
     CREATE INDEX photo_keywords_keyword ON photo_keywords(keyword_id);
     "#,
+    // v3: Quick Collection, stacks, RAW+JPEG pairs (the JPEG is a sidecar file of
+    // the raw photo), catalog settings.
+    r#"
+    CREATE TABLE quick_collection (
+        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE
+    );
+    CREATE TABLE stacks (
+        id        INTEGER PRIMARY KEY,
+        collapsed INTEGER NOT NULL DEFAULT 1
+    );
+    ALTER TABLE photos ADD COLUMN stack_id  INTEGER REFERENCES stacks(id) ON DELETE SET NULL;
+    ALTER TABLE photos ADD COLUMN stack_pos INTEGER;
+    CREATE INDEX photos_stack ON photos(stack_id);
+    ALTER TABLE files ADD COLUMN sidecar_of INTEGER REFERENCES photos(id) ON DELETE CASCADE;
+    CREATE INDEX files_sidecar_of ON files(sidecar_of);
+    CREATE INDEX collection_photos_photo ON collection_photos(photo_id);
+    CREATE TABLE settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    "#,
 ];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;

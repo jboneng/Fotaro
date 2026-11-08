@@ -15,7 +15,7 @@ pub const RAW_EXTENSIONS: &[&str] = &[
 pub const IMAGE_EXTENSIONS: &[&str] =
     &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "heic", "heif"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FileKind {
     Raw,
     Image,

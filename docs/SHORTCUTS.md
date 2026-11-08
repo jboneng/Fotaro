@@ -77,6 +77,10 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `←` | Previous photo | ✅ |
 | `↑` | Photo above (Grid) | ✅ |
 | `↓` | Photo below (Grid) | ✅ |
+| `Shift+→` | Extend selection to the next photo | ✅ |
+| `Shift+←` | Extend selection to the previous photo | ✅ |
+| `Shift+↓` | Extend selection down a row (Grid) | ✅ |
+| `Shift+↑` | Extend selection up a row (Grid) | ✅ |
 | `Home` | First photo | ✅ |
 | `End` | Last photo | ✅ |
 | `Page Up` | Page up (Grid) | ✅ |
@@ -91,9 +95,27 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `Ctrl+Shift+I` | Import photos (add folder) | ✅ |
 | `Ctrl+[` | Rotate left (counterclockwise) | ✅ |
 | `Ctrl+]` | Rotate right (clockwise) | ✅ |
-| `B` | Add to / remove from Quick Collection | planned (Phase 4) |
-| `Ctrl+G` | Group into stack | planned (Phase 4) |
-| `Ctrl+Shift+G` | Unstack | planned (Phase 4) |
+| `B` | Add to / remove from Quick Collection | ✅ |
+| `Ctrl+B` | Show Quick Collection | ✅ |
+| `Ctrl+Shift+B` | Clear Quick Collection | ✅ |
+| `Ctrl+N` | New collection (with the selected photos) | ✅ |
+| `Ctrl+G` | Group into stack | ✅ |
+| `Ctrl+Shift+G` | Unstack | ✅ |
+| `S` | Collapse / expand stack | ✅ |
+| `Shift+S` | Move to top of stack | ✅ |
+| `Delete` | Remove from collection (when viewing a collection) | ✅ |
+
+## View
+
+| Shortcut | Action | Status |
+|---|---|---|
+| `Ctrl+L` | Enable / disable Library filters | ✅ |
+| `Ctrl+F` | Find (text filter) | ✅ |
+
+## Organizing
+
+| Shortcut | Action | Status |
+|---|---|---|
 | `Ctrl+K` | Add keywords (Keywording panel) | ✅ |
 | `Ctrl+S` | Save metadata to files (XMP sidecars) | ✅ |
 | `Ctrl+E` | Edit in default external editor | planned (Phase 7) |
