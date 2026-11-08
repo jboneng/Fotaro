@@ -76,7 +76,7 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             menu_cmd(ui, app, "Open Catalog…", true, Command::OpenCatalog);
             ui.separator();
             if has_catalog {
-                menu_action(ui, app, "Import Photos (Add Folder)…", Action::Import);
+                menu_action(ui, app, "Import Photos…", Action::Import);
             }
             ui.separator();
             menu_cmd(ui, app, "Exit", true, Command::Quit);
@@ -258,7 +258,26 @@ fn top_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     ui.horizontal_centered(|ui| {
         ui.add_space(14.0);
         let progress = app.session.as_ref().map(|s| s.jobs.progress()).unwrap_or_default();
-        if let Some(label) = &progress.syncing {
+        if let Some((done, total)) = progress.import {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Importing {done} of {total} photos"))
+                            .size(11.0)
+                            .color(theme::TEXT),
+                    );
+                    if ui.small_button("✕").on_hover_text("Stop the import").clicked() {
+                        app.run(Command::CancelImport);
+                    }
+                });
+                ui.add(
+                    egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                        .desired_width(220.0)
+                        .desired_height(6.0),
+                );
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        } else if let Some(label) = &progress.syncing {
             ui.add(egui::Spinner::new().size(14.0));
             ui.label(RichText::new(label).color(theme::TEXT));
         } else if let Some((done, total)) = progress.previews {
@@ -526,6 +545,7 @@ fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
     }
 
     dialogs(app, ctx);
+    super::import::window(app, ctx);
 
     if let Some(err) = app.error.clone() {
         let mut open = true;

@@ -3,6 +3,7 @@
 mod collections;
 mod filter_bar;
 mod icons;
+mod import;
 mod keywords;
 pub mod layout;
 pub mod panels;

@@ -160,8 +160,9 @@ fn catalog_section(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
-    if ui.button("+  Add Folder…").clicked() {
-        app.run(Command::Action(super::shortcuts::Action::Import));
+    if ui.button("+  Add Folder…").on_hover_text("Import ▸ Add: catalog photos where they are").clicked()
+    {
+        app.run(Command::OpenImport(Some(catalog::ImportMode::Add)));
     }
     ui.add_space(4.0);
     let Some(s) = &mut app.session else { return };

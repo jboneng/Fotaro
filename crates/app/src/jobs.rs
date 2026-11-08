@@ -42,28 +42,61 @@ impl From<&PhotoRow> for PhotoRef {
 #[derive(Debug, Clone)]
 pub enum Job {
     /// Add or re-synchronize a folder tree, then queue previews for it.
-    Sync { root: PathBuf },
+    Sync {
+        root: PathBuf,
+    },
     /// Load (building first if needed) a preview and send it to the UI.
-    Load { photo: PhotoRef, size: PreviewSize },
+    Load {
+        photo: PhotoRef,
+        size: PreviewSize,
+    },
     /// Make sure both previews exist on disk (and metadata is read).
-    BuildPreviews { photo: PhotoRef },
+    BuildPreviews {
+        photo: PhotoRef,
+    },
     /// Check which catalog folders still exist on disk (can be slow for network drives).
-    CheckFolders { folders: Vec<(i64, PathBuf)> },
+    CheckFolders {
+        folders: Vec<(i64, PathBuf)>,
+    },
     /// Delete cached previews of photos removed from the catalog.
-    PurgePreviews { photo_ids: Vec<i64> },
+    PurgePreviews {
+        photo_ids: Vec<i64>,
+    },
     /// Delete previews that no catalog photo will ask for again (crash leftovers, old
     /// versions, photos removed by older app versions). Run once per catalog open.
     PurgeOrphanPreviews,
     /// LrC "Save Metadata to File(s)": write XMP sidecars.
-    WriteXmp { photo_ids: Vec<i64>, quiet: bool },
+    WriteXmp {
+        photo_ids: Vec<i64>,
+        quiet: bool,
+    },
     /// LrC "Read Metadata from File(s)": replace catalog metadata with the sidecars'.
-    ReadXmp { photo_ids: Vec<i64> },
+    ReadXmp {
+        photo_ids: Vec<i64>,
+    },
+    /// Import dialog: list a source's photos (`generation` tags the answer).
+    ImportScan {
+        root: PathBuf,
+        recursive: bool,
+        generation: u64,
+    },
+    /// Import dialog: a thumbnail for one candidate.
+    ImportThumb {
+        key: i64,
+        path: PathBuf,
+        kind: FileKind,
+    },
+    Import {
+        chosen: Vec<catalog::Candidate>,
+        settings: catalog::ImportSettings,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum JobKey {
     Load(i64, PreviewSize),
     Build(i64),
+    ImportThumb(i64),
 }
 
 impl Job {
@@ -74,7 +107,10 @@ impl Job {
             | Job::PurgePreviews { .. }
             | Job::PurgeOrphanPreviews
             | Job::WriteXmp { .. }
-            | Job::ReadXmp { .. } => None,
+            | Job::ReadXmp { .. }
+            | Job::ImportScan { .. }
+            | Job::Import { .. } => None,
+            Job::ImportThumb { key, .. } => Some(JobKey::ImportThumb(*key)),
             Job::Load { photo, size } => Some(JobKey::Load(photo.id, *size)),
             Job::BuildPreviews { photo } => Some(JobKey::Build(photo.id)),
         }
@@ -135,6 +171,17 @@ pub enum Event {
     MetadataUpdated {
         photo_id: i64,
     },
+    ImportScanned {
+        generation: u64,
+        result: Result<Vec<catalog::Candidate>, String>,
+    },
+    ImportThumb {
+        key: i64,
+        image: egui::ColorImage,
+    },
+    ImportDone {
+        result: Result<catalog::ImportReport, String>,
+    },
     /// Sidecars were written (`read: false`) or read for these photos.
     XmpDone {
         read: bool,
@@ -179,12 +226,16 @@ pub struct Progress {
     previews_done: AtomicUsize,
     previews_started: Mutex<Option<std::time::Instant>>,
     syncing: Mutex<Option<String>>,
+    /// (done, total) while an import runs.
+    import: Mutex<Option<(usize, usize)>>,
+    import_cancel: AtomicBool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProgressSnapshot {
     pub syncing: Option<String>,
     pub previews: Option<(usize, usize)>,
+    pub import: Option<(usize, usize)>,
 }
 
 struct Shared {
@@ -256,6 +307,15 @@ impl JobSystem {
         submit(&self.shared, job, lane);
     }
 
+    /// Stop the running import after the file it is on.
+    pub fn cancel_import(&self) {
+        self.shared.progress.import_cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn submit_import_thumb(&self, job: Job) {
+        self.submit(job, Lane::Visible);
+    }
+
     pub fn progress(&self) -> ProgressSnapshot {
         let p = &self.shared.progress;
         let total = p.previews_total.load(Ordering::Relaxed);
@@ -263,6 +323,7 @@ impl JobSystem {
         ProgressSnapshot {
             syncing: p.syncing.lock().unwrap().clone(),
             previews: (total > 0 && done < total).then_some((done, total)),
+            import: *p.import.lock().unwrap(),
         }
     }
 }
@@ -449,6 +510,65 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
         }
         Job::WriteXmp { photo_ids, quiet } => run_xmp(shared, cat, photo_ids, false, quiet),
         Job::ReadXmp { photo_ids } => run_xmp(shared, cat, photo_ids, true, false),
+        Job::ImportScan { root, recursive, generation } => {
+            let started = std::time::Instant::now();
+            let reader = |path: &std::path::Path, kind: FileKind| {
+                imaging::read_metadata(path, source_kind(kind)).ok().map(to_catalog_metadata)
+            };
+            let result = cat
+                .duplicate_keys()
+                .and_then(|known| catalog::import::scan_source(&root, recursive, Some(&reader), &known))
+                .map_err(|e| format!("{e:#}"));
+            if let Ok(found) = &result {
+                log::info!(
+                    "import source {}: {} photos in {:.0?}",
+                    root.display(),
+                    found.len(),
+                    started.elapsed()
+                );
+            }
+            let _ = shared.events.send(Event::ImportScanned { generation, result });
+        }
+        Job::ImportThumb { key, path, kind } => {
+            match imaging::decode(&path, source_kind(kind), PreviewSize::Thumb.max_px()) {
+                Ok((rgb, _)) => {
+                    let size = [rgb.width() as usize, rgb.height() as usize];
+                    let image = egui::ColorImage::from_rgb(size, rgb.as_raw());
+                    let _ = shared.events.send(Event::ImportThumb { key, image });
+                }
+                Err(e) => log::debug!("import thumbnail of {}: {e:#}", path.display()),
+            }
+        }
+        Job::Import { chosen, settings } => {
+            let p = &shared.progress;
+            p.import_cancel.store(false, Ordering::Relaxed);
+            *p.import.lock().unwrap() = Some((0, chosen.len()));
+            let started = std::time::Instant::now();
+            let reader = |path: &std::path::Path, kind: FileKind| {
+                imaging::read_metadata(path, source_kind(kind)).ok().map(to_catalog_metadata)
+            };
+            let progress = |done: usize, total: usize| {
+                *p.import.lock().unwrap() = Some((done, total));
+                shared.ctx.request_repaint();
+            };
+            let result = cat.import(&chosen, &settings, Some(&reader), &progress, &p.import_cancel);
+            *p.import.lock().unwrap() = None;
+            if let Ok(report) = &result {
+                log::info!(
+                    "imported {} photos ({} failed) in {:.1?}",
+                    report.imported,
+                    report.failed.len(),
+                    started.elapsed()
+                );
+                // Previews for the new photos, in the background.
+                for id in &report.photo_ids {
+                    if let Ok(Some(row)) = cat.photo(*id) {
+                        submit(shared, Job::BuildPreviews { photo: PhotoRef::from(&row) }, Lane::Background);
+                    }
+                }
+            }
+            let _ = shared.events.send(Event::ImportDone { result: result.map_err(|e| format!("{e:#}")) });
+        }
         Job::PurgeOrphanPreviews => {
             let started = std::time::Instant::now();
             // Previews written after this moment are kept whatever the snapshot says.
@@ -555,6 +675,49 @@ mod tests {
         PhotoRef { id, path: PathBuf::new(), kind: FileKind::Image, fingerprint: 0 }
     }
 
+    /// The Import button's path end to end: scan a "card", import through the job
+    /// system, get the done event, and find the photo in the catalog.
+    #[test]
+    fn import_runs_through_the_job_system() {
+        let tmp = tempfile::tempdir().unwrap();
+        let card = tmp.path().join("DCIM");
+        std::fs::create_dir(&card).unwrap();
+        image::RgbImage::from_pixel(64, 48, image::Rgb([200, 100, 50])).save(card.join("IMG_1.png")).unwrap();
+        let dest = tmp.path().join("Photos");
+        std::fs::create_dir(&dest).unwrap();
+        let dir = tmp.path().join("c.plcat");
+        drop(Catalog::create(&dir).unwrap());
+
+        let (jobs, events) =
+            JobSystem::start(egui::Context::default(), dir.clone(), PreviewCache::new(dir.join("previews")));
+        let wait = |pred: &dyn Fn(&Event) -> bool| loop {
+            let e = events.recv_timeout(std::time::Duration::from_secs(30)).expect("job event");
+            if pred(&e) {
+                return e;
+            }
+        };
+        jobs.submit_normal(Job::ImportScan { root: card.clone(), recursive: true, generation: 7 });
+        let Event::ImportScanned { generation: 7, result: Ok(found) } =
+            wait(&|e| matches!(e, Event::ImportScanned { .. }))
+        else {
+            panic!("scan failed")
+        };
+        assert_eq!(found.len(), 1);
+        let settings = catalog::ImportSettings { destination: dest.clone(), ..Default::default() };
+        jobs.submit_normal(Job::Import { chosen: found, settings });
+        let Event::ImportDone { result: Ok(report) } = wait(&|e| matches!(e, Event::ImportDone { .. }))
+        else {
+            panic!("import failed")
+        };
+        assert_eq!((report.imported, report.failed.len()), (1, 0));
+        assert!(jobs.progress().import.is_none(), "progress is cleared when done");
+        let cat = Catalog::open(&dir).unwrap();
+        let photos = cat.photos(catalog::Source::PreviousImport).unwrap();
+        assert_eq!(photos.len(), 1);
+        assert!(photos[0].path.starts_with(dunce::canonicalize(&dest).unwrap()), "{:?}", photos[0].path);
+        assert!(card.join("IMG_1.png").exists(), "Copy keeps the original");
+    }
+
     #[test]
     fn visible_lane_is_lifo_and_takes_priority() {
         let mut lanes = Lanes::default();
@@ -568,11 +731,7 @@ mod tests {
                 Job::Load { photo, .. } => format!("load{}", photo.id),
                 Job::Sync { .. } => "sync".into(),
                 Job::BuildPreviews { photo } => format!("build{}", photo.id),
-                Job::CheckFolders { .. }
-                | Job::PurgePreviews { .. }
-                | Job::PurgeOrphanPreviews
-                | Job::WriteXmp { .. }
-                | Job::ReadXmp { .. } => "other".into(),
+                _ => "other".into(),
             })
             .collect();
         assert_eq!(order, ["load3", "load2", "sync", "build1"]);

@@ -34,11 +34,11 @@ struct Known {
 }
 
 /// Hidden files and folders, plus macOS AppleDouble `._*` files, are never photos.
-fn is_hidden(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_hidden(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().starts_with('.')
 }
 
-fn unix_ms(t: SystemTime) -> i64 {
+pub(crate) fn unix_ms(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
@@ -49,6 +49,24 @@ fn path_str(p: &Path) -> String {
 /// Reads camera metadata for a file during sync (supplied by the caller, so this
 /// crate needs no image decoders). Must be thread-safe: files are read in parallel.
 pub type MetadataReader<'a> = &'a (dyn Fn(&Path, FileKind) -> Option<PhotoMetadata> + Sync);
+
+/// How [`Catalog::sync_folder_opts`] works.
+#[derive(Clone, Copy)]
+pub struct SyncOptions<'a> {
+    pub reader: Option<MetadataReader<'a>>,
+    /// Only add new files in this set; other new files in the folder are left out.
+    pub only: Option<&'a std::collections::HashSet<PathBuf>>,
+    /// Include subfolders.
+    pub recursive: bool,
+    /// Import time for new photos (seconds since 1970); now if `None`.
+    pub imported_at: Option<i64>,
+}
+
+impl Default for SyncOptions<'_> {
+    fn default() -> Self {
+        SyncOptions { reader: None, only: None, recursive: true, imported_at: None }
+    }
+}
 
 /// What the walk found for one photo file.
 struct FileChange {
@@ -99,6 +117,13 @@ impl Catalog {
         root: impl AsRef<Path>,
         reader: Option<MetadataReader>,
     ) -> Result<SyncReport> {
+        self.sync_folder_opts(root, SyncOptions { reader, ..SyncOptions::default() })
+    }
+
+    /// Synchronize with [`SyncOptions`]: used by Import to add just the chosen files,
+    /// all with one import time (so they form the "Previous Import" together).
+    pub fn sync_folder_opts(&mut self, root: impl AsRef<Path>, opts: SyncOptions) -> Result<SyncReport> {
+        let reader = opts.reader;
         let root = dunce::canonicalize(root.as_ref())
             .with_context(|| format!("resolving {}", root.as_ref().display()))?;
         anyhow::ensure!(root.is_dir(), "{} is not a directory", root.display());
@@ -107,11 +132,15 @@ impl Catalog {
         // Phase 1: walk the tree and diff against the catalog.
         let mut report = SyncReport::default();
         let mut known = load_known(&self.conn, &root)?;
+        if !opts.recursive {
+            known.retain(|path, _| path.parent() == Some(root.as_path()));
+        }
         let mut dirs: Vec<(PathBuf, usize)> = Vec::new();
         let mut changes: Vec<FileChange> = Vec::new();
         let mut restored: Vec<i64> = Vec::new();
 
         let walker = WalkDir::new(&root)
+            .max_depth(if opts.recursive { usize::MAX } else { 1 })
             .follow_links(false)
             .sort_by_file_name()
             .into_iter()
@@ -156,6 +185,7 @@ impl Catalog {
                 Some(k) if k.size != size || k.mtime_ms != mtime_ms => changes.push(change(Some(k.id))),
                 Some(k) if k.missing => restored.push(k.id),
                 Some(_) => {}
+                None if opts.only.is_some_and(|only| !only.contains(path)) => {}
                 None => changes.push(change(None)),
             }
         }
@@ -170,7 +200,7 @@ impl Catalog {
         // Phase 3: apply everything in one transaction.
         let separate_raw_jpeg = self.separate_raw_jpeg()?;
         let tx = self.conn.transaction()?;
-        let now = unix_ms(SystemTime::now()) / 1000;
+        let now = opts.imported_at.unwrap_or_else(|| unix_ms(SystemTime::now()) / 1000);
         let mut folder_ids: HashMap<PathBuf, i64> = HashMap::new();
         for (path, depth) in &dirs {
             let parent_id = match path.parent() {
@@ -290,11 +320,11 @@ fn load_known(conn: &Connection, root: &Path) -> Result<HashMap<PathBuf, Known>>
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn folder_id(tx: &Transaction, path: &Path) -> Result<Option<i64>> {
+pub(crate) fn folder_id(tx: &Transaction, path: &Path) -> Result<Option<i64>> {
     Ok(tx.query_row("SELECT id FROM folders WHERE path = ?1", [path_str(path)], |r| r.get(0)).optional()?)
 }
 
-fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Result<i64> {
+pub(crate) fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Result<i64> {
     if let Some(id) = folder_id(tx, path)? {
         if parent_id.is_some() {
             tx.execute("UPDATE folders SET parent_id = ?1 WHERE id = ?2", params![parent_id, id])?;

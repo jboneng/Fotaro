@@ -3,6 +3,7 @@
 
 mod app;
 mod filter;
+mod import;
 mod jobs;
 mod perf;
 mod platform;
@@ -25,6 +26,8 @@ use app::PhotoLibraryApp;
 pub struct Args {
     pub catalog: Option<PathBuf>,
     pub add: Option<PathBuf>,
+    /// Open the Import dialog on this folder.
+    pub import: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -34,6 +37,7 @@ fn parse_args() -> Args {
         match a.to_str() {
             Some("--catalog") => args.catalog = it.next().map(PathBuf::from),
             Some("--add") => args.add = it.next().map(PathBuf::from),
+            Some("--import") => args.import = it.next().map(PathBuf::from),
             _ => log::warn!("ignoring unknown argument {a:?}"),
         }
     }

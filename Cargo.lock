@@ -3216,6 +3216,7 @@ dependencies = [
  "mimalloc",
  "rfd",
  "serde",
+ "tempfile",
  "thread-priority",
 ]
 

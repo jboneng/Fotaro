@@ -216,3 +216,23 @@ building; revisit with 1:1 previews in Phase 2.
       their texture (egui-wgpu has no mipmaps: thin lines like whiskers aliased into dots).
 - [ ] Later: filter presets and per-source filter locking, target collection (B adds to it),
       Metadata column hierarchies (year > month > day), dragging collections into sets.
+
+## Progress (Phase 5)
+- [x] `catalog::import`: scan a source (capture times read on all cores; suspected duplicates =
+      same file name and size as a catalog file), plan destinations, transfer, add to the catalog
+      as one import (Previous Import), apply keywords. Unit tested end to end (copy into dated
+      folders, move, add, cancel, duplicates, pairs) plus a job-system test of the Import button path.
+- [x] Copy (default) / Move / Add. Copies go through a temp file, are size-checked, keep the file
+      date, and never overwrite (collisions get `-2`, `-3`); Move deletes an original only after its
+      copy is verified (or renames on the same drive). XMP sidecars travel with their photos.
+- [x] Organize by date (2026/2026-11-08, 2026/11/08, 2026/2026-11, 2026-11-08, 2026) or into one
+      folder, optional "Into Subfolder"; date folders appear under the destination in Folders.
+- [x] Renaming templates with presets ({Filename} {Text} {Seq:N} {OrigNum} {YYYY} {MM} {DD} {hh}
+      {mm} {ss}), live sample and errors; RAW+JPEG pairs share a sequence number and suffix.
+- [x] Import dialog (Ctrl+Shift+I, File ▸ Import Photos…, Folders ▸ Add Folder… opens it in Add
+      mode): drives with cards (DCIM) first and auto-selected, Choose Folder…, recent source,
+      Include Subfolders; thumbnail grid with check boxes, Check All / Uncheck All, duplicates
+      marked; settings remembered; progress with cancel in the identity plate; shows Previous Import
+      when done. Closes only with Cancel / Esc. `--import <folder>` opens it from the command line.
+- [ ] Later: eject card after import, import presets, video files, "Make a Second Copy To",
+      building standard/1:1 previews as an import option, date-range/thumbnail size in the grid.

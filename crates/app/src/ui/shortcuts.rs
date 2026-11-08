@@ -237,7 +237,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl(K::A), A::SelectAll, SELECT, "Select all"),
     s(ctrl(K::D), A::SelectNone, SELECT, "Select none"),
     // Organizing
-    s(ctrl_shift(K::I), A::Import, ORG, "Import photos (add folder)"),
+    s(ctrl_shift(K::I), A::Import, ORG, "Import photos (Copy, Move or Add)"),
     s(ctrl(K::OpenBracket), A::RotateLeft, ORG, "Rotate left (counterclockwise)"),
     s(ctrl(K::CloseBracket), A::RotateRight, ORG, "Rotate right (clockwise)"),
     s(k(K::B), A::QuickCollection, ORG, "Add to / remove from Quick Collection"),

@@ -1,6 +1,6 @@
 //! OS integration helpers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Menu label for revealing a file, matching each OS's wording (as LrC does).
@@ -122,6 +122,47 @@ pub fn caps_lock_on() -> bool {
     {
         false
     }
+}
+
+/// A drive or mounted volume offered as an import source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Volume {
+    pub path: PathBuf,
+    pub name: String,
+    /// Has a `DCIM` folder: a camera card (LrC lists these as Devices).
+    pub card: bool,
+}
+
+/// Mounted volumes, cards first. Can be slow (network drives): call off the UI thread.
+pub fn volumes() -> Vec<Volume> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        // A: and B: are legacy floppy letters; probing them can stall.
+        roots.extend(('C'..='Z').map(|l| PathBuf::from(format!("{l}:\\"))));
+    } else {
+        let mut dirs = vec![PathBuf::from("/Volumes"), PathBuf::from("/mnt")];
+        if let Ok(user) = std::env::var("USER") {
+            dirs.push(PathBuf::from("/media").join(&user));
+            dirs.push(PathBuf::from("/run/media").join(&user));
+        }
+        for d in dirs {
+            if let Ok(entries) = std::fs::read_dir(d) {
+                roots.extend(entries.flatten().map(|e| e.path()));
+            }
+        }
+    }
+    let mut out: Vec<Volume> = roots
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .map(|path| {
+            let name =
+                path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into());
+            let name = name.trim_end_matches('\\').to_owned();
+            Volume { card: path.join("DCIM").is_dir(), name, path }
+        })
+        .collect();
+    out.sort_by_key(|v| (!v.card, v.name.to_lowercase()));
+    out
 }
 
 #[cfg(test)]

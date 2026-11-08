@@ -142,6 +142,7 @@ pub struct UiState {
     /// LrC Catalog Settings ▸ "Automatically write changes into XMP".
     pub auto_write_xmp: bool,
     pub filter: crate::filter::FilterBar,
+    pub import: crate::import::ImportPrefs,
 }
 
 impl Default for UiState {
@@ -165,6 +166,7 @@ impl Default for UiState {
             auto_advance: false,
             auto_write_xmp: false,
             filter: crate::filter::FilterBar::default(),
+            import: crate::import::ImportPrefs::default(),
         }
     }
 }
@@ -268,6 +270,14 @@ pub enum Command {
         photos: Option<Vec<i64>>,
     },
     ToggleSeparateRawJpeg,
+    /// Open the Import dialog (optionally starting in a mode, e.g. Add for "Add Folder").
+    OpenImport(Option<catalog::ImportMode>),
+    /// Import dialog: look at this source.
+    ImportSource(PathBuf),
+    /// Import dialog: the Import button.
+    StartImport,
+    CloseImport,
+    CancelImport,
     /// Photos dropped on the Quick Collection.
     QuickCollectionAdd(Vec<i64>),
     Reveal(PathBuf),
@@ -364,6 +374,8 @@ pub struct Session {
     collections_gen: Option<u64>,
     /// Metadata filter columns, cached for (source, filter bar, meta_gen).
     pub facets: Option<(FacetKey, Vec<Vec<catalog::Facet>>)>,
+    /// The Import dialog, while open.
+    pub import: Option<crate::import::ImportDialog>,
     pub source: Source,
     pub sort: catalog::SortOrder,
     pub photos: Vec<PhotoRow>,
@@ -409,6 +421,7 @@ impl Session {
             collapsed_collections: HashSet::new(),
             collections_gen: None,
             facets: None,
+            import: None,
             source: Source::AllPhotographs,
             sort,
             photos: Vec::new(),
@@ -726,6 +739,57 @@ impl Session {
                 }
                 Event::ImageFailed { photo_id, size } => self.cache_for(size).mark_failed(photo_id),
                 Event::FoldersChecked { missing } => self.missing_folders = missing,
+                Event::ImportScanned { generation, result } => {
+                    if let Some(d) = &mut self.import
+                        && d.generation == generation
+                    {
+                        match result {
+                            Ok(found) => {
+                                d.checked = vec![true; found.len()];
+                                d.candidates = Some(found);
+                                d.error = None;
+                            }
+                            Err(e) => {
+                                d.candidates = Some(Vec::new());
+                                d.error = Some(e);
+                            }
+                        }
+                    }
+                }
+                Event::ImportThumb { key, image } => {
+                    if let Some(d) = &mut self.import
+                        && key >> 24 == d.generation as i64
+                    {
+                        d.thumbs.insert(ctx, key, image);
+                    }
+                }
+                Event::ImportDone { result } => match result {
+                    Ok(r) => {
+                        let mut msg = format!(
+                            "Imported {} photo{}",
+                            r.imported,
+                            if r.imported == 1 { "" } else { "s" }
+                        );
+                        if !r.failed.is_empty() {
+                            msg += &format!(", {} failed: {}", r.failed.len(), r.failed[0].1);
+                        }
+                        if r.cancelled {
+                            msg += " (cancelled)";
+                        }
+                        messages.push(msg);
+                        // Like LrC, show what was just imported.
+                        self.source = Source::PreviousImport;
+                        self.meta_gen += 1;
+                        if let Err(e) = self
+                            .refresh_tree()
+                            .and_then(|_| self.refresh_keywords())
+                            .and_then(|()| self.reload_photos())
+                        {
+                            messages.push(format!("Catalog error: {e:#}"));
+                        }
+                    }
+                    Err(e) => messages.push(format!("Import failed: {e}")),
+                },
                 Event::XmpDone { read, quiet, done, skipped, failed } => {
                     if read {
                         // Ratings, labels, rotation, keywords... may all have changed.
@@ -838,6 +902,10 @@ impl PhotoLibraryApp {
         if let (Some(s), Some(root)) = (&app.session, args.add) {
             s.jobs.submit_normal(Job::Sync { root });
         }
+        if let Some(src) = args.import {
+            app.execute(&cc.egui_ctx, Command::OpenImport(None));
+            app.execute(&cc.egui_ctx, Command::ImportSource(src));
+        }
         app
     }
 
@@ -872,13 +940,6 @@ impl PhotoLibraryApp {
                 )));
             }
             Err(e) => self.error = Some(format!("{e:#}")),
-        }
-    }
-
-    fn add_folder(&mut self) {
-        let Some(session) = &self.session else { return };
-        if let Some(dir) = rfd::FileDialog::new().set_title("Add Photos from Folder").pick_folder() {
-            session.jobs.submit_normal(Job::Sync { root: dir });
         }
     }
 
@@ -1098,7 +1159,7 @@ impl PhotoLibraryApp {
             }
             Action::SelectAll => self.with_session(|s| s.selected = s.photos.iter().map(|p| p.id).collect()),
             Action::SelectNone => self.with_session(|s| s.selected.clear()),
-            Action::Import => self.add_folder(),
+            Action::Import => self.execute(ctx, Command::OpenImport(None)),
             Action::ShowShortcuts => self.show_shortcuts ^= true,
             Action::SaveMetadata => self.save_metadata(),
             Action::QuickCollection => {
@@ -1685,6 +1746,64 @@ impl PhotoLibraryApp {
                         self.notify(format!("Added {n} photo{} to \"{name}\"", if n == 1 { "" } else { "s" }))
                     }
                     Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            Command::OpenImport(mode) => {
+                let prefs_source = self.ui.import.last_source.clone().filter(|p| p.is_dir());
+                let Some(s) = &mut self.session else {
+                    self.notify("Open or create a catalog first");
+                    return;
+                };
+                if let Some(mode) = mode {
+                    self.ui.import.settings.mode = mode;
+                }
+                // LrC's default destination is the Pictures folder.
+                if self.ui.import.settings.destination.as_os_str().is_empty()
+                    && let Some(pictures) =
+                        directories::UserDirs::new().and_then(|d| d.picture_dir().map(Path::to_path_buf))
+                {
+                    self.ui.import.settings.destination = pictures;
+                }
+                s.import = Some(crate::import::ImportDialog::new());
+                // Without a card, start from the last source (the dialog switches to a
+                // card when one shows up in the device list).
+                if let Some(src) = prefs_source {
+                    self.execute(ctx, Command::ImportSource(src));
+                }
+            }
+            Command::ImportSource(path) => {
+                let recursive = self.ui.import.include_subfolders;
+                let Some(s) = &mut self.session else { return };
+                let Some(d) = &mut s.import else { return };
+                d.generation += 1;
+                d.source = Some(path.clone());
+                d.candidates = None;
+                d.checked.clear();
+                d.error = None;
+                s.jobs.submit_normal(Job::ImportScan { root: path, recursive, generation: d.generation });
+            }
+            Command::StartImport => {
+                let prefs = self.ui.import.clone();
+                let Some(s) = &mut self.session else { return };
+                let Some(d) = s.import.take() else { return };
+                let chosen = d.chosen(prefs.settings.skip_duplicates);
+                if chosen.is_empty() {
+                    return;
+                }
+                self.ui.import.last_source = d.source.clone();
+                let n = chosen.len();
+                s.jobs.submit_normal(Job::Import { chosen, settings: prefs.effective() });
+                self.notify(format!("Importing {n} photo{}", if n == 1 { "" } else { "s" }));
+            }
+            Command::CloseImport => {
+                if let Some(s) = &mut self.session {
+                    s.import = None;
+                }
+            }
+            Command::CancelImport => {
+                if let Some(s) = &self.session {
+                    s.jobs.cancel_import();
+                    self.notify("Stopping the import after the current photo");
                 }
             }
             Command::QuickCollectionAdd(ids) => {
