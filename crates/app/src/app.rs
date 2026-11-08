@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-use crate::library::{self, Photo};
+use catalog::Photo;
 
 /// State persisted between runs (via eframe's `persistence` feature).
 #[derive(Default, Serialize, Deserialize)]
@@ -49,7 +49,7 @@ impl PhotoLibraryApp {
     fn rescan(&mut self) {
         let Some(root) = self.settings.library_root.clone() else { return };
         self.selected = None;
-        match library::scan(&root) {
+        match catalog::scan(&root) {
             Ok(photos) => {
                 self.status = format!("{} photos in {}", photos.len(), root.display());
                 self.photos = photos;

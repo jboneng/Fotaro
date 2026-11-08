@@ -1,0 +1,18 @@
+[package]
+name = "photo_library"
+description = "A desktop photo library"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+catalog.workspace = true
+anyhow.workspace = true
+eframe.workspace = true
+env_logger.workspace = true
+log.workspace = true
+rfd.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

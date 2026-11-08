@@ -1,0 +1,17 @@
+[package]
+name = "catalog"
+description = "Photo catalog: folder scanning and (soon) the SQLite catalog"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

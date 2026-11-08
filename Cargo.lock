@@ -631,6 +631,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
 name = "cc"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2602,13 +2612,12 @@ name = "photo_library"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "catalog",
  "eframe",
  "env_logger",
  "log",
  "rfd",
  "serde",
- "tempfile",
- "walkdir",
 ]
 
 [[package]]
