@@ -20,7 +20,10 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `L` | Cycle Lights Out (dim / off / normal) | ✅ |
 | `J` | Cycle Grid cell style | ✅ |
 | `I` | Cycle Loupe info overlay | ✅ |
-| `Z` | Toggle Loupe zoom (fit / 1:1) | planned (Phase 2) |
+| `Z` | Toggle Loupe zoom (Fit / Navigator zoom level) | ✅ |
+| `Ctrl+=` | Zoom in | ✅ |
+| `Ctrl++` | Zoom in | ✅ |
+| `Ctrl+-` | Zoom out | ✅ |
 
 ## Panels
 
@@ -86,11 +89,19 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | Shortcut | Action | Status |
 |---|---|---|
 | `Ctrl+Shift+I` | Import photos (add folder) | ✅ |
-| `Ctrl+[` | Rotate left (counterclockwise) | planned (Phase 2) |
-| `Ctrl+]` | Rotate right (clockwise) | planned (Phase 2) |
+| `Ctrl+[` | Rotate left (counterclockwise) | ✅ |
+| `Ctrl+]` | Rotate right (clockwise) | ✅ |
 | `B` | Add to / remove from Quick Collection | planned (Phase 4) |
 | `Ctrl+G` | Group into stack | planned (Phase 4) |
 | `Ctrl+Shift+G` | Unstack | planned (Phase 4) |
 | `Ctrl+K` | Add keywords | planned (Phase 3) |
 | `Ctrl+E` | Edit in default external editor | planned (Phase 7) |
 | `Ctrl+/` | Show keyboard shortcuts | ✅ |
+
+## Auto Advance
+
+With **Caps Lock** on (Windows, macOS) or **Photo ▸ Auto Advance** checked, flagging, rating and labelling move to the next photo, as if Shift were held.
+
+## Loupe mouse
+
+Click the photo to toggle between Fit and the Navigator zoom level at that point; drag (or scroll) to move around while zoomed. Click or drag in the Navigator to choose the visible area.

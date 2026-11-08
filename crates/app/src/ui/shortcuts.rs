@@ -41,6 +41,9 @@ pub enum Action {
     SelectAll,
     SelectNone,
     ZoomToggle,
+    ZoomIn,
+    ZoomOut,
+    ToggleAutoAdvance,
     RotateLeft,
     RotateRight,
     QuickCollection,
@@ -123,7 +126,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(k(K::L), A::CycleLightsOut, VIEW, "Cycle Lights Out (dim / off / normal)"),
     s(k(K::J), A::CycleGridStyle, VIEW, "Cycle Grid cell style"),
     s(k(K::I), A::CycleInfoOverlay, VIEW, "Cycle Loupe info overlay"),
-    planned(k(K::Z), A::ZoomToggle, VIEW, "Toggle Loupe zoom (fit / 1:1)", "Phase 2"),
+    s(k(K::Z), A::ZoomToggle, VIEW, "Toggle Loupe zoom (Fit / Navigator zoom level)"),
+    s(ctrl(K::Equals), A::ZoomIn, VIEW, "Zoom in"),
+    s(ctrl(K::Plus), A::ZoomIn, VIEW, "Zoom in"),
+    s(ctrl(K::Minus), A::ZoomOut, VIEW, "Zoom out"),
     // Panels
     s(k(K::Tab), A::ToggleSidePanels, PANELS, "Hide / show side panels"),
     s(shift(K::Tab), A::ToggleAllPanels, PANELS, "Hide / show all panels"),
@@ -208,8 +214,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl(K::D), A::SelectNone, SELECT, "Select none"),
     // Organizing
     s(ctrl_shift(K::I), A::Import, ORG, "Import photos (add folder)"),
-    planned(ctrl(K::OpenBracket), A::RotateLeft, ORG, "Rotate left (counterclockwise)", "Phase 2"),
-    planned(ctrl(K::CloseBracket), A::RotateRight, ORG, "Rotate right (clockwise)", "Phase 2"),
+    s(ctrl(K::OpenBracket), A::RotateLeft, ORG, "Rotate left (counterclockwise)"),
+    s(ctrl(K::CloseBracket), A::RotateRight, ORG, "Rotate right (clockwise)"),
     planned(k(K::B), A::QuickCollection, ORG, "Add to / remove from Quick Collection", "Phase 4"),
     planned(ctrl(K::G), A::Stack, ORG, "Group into stack", "Phase 4"),
     planned(ctrl_shift(K::G), A::Unstack, ORG, "Unstack", "Phase 4"),
@@ -241,6 +247,9 @@ pub fn key_name(key: Key) -> &'static str {
         Key::Escape => "Esc",
         Key::PageUp => "Page Up",
         Key::PageDown => "Page Down",
+        Key::Equals => "=",
+        Key::Plus => "+",
+        Key::Minus => "-",
         other => other.name(),
     }
 }
@@ -358,6 +367,15 @@ pub fn markdown() -> String {
         let label = s.binding.label_with("Ctrl").replace('\\', "\\\\").replace('|', "\\|");
         out.push_str(&format!("| `{label}` | {} | {status} |\n", s.description));
     }
+    out.push_str(
+        "\n## Auto Advance\n\n\
+         With **Caps Lock** on (Windows, macOS) or **Photo ▸ Auto Advance** checked, flagging, rating \
+         and labelling move to the next photo, as if Shift were held.\n\n\
+         ## Loupe mouse\n\n\
+         Click the photo to toggle between Fit and the Navigator zoom level at that point; drag \
+         (or scroll) to move around while zoomed. Click or drag in the Navigator to choose the \
+         visible area.\n",
+    );
     out
 }
 

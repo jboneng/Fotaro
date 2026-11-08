@@ -132,6 +132,9 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             menu_action(ui, app, "Rotate Left (CCW)", Action::RotateLeft);
             menu_action(ui, app, "Rotate Right (CW)", Action::RotateRight);
             ui.separator();
+            let auto = app.ui.auto_advance;
+            menu_toggle(ui, app, "Auto Advance", auto, Action::ToggleAutoAdvance);
+            ui.separator();
             ui.menu_button("Edit In", |ui| {
                 menu_action(ui, app, "Edit in Default Editor…", Action::EditIn);
                 menu_cmd(ui, app, "Edit in NegPy…", false, Command::Planned("", ""));
@@ -148,6 +151,10 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             menu_toggle(ui, app, "Loupe", app.view == View::Loupe, Action::LoupeView);
             menu_action(ui, app, "Compare", Action::CompareView);
             menu_action(ui, app, "Survey", Action::SurveyView);
+            ui.separator();
+            menu_action(ui, app, "Toggle Zoom View", Action::ZoomToggle);
+            menu_action(ui, app, "Zoom In", Action::ZoomIn);
+            menu_action(ui, app, "Zoom Out", Action::ZoomOut);
             ui.separator();
             menu_action(ui, app, "Full Screen Preview", Action::FullScreenPreview);
             ui.menu_button("Lights Out", |ui| {

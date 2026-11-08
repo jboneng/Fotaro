@@ -59,6 +59,9 @@ pub struct PhotoRow {
     pub flag: Flag,
     pub color_label: Option<String>,
     pub capture_time: Option<i64>,
+    /// Extra rotation applied in the catalog (LrC "Rotate Left/Right"), in clockwise
+    /// quarter turns 0..=3, on top of the file's own orientation. Files are never changed.
+    pub rotation: u8,
 }
 
 /// Camera/exposure metadata stored per photo. `capture_time` is "naive local"
@@ -155,7 +158,22 @@ pub struct SortOrder {
 }
 
 const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, f.missing,
-     p.rating, p.flag, p.color_label, p.capture_time";
+     p.rating, p.flag, p.color_label, p.capture_time, p.orientation";
+
+/// `photos.orientation` holds the catalog rotation as an EXIF/XMP orientation code
+/// (1 = none, 6 = 90° CW, 3 = 180°, 8 = 90° CCW), the form XMP sidecars will use.
+fn rotation_from_orientation(code: i64) -> u8 {
+    match code {
+        6 => 1,
+        3 => 2,
+        8 => 3,
+        _ => 0,
+    }
+}
+
+fn orientation_from_rotation(quarter_turns: u8) -> i64 {
+    [1, 6, 3, 8][usize::from(quarter_turns % 4)]
+}
 
 fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
     let folder: String = r.get(1)?;
@@ -173,6 +191,7 @@ fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         flag: Flag::from_db(r.get(8)?),
         color_label: r.get(9)?,
         capture_time: r.get(10)?,
+        rotation: rotation_from_orientation(r.get(11)?),
     })
 }
 
@@ -358,6 +377,15 @@ impl Catalog {
         Ok(())
     }
 
+    /// Set the catalog rotation in clockwise quarter turns (taken modulo 4).
+    pub fn set_rotation(&self, photo_id: i64, quarter_turns: u8) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET orientation = ?1 WHERE id = ?2",
+            params![orientation_from_rotation(quarter_turns), photo_id],
+        )?;
+        Ok(())
+    }
+
     /// Colour label name (`"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`) or `None`.
     pub fn set_color_label(&self, photo_id: i64, label: Option<&str>) -> Result<()> {
         self.conn.execute("UPDATE photos SET color_label = ?1 WHERE id = ?2", params![label, photo_id])?;
@@ -425,6 +453,27 @@ mod tests {
         Catalog::create(tmp.path()).unwrap();
         assert!(Catalog::create(tmp.path()).is_err());
         assert!(Catalog::open(tmp.path().join("nope")).is_err());
+    }
+
+    #[test]
+    fn rotation_round_trips_as_orientation_codes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let photos = tmp.path().join("p");
+        std::fs::create_dir(&photos).unwrap();
+        std::fs::write(photos.join("a.jpg"), b"x").unwrap();
+        let mut cat = Catalog::create(tmp.path().join("c.plcat")).unwrap();
+        cat.sync_folder(&photos).unwrap();
+        let id = cat.photos(Source::AllPhotographs).unwrap()[0].id;
+        assert_eq!(cat.photo(id).unwrap().unwrap().rotation, 0);
+        for (turns, code) in [(1, 6), (2, 3), (3, 8), (4, 1), (7, 8)] {
+            cat.set_rotation(id, turns).unwrap();
+            let stored: i64 = cat
+                .conn
+                .query_row("SELECT orientation FROM photos WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap();
+            assert_eq!(stored, code, "{turns} quarter turns");
+            assert_eq!(cat.photo(id).unwrap().unwrap().rotation, turns % 4);
+        }
     }
 
     #[test]

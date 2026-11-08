@@ -78,6 +78,23 @@ impl Job {
 /// Per-channel (R, G, B) counts of 8-bit values.
 pub type Histogram = [[u32; 256]; 3];
 
+/// Load (building if needed) the full-resolution preview as a texture-ready image,
+/// scaled down only if it exceeds the GPU's maximum texture size.
+fn load_full(shared: &Shared, photo: &PhotoRef) -> Result<egui::ColorImage> {
+    let started = std::time::Instant::now();
+    let path = shared.cache.full(photo.id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
+    let mut img = image::open(&path)?;
+    // Read now, not at startup: before the first frame egui reports a 2048 px default.
+    let max_side = shared.ctx.input(|i| i.max_texture_side) as u32;
+    if img.width().max(img.height()) > max_side {
+        img = imaging::fit_image(img, max_side);
+    }
+    let rgb = img.into_rgb8();
+    let image = egui::ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw());
+    log::debug!("1:1 preview of {} ready in {:.0?}", photo.path.display(), started.elapsed());
+    Ok(image)
+}
+
 fn histogram(rgba: &[u8]) -> Box<Histogram> {
     let mut h = Box::new([[0u32; 256]; 3]);
     for px in rgba.as_chunks::<4>().0 {
@@ -380,6 +397,9 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
         }
         Job::Load { photo, size } => {
             let result = (|| -> Result<(egui::ColorImage, Option<Box<Histogram>>)> {
+                if size == PreviewSize::Full {
+                    return load_full(shared, &photo).map(|image| (image, None));
+                }
                 let path = match shared.cache.get(photo.id, size, photo.fingerprint) {
                     Some(p) => p,
                     None => {

@@ -93,6 +93,37 @@ pub fn human_bytes(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} B") } else { format!("{v:.1} {}", UNITS[unit]) }
 }
 
+/// Is Caps Lock on? LrC uses it as a temporary "Auto Advance". Windows and macOS ask the
+/// OS directly; elsewhere this is always false (use Photo ▸ Auto Advance instead).
+pub fn caps_lock_on() -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetKeyState(virtual_key: i32) -> i16;
+        }
+        const VK_CAPITAL: i32 = 0x14;
+        // SAFETY: GetKeyState takes a plain key code and has no other preconditions.
+        // The low bit is the toggle state.
+        unsafe { GetKeyState(VK_CAPITAL) & 1 != 0 }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventSourceFlagsState(state_id: i32) -> u64;
+        }
+        const COMBINED_SESSION_STATE: i32 = 0;
+        const ALPHA_SHIFT_MASK: u64 = 0x0001_0000;
+        // SAFETY: plain function of an enum value; returns the current modifier flags.
+        unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) & ALPHA_SHIFT_MASK != 0 }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

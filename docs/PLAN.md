@@ -152,3 +152,21 @@ Fixes from this pass:
 Still slowish: 184 MB 16-bit TIFFs take 1–2.5 s and SilverFast raw DNGs ~2 s per standard preview
 (timings were noisy while Windows Defender scanned the freshly copied files). Fine for background
 building; revisit with 1:1 previews in Phase 2.
+
+## Progress (Phase 2)
+- [x] Loupe zoom: Z / click toggles Fit ↔ the Navigator level (FILL, 1:1, 2:1, 3:1), anchored at the
+      pointer; Ctrl+= / Ctrl+- step through levels; drag or scroll to pan; zoom position kept when
+      moving between photos (checking focus across a burst). 1:1 = one image pixel per screen pixel.
+- [x] 1:1 previews (`f` in the preview cache), built on demand: RAWs use the full-size embedded JPEG
+      when present (same colours as the standard preview), else a full LibRaw render. The enlarged
+      standard preview shows with "Loading…" meanwhile; the next photo's 1:1 is prefetched.
+      Unused 1:1 previews are discarded after 30 days (LrC default). Measured: D750 NEF 2 s,
+      SilverScan linear DNG 5 s (debug build).
+- [x] Navigator: zoom level picker, visible-area rectangle, click/drag to move the view.
+- [x] Rotate Left / Right (Ctrl+[ / Ctrl+], Photo menu, context menu): catalog only, stored as an
+      EXIF orientation code in `photos.orientation` (ready for XMP in Phase 3); applied at draw time
+      everywhere (grid, filmstrip, Navigator, Loupe, full screen) and to displayed dimensions.
+      On Nordic layouts the keys in the US `[` `]` positions (Å, ¨) work via egui's physical-key fallback.
+- [x] Auto Advance: Photo ▸ Auto Advance, or Caps Lock (Windows, macOS; Linux has the menu only).
+- [ ] Later: rotate buttons on grid cells (hover), Fill/ratio dropdown with more levels, tiled
+      rendering for images larger than the GPU texture limit (currently scaled to fit the limit).

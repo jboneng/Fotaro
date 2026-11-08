@@ -46,6 +46,75 @@ pub enum MetadataPreset {
     Exif,
 }
 
+/// The Loupe zoom level that Z / a click toggles to from Fit (Navigator header: FIT FILL 1:1 2:1 3:1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ZoomLevel {
+    Fill,
+    #[default]
+    OneToOne,
+    TwoToOne,
+    ThreeToOne,
+}
+
+impl ZoomLevel {
+    pub const ALL: [ZoomLevel; 4] = [Self::Fill, Self::OneToOne, Self::TwoToOne, Self::ThreeToOne];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fill => "FILL",
+            Self::OneToOne => "1:1",
+            Self::TwoToOne => "2:1",
+            Self::ThreeToOne => "3:1",
+        }
+    }
+
+    /// Screen points per image pixel. `fill` is the scale that fills the view;
+    /// 1:1 means one image pixel per physical screen pixel.
+    pub fn scale(self, fill: f32, pixels_per_point: f32) -> f32 {
+        match self {
+            Self::Fill => fill,
+            Self::OneToOne => 1.0 / pixels_per_point,
+            Self::TwoToOne => 2.0 / pixels_per_point,
+            Self::ThreeToOne => 3.0 / pixels_per_point,
+        }
+    }
+}
+
+/// Loupe zoom state for this session (LrC keeps the zoom position when moving between
+/// photos, which makes checking focus across a burst quick).
+#[derive(Debug, Clone, Copy)]
+pub struct Zoom {
+    pub zoomed: bool,
+    /// The image point (0..1, in displayed orientation) shown at the center of the Loupe.
+    pub center: egui::Vec2,
+    /// Zoom so this image point (0..1) lands under this screen position (set by clicks
+    /// and Z with the pointer over the photo; resolved when the Loupe is next drawn).
+    pub anchor: Option<(egui::Vec2, egui::Pos2)>,
+    /// Where the photo was drawn last frame, and which part of it (0..1) was visible:
+    /// for the Navigator rectangle and for anchoring Z at the pointer.
+    pub image_rect: Option<egui::Rect>,
+    pub visible: Option<egui::Rect>,
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Zoom { zoomed: false, center: egui::vec2(0.5, 0.5), anchor: None, image_rect: None, visible: None }
+    }
+}
+
+impl Zoom {
+    /// Zoom in so the image point under `pointer` stays put (if the pointer is over the photo).
+    pub fn zoom_in_at(&mut self, pointer: Option<egui::Pos2>) {
+        self.zoomed = true;
+        if let (Some(p), Some(r)) = (pointer, self.image_rect)
+            && r.contains(p)
+        {
+            let q = (p - r.min) / r.size();
+            self.anchor = Some((q, p));
+        }
+    }
+}
+
 /// Panel layout and view preferences, remembered between runs.
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -65,6 +134,10 @@ pub struct UiState {
     pub info_overlay: u8,
     pub metadata_preset: MetadataPreset,
     pub sort: catalog::SortOrder,
+    /// Loupe zoom level used by Z / click (the last one picked in the Navigator).
+    pub zoom_level: ZoomLevel,
+    /// Photo ▸ Auto Advance: rating, flagging and labelling move to the next photo.
+    pub auto_advance: bool,
 }
 
 impl Default for UiState {
@@ -84,6 +157,8 @@ impl Default for UiState {
             info_overlay: 1,
             metadata_preset: MetadataPreset::Default,
             sort: catalog::SortOrder::default(),
+            zoom_level: ZoomLevel::default(),
+            auto_advance: false,
         }
     }
 }
@@ -157,6 +232,8 @@ pub struct Session {
     anchor: Option<i64>,
     pub thumbs: TextureCache,
     pub previews: TextureCache,
+    /// Full-resolution textures for 1:1 zoom (~100 MB each for 24 MP, so only a few).
+    pub full: TextureCache,
     pub histograms: HashMap<i64, Box<Histogram>>,
     metadata: Option<(i64, Option<PhotoMetadata>)>,
     pub scroll_to_active: bool,
@@ -186,6 +263,7 @@ impl Session {
             anchor: None,
             thumbs: TextureCache::new("thumb", 1500),
             previews: TextureCache::new("preview", 12),
+            full: TextureCache::new("full", 3),
             histograms: HashMap::new(),
             metadata: None,
             scroll_to_active: false,
@@ -243,12 +321,17 @@ impl Session {
         self.metadata.as_ref().and_then(|(_, m)| m.clone())
     }
 
-    /// Ask the workers for an image if it isn't loaded or already requested.
-    pub fn request(&mut self, photo: &PhotoRow, size: PreviewSize) {
-        let cache = match size {
+    pub fn cache_for(&mut self, size: PreviewSize) -> &mut TextureCache {
+        match size {
             PreviewSize::Thumb => &mut self.thumbs,
             PreviewSize::Standard => &mut self.previews,
-        };
+            PreviewSize::Full => &mut self.full,
+        }
+    }
+
+    /// Ask the workers for an image if it isn't loaded or already requested.
+    pub fn request(&mut self, photo: &PhotoRow, size: PreviewSize) {
+        let cache = self.cache_for(size);
         if cache.should_request(photo.id) {
             self.jobs.submit_visible(Job::Load { photo: PhotoRef::from(photo), size });
         }
@@ -360,10 +443,7 @@ impl Session {
                     }
                 }
                 Event::Image { photo_id, size, image, histogram } => {
-                    let cache = match size {
-                        PreviewSize::Thumb => &mut self.thumbs,
-                        PreviewSize::Standard => &mut self.previews,
-                    };
+                    let cache = self.cache_for(size);
                     cache.insert(ctx, photo_id, image);
                     if let Some(h) = histogram {
                         if self.histograms.len() > 3000 {
@@ -372,10 +452,7 @@ impl Session {
                         self.histograms.insert(photo_id, h);
                     }
                 }
-                Event::ImageFailed { photo_id, size } => match size {
-                    PreviewSize::Thumb => self.thumbs.mark_failed(photo_id),
-                    PreviewSize::Standard => self.previews.mark_failed(photo_id),
-                },
+                Event::ImageFailed { photo_id, size } => self.cache_for(size).mark_failed(photo_id),
                 Event::FoldersChecked { missing } => self.missing_folders = missing,
                 Event::MetadataUpdated { photo_id } => {
                     if self.active == Some(photo_id) {
@@ -409,6 +486,7 @@ pub struct PhotoLibraryApp {
     pub view: View,
     pub lights: Lights,
     pub fullscreen: bool,
+    pub zoom: Zoom,
     pub show_shortcuts: bool,
     pub toast: Option<Toast>,
     pub error: Option<String>,
@@ -437,6 +515,7 @@ impl PhotoLibraryApp {
             view: View::Grid,
             lights: Lights::On,
             fullscreen: false,
+            zoom: Zoom::default(),
             show_shortcuts: false,
             toast: None,
             error: None,
@@ -609,7 +688,7 @@ impl PhotoLibraryApp {
                     |n| format!("{text}{}", for_n(n)),
                     |c, id| c.set_flag(id, flag),
                     |p| p.flag = flag,
-                    advance,
+                    advance || self.auto_advance(),
                 );
             }
             Action::SetRating { stars, advance } => {
@@ -622,7 +701,7 @@ impl PhotoLibraryApp {
                     |n| format!("{text}{}", for_n(n)),
                     |c, id| c.set_rating(id, stars),
                     |p| p.rating = stars,
-                    advance,
+                    advance || self.auto_advance(),
                 );
             }
             Action::ColorLabel { label, advance } => {
@@ -639,8 +718,52 @@ impl PhotoLibraryApp {
                     |n| format!("{text}{}", for_n(n)),
                     |c, id| c.set_color_label(id, new),
                     |p| p.color_label = new.map(str::to_owned),
-                    advance,
+                    advance || self.auto_advance(),
                 );
+            }
+            Action::ZoomToggle => {
+                if self.session.as_ref().and_then(|s| s.active).is_none() {
+                    return;
+                }
+                if self.view == View::Grid {
+                    // LrC: Z in Grid opens the photo in Loupe, zoomed in.
+                    self.view = View::Loupe;
+                    self.zoom.zoomed = true;
+                } else if self.zoom.zoomed {
+                    self.zoom.zoomed = false;
+                } else {
+                    let pointer = ctx.pointer_hover_pos();
+                    self.zoom.zoom_in_at(pointer);
+                }
+            }
+            Action::ZoomIn | Action::ZoomOut => {
+                if self.session.as_ref().and_then(|s| s.active).is_none() {
+                    return;
+                }
+                // Steps: Fit, then the Navigator levels.
+                let current = if self.zoom.zoomed && self.view == View::Loupe {
+                    ZoomLevel::ALL.iter().position(|&l| l == self.ui.zoom_level).map_or(0, |i| i + 1)
+                } else {
+                    0
+                };
+                let next = if action == Action::ZoomIn {
+                    (current + 1).min(ZoomLevel::ALL.len())
+                } else {
+                    current.saturating_sub(1)
+                };
+                self.view = View::Loupe;
+                self.zoom.zoomed = next > 0;
+                if next > 0 {
+                    self.ui.zoom_level = ZoomLevel::ALL[next - 1];
+                }
+                let label = if next == 0 { "Fit" } else { self.ui.zoom_level.label() };
+                self.notify(format!("Zoom: {label}"));
+            }
+            Action::RotateLeft => self.rotate_targets(3),
+            Action::RotateRight => self.rotate_targets(1),
+            Action::ToggleAutoAdvance => {
+                self.ui.auto_advance ^= true;
+                self.notify(if self.ui.auto_advance { "Auto Advance on" } else { "Auto Advance off" });
             }
             Action::Next => self.with_session(|s| s.move_active(1)),
             Action::Previous => self.with_session(|s| s.move_active(-1)),
@@ -667,15 +790,35 @@ impl PhotoLibraryApp {
             // Planned actions are handled above via their Status.
             Action::CompareView
             | Action::SurveyView
-            | Action::ZoomToggle
-            | Action::RotateLeft
-            | Action::RotateRight
             | Action::QuickCollection
             | Action::Stack
             | Action::Unstack
             | Action::EditIn
             | Action::Keywording => {}
         }
+    }
+
+    /// Photo ▸ Auto Advance, or Caps Lock held on (as in LrC).
+    fn auto_advance(&self) -> bool {
+        self.ui.auto_advance || crate::platform::caps_lock_on()
+    }
+
+    /// Rotate the target photos by `quarter_turns` clockwise (catalog only; files untouched).
+    fn rotate_targets(&mut self, quarter_turns: u8) {
+        let Some(s) = &mut self.session else { return };
+        let ids = s.targets(self.view);
+        for &id in &ids {
+            let Some(&i) = s.index_of.get(&id) else { continue };
+            let rotation = (s.photos[i].rotation + quarter_turns) % 4;
+            if let Err(e) = s.catalog.set_rotation(id, rotation) {
+                self.error = Some(format!("{e:#}"));
+                return;
+            }
+            s.photos[i].rotation = rotation;
+        }
+        let dir = if quarter_turns == 1 { "Right" } else { "Left" };
+        let n = ids.len();
+        self.notify(if n > 1 { format!("Rotate {dir} for {n} Photos") } else { format!("Rotate {dir}") });
     }
 
     fn with_session(&mut self, f: impl FnOnce(&mut Session)) {
@@ -835,6 +978,7 @@ impl eframe::App for PhotoLibraryApp {
         if let Some(s) = &mut self.session {
             s.thumbs.begin_frame();
             s.previews.begin_frame();
+            s.full.begin_frame();
             for msg in s.process_events(&ctx) {
                 self.toast = Some(Toast { text: msg, at: Instant::now() });
             }

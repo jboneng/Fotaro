@@ -73,13 +73,42 @@ fn orient_raw(img: DynamicImage, o: libraw::Orientation) -> DynamicImage {
     }
 }
 
+/// Decode at full resolution, for 1:1 viewing. RAW files use the camera's embedded
+/// JPEG when it is (nearly) full size, so the colours match the standard preview;
+/// otherwise LibRaw renders the full image.
+pub fn decode_full(path: &Path, kind: SourceKind) -> Result<(RgbImage, Metadata)> {
+    let (img, meta) = match kind {
+        SourceKind::Raw => decode_raw_with(path, u32::MAX, true),
+        SourceKind::Image => decode_image(path, u32::MAX),
+    }
+    .with_context(|| format!("decoding {} at full size", path.display()))?;
+    Ok((img, metadata::with_file_time_fallback(meta, path)))
+}
+
+/// Downscale an image so its longest side is at most `max_px` (never upscales).
+pub fn fit_image(img: DynamicImage, max_px: u32) -> DynamicImage {
+    fit(img, max_px)
+}
+
 fn decode_raw(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
+    decode_raw_with(path, max_px, false)
+}
+
+/// Decode a RAW file from its embedded preview when that is big enough, else with a
+/// LibRaw render (half size unless more than half the sensor is wanted).
+/// `full_size` asks for the whole image (1:1 previews).
+fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImage, Metadata)> {
     let mut raw = libraw::RawFile::open(path)?;
     let info = raw.info();
     let meta = metadata::from_raw_info(&info);
+    let wanted = if full_size {
+        // 90% of the sensor's long side: embedded JPEGs are often a few pixels smaller.
+        info.width.max(info.height) * 9 / 10
+    } else {
+        (max_px as f32 * MIN_EMBEDDED_FRACTION) as u32
+    };
 
     // Fast path: the camera's embedded preview (what LrC calls "embedded previews").
-    let wanted = (max_px as f32 * MIN_EMBEDDED_FRACTION) as u32;
     let embedded = match raw.thumbnail() {
         Ok(libraw::Thumbnail::Jpeg(bytes)) => image::load_from_memory(&bytes).ok(),
         Ok(libraw::Thumbnail::Bitmap(b)) => bitmap_to_image(b).ok(),
@@ -90,8 +119,11 @@ fn decode_raw(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
     let img = match embedded {
         Some(img) => img,
         None => {
-            log::debug!("{}: no usable embedded preview, rendering", path.display());
-            bitmap_to_image(raw.render(true)?)?
+            // A half-size render is plenty unless more than half the sensor is wanted.
+            let half = info.width.max(info.height) / 2;
+            let half_size = max_px <= half;
+            log::debug!("{}: no usable embedded preview, rendering (half size: {half_size})", path.display());
+            bitmap_to_image(raw.render(half_size)?)?
         }
     };
     let img = orient_raw(fit(img, max_px), info.orientation);

@@ -20,6 +20,38 @@ pub fn fit_rect(image: Vec2, bounds: Rect) -> Rect {
     Rect::from_center_size(bounds.center(), image * scale)
 }
 
+/// Size of an image as displayed after `rotation` clockwise quarter turns.
+pub fn rotated_size(size: Vec2, rotation: u8) -> Vec2 {
+    if rotation % 2 == 1 { egui::vec2(size.y, size.x) } else { size }
+}
+
+/// Paint `tex` into `rect` (given in displayed orientation), rotated clockwise by
+/// `rotation` quarter turns. Rotation is display-only: previews are never re-rendered.
+pub fn paint_image(painter: &egui::Painter, tex: egui::TextureId, rect: Rect, rotation: u8, tint: Color32) {
+    let r = usize::from(rotation % 4);
+    if r == 0 {
+        painter.image(tex, rect, UV, tint);
+        return;
+    }
+    let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
+    let mut mesh = egui::Mesh::with_texture(tex);
+    for (pos, uv) in corners.into_iter().zip(corner_uvs(rotation)) {
+        mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: tint });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Texture coordinates for the displayed top-left, top-right, bottom-right and
+/// bottom-left corners after turning the image `rotation` quarter turns clockwise.
+fn corner_uvs(rotation: u8) -> [egui::Pos2; 4] {
+    let uvs = [egui::pos2(0.0, 0.0), egui::pos2(1.0, 0.0), egui::pos2(1.0, 1.0), egui::pos2(0.0, 1.0)];
+    let r = usize::from(rotation % 4);
+    // Turning clockwise brings the source corner one step "behind" to each screen corner.
+    std::array::from_fn(|i| uvs[(i + 4 - r) % 4])
+}
+
 struct CellState {
     index: usize,
     selected: bool,
@@ -121,11 +153,11 @@ fn paint_cell(
     );
     match tex {
         Some(tex) => {
-            let r = fit_rect(tex.size_vec2(), image_area);
+            let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), image_area);
             painter.rect_filled(r.translate(egui::vec2(1.5, 1.5)), 0.0, Color32::from_black_alpha(90));
             let tint =
                 if photo.flag == Flag::Rejected { Color32::from_white_alpha(90) } else { Color32::WHITE };
-            painter.image(tex.id(), r, UV, tint);
+            paint_image(&painter, tex.id(), r, photo.rotation, tint);
             painter.rect_stroke(
                 r,
                 0.0,
@@ -211,6 +243,15 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
                 }
             }
         });
+        ui.separator();
+        for (name, action) in
+            [("Rotate Left (CCW)", Action::RotateLeft), ("Rotate Right (CW)", Action::RotateRight)]
+        {
+            if ui.button(name).clicked() {
+                app.run(Command::Action(action));
+                ui.close();
+            }
+        }
         ui.separator();
         let _ =
             ui.add_enabled(false, egui::Button::new("Edit In")).on_disabled_hover_text("Arrives in Phase 7");
@@ -323,7 +364,7 @@ fn info_overlay(app: &mut PhotoLibraryApp, ui: &egui::Ui, rect: Rect, photo: &Ph
     let m = s.active_metadata().unwrap_or_default();
     let line2 = match app.ui.info_overlay {
         1 => {
-            let dims = m.width.zip(m.height).map(|(w, h)| format!("{w} x {h}")).unwrap_or_default();
+            let dims = super::sidebars::dimensions(&m, photo.rotation).unwrap_or_default();
             format!("{}    {dims}", photo.capture_time.map(format_capture_time).unwrap_or_default())
         }
         _ => {
@@ -363,59 +404,164 @@ fn info_overlay(app: &mut PhotoLibraryApp, ui: &egui::Ui, rect: Rect, photo: &Ph
     }
 }
 
-/// Draw the best available image for `photo` fitted into `rect`
-/// (standard preview, falling back to the thumbnail while it loads).
-fn draw_preview(s: &mut Session, ui: &egui::Ui, photo: &PhotoRow, rect: Rect) {
-    let tex = s.previews.get(photo.id).or_else(|| {
-        if !photo.missing {
-            s.request(photo, PreviewSize::Standard);
-        }
-        s.thumbs.get(photo.id)
-    });
-    match tex {
-        Some(tex) => {
-            let r = fit_rect(tex.size_vec2(), rect);
-            ui.painter().image(tex.id(), r, UV, Color32::WHITE);
-        }
-        None => {
-            if !photo.missing {
-                s.request(photo, PreviewSize::Thumb);
-            }
-            let msg = if photo.missing { "The file could not be found." } else { "Loading…" };
-            ui.painter().text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                msg,
-                FontId::proportional(14.0),
-                theme::TEXT_WEAK,
-            );
-        }
+/// The best loaded image for `photo` at fit size: the standard preview, else the
+/// thumbnail while it loads. Requests whatever is missing.
+fn fit_texture(s: &mut Session, photo: &PhotoRow) -> Option<egui::TextureHandle> {
+    if let Some(t) = s.previews.get(photo.id) {
+        return Some(t);
     }
+    if !photo.missing {
+        s.request(photo, PreviewSize::Standard);
+    }
+    let thumb = s.thumbs.get(photo.id);
+    if thumb.is_none() && !photo.missing {
+        s.request(photo, PreviewSize::Thumb);
+    }
+    thumb
+}
+
+fn centered_message(ui: &egui::Ui, rect: Rect, photo: &PhotoRow) {
+    let msg = if photo.missing { "The file could not be found." } else { "Loading…" };
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        msg,
+        FontId::proportional(14.0),
+        theme::TEXT_WEAK,
+    );
+}
+
+/// Draw the best available image for `photo` fitted into `rect` (full screen preview).
+fn draw_preview(s: &mut Session, ui: &egui::Ui, photo: &PhotoRow, rect: Rect) {
+    match fit_texture(s, photo) {
+        Some(tex) => {
+            let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), rect);
+            paint_image(ui.painter(), tex.id(), r, photo.rotation, Color32::WHITE);
+        }
+        None => centered_message(ui, rect, photo),
+    }
+}
+
+/// Keep the zoomed view inside the photo: `center` is the image point (0..1) at the
+/// view's center and `visible` the fraction of the photo the view spans. Axes where
+/// the whole photo fits are centered.
+pub fn clamp_center(center: Vec2, visible: Vec2) -> Vec2 {
+    let axis = |c: f32, v: f32| if v >= 1.0 { 0.5 } else { c.clamp(v / 2.0, 1.0 - v / 2.0) };
+    egui::vec2(axis(center.x, visible.x), axis(center.y, visible.y))
 }
 
 pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(rect, Sense::click());
+    let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+    let ppp = ui.ctx().pixels_per_point();
+    let zoom_level = app.ui.zoom_level;
     let Some(s) = &mut app.session else { return };
     let Some(photo) = s.active_photo().cloned() else {
         app.view = View::Grid;
         return;
     };
+    let zoomed = app.zoom.zoomed && !photo.missing;
+
     // Prefetch neighbours first: the visible lane is LIFO, so the current photo wins.
-    if let Some(i) = s.active_index() {
-        for j in [i + 1, i.wrapping_sub(1)] {
-            if let Some(p) = s.photos.get(j).cloned()
-                && !p.missing
-            {
-                s.request(&p, PreviewSize::Standard);
+    let neighbours: Vec<PhotoRow> = s
+        .active_index()
+        .map(|i| [i + 1, i.wrapping_sub(1)].iter().filter_map(|&j| s.photos.get(j).cloned()).collect())
+        .unwrap_or_default();
+    for p in neighbours.iter().filter(|p| !p.missing) {
+        s.request(p, PreviewSize::Standard);
+    }
+
+    // Zoomed: the 1:1 preview, showing the standard one enlarged until it arrives.
+    let full = if zoomed { s.full.get(photo.id) } else { None };
+    if zoomed && full.is_none() {
+        s.request(&photo, PreviewSize::Full);
+    }
+    // While checking focus across a burst, the next photo's 1:1 is usually wanted too.
+    if zoomed
+        && full.is_some()
+        && let Some(next) = neighbours.first().filter(|p| !p.missing)
+    {
+        s.request(next, PreviewSize::Full);
+    }
+    let loading_full = zoomed && full.is_none();
+    let Some(tex) = full.or_else(|| fit_texture(s, &photo)) else {
+        centered_message(ui, rect, &photo);
+        app.zoom.image_rect = None;
+        return;
+    };
+
+    // Size of the photo in pixels as displayed (file orientation, then catalog rotation).
+    let native = s
+        .active_metadata()
+        .and_then(|m| Some(egui::vec2(m.width? as f32, m.height? as f32)))
+        .unwrap_or_else(|| tex.size_vec2());
+    let img_px = rotated_size(native, photo.rotation);
+
+    let view = if zoomed { rect } else { rect.shrink(18.0) };
+    let fit = (view.width() / img_px.x).min(view.height() / img_px.y);
+    let fill = (view.width() / img_px.x).max(view.height() / img_px.y);
+    // Small photos never zoom below Fit.
+    let scale = if zoomed { zoom_level.scale(fill, ppp).max(fit) } else { fit };
+    let size = img_px * scale;
+
+    let z = &mut app.zoom;
+    if zoomed {
+        if let Some((q, p)) = z.anchor.take() {
+            z.center = q + (view.center() - p) / size;
+        }
+        if resp.dragged() {
+            z.center -= resp.drag_delta() / size;
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta);
+            if scroll != Vec2::ZERO {
+                z.center -= scroll / size;
             }
         }
+        z.center = clamp_center(z.center, view.size() / size);
     }
-    draw_preview(s, ui, &photo, rect.shrink(18.0));
+    let img_rect = if zoomed {
+        Rect::from_min_size(view.center() - size * z.center, size)
+    } else {
+        Rect::from_center_size(view.center(), size)
+    };
+    z.image_rect = Some(img_rect);
+    z.visible = zoomed.then(|| {
+        let v = view.intersect(img_rect);
+        Rect::from_min_max(
+            ((v.min - img_rect.min) / size).to_pos2(),
+            ((v.max - img_rect.min) / size).to_pos2(),
+        )
+    });
+
+    let painter = ui.painter().with_clip_rect(rect);
+    paint_image(&painter, tex.id(), img_rect, photo.rotation, Color32::WHITE);
+    if loading_full {
+        painter.text(
+            rect.left_bottom() + egui::vec2(12.0, -12.0),
+            Align2::LEFT_BOTTOM,
+            "Loading…",
+            FontId::proportional(12.0),
+            theme::TEXT_STRONG,
+        );
+    }
+
+    // LrC: a click toggles between Fit and the zoom level, at the clicked point.
+    if resp.clicked() && !photo.missing {
+        if zoomed {
+            app.zoom.zoomed = false;
+        } else {
+            app.zoom.zoom_in_at(resp.interact_pointer_pos());
+        }
+    }
+    if zoomed {
+        let icon = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+        resp.clone().on_hover_cursor(icon);
+    } else if resp.hover_pos().is_some_and(|p| img_rect.contains(p)) && !photo.missing {
+        resp.clone().on_hover_cursor(egui::CursorIcon::ZoomIn);
+    }
+
     info_overlay(app, ui, rect, &photo);
-    if resp.double_clicked() {
-        app.view = View::Grid;
-    }
     photo_context_menu(&resp, app, &photo);
 }
 
@@ -498,7 +644,8 @@ pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     } else {
                         Color32::WHITE
                     };
-                    ui.painter().image(tex.id(), fit_rect(tex.size_vec2(), rect.shrink(5.0)), UV, tint);
+                    let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), rect.shrink(5.0));
+                    paint_image(ui.painter(), tex.id(), r, photo.rotation, tint);
                 }
                 None if !photo.missing => s.request(&photo, PreviewSize::Thumb),
                 None => {}
@@ -639,4 +786,33 @@ pub fn filter_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.label(RichText::new("Filters Off").color(theme::TEXT_WEAK));
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::pos2;
+
+    #[test]
+    fn rotation_maps_source_corners_clockwise() {
+        // Unrotated: identity.
+        assert_eq!(corner_uvs(0), [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)]);
+        // 90° clockwise: the source's bottom-left ends up top-left, its top-left top-right.
+        assert_eq!(corner_uvs(1), [pos2(0.0, 1.0), pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0)]);
+        // 180°: diagonally opposite corners; 4 turns are back to identity.
+        assert_eq!(corner_uvs(2)[0], pos2(1.0, 1.0));
+        assert_eq!(corner_uvs(3)[0], pos2(1.0, 0.0), "90° CCW: source top-right becomes top-left");
+        assert_eq!(corner_uvs(4), corner_uvs(0));
+        assert_eq!(rotated_size(egui::vec2(300.0, 200.0), 1), egui::vec2(200.0, 300.0));
+        assert_eq!(rotated_size(egui::vec2(300.0, 200.0), 2), egui::vec2(300.0, 200.0));
+    }
+
+    #[test]
+    fn zoomed_view_stays_inside_the_photo() {
+        // Showing 25% of the width: the center can go from 0.125 to 0.875.
+        let v = egui::vec2(0.25, 2.0);
+        assert_eq!(clamp_center(egui::vec2(0.0, 0.3), v), egui::vec2(0.125, 0.5), "y fits: centered");
+        assert_eq!(clamp_center(egui::vec2(0.99, 0.3), v).x, 0.875);
+        assert_eq!(clamp_center(egui::vec2(0.4, 0.3), v).x, 0.4);
+    }
 }

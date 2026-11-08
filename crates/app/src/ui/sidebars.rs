@@ -2,12 +2,12 @@
 //! Keywording, Keyword List, Metadata) panel stacks.
 
 use catalog::{Flag, Folder, Source};
-use eframe::egui::{self, Align, Color32, Layout, RichText, Sense};
+use eframe::egui::{self, Align, Color32, Layout, Rect, RichText, Sense};
 use imaging::PreviewSize;
 
 use super::panels::Side;
 use super::theme;
-use crate::app::{Command, MetadataPreset, PhotoLibraryApp};
+use crate::app::{Command, MetadataPreset, PhotoLibraryApp, View, ZoomLevel};
 use crate::platform;
 
 const LEFT: &[&str] = &["Navigator", "Catalog", "Folders", "Collections"];
@@ -76,25 +76,71 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     });
 }
 
+/// LrC's Navigator: the active photo, the zoom level picker (FIT FILL 1:1 2:1 3:1), and
+/// while zoomed a rectangle showing the visible area; click or drag to move it.
 fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let fit_selected = !(app.zoom.zoomed && app.view == View::Loupe);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            for level in ZoomLevel::ALL.iter().rev() {
+                let on = !fit_selected && app.ui.zoom_level == *level;
+                if zoom_choice(ui, level.label(), on).clicked() {
+                    app.ui.zoom_level = *level;
+                    if app.session.as_ref().and_then(|s| s.active).is_some() {
+                        app.zoom.zoomed = true;
+                        app.view = View::Loupe;
+                    }
+                }
+            }
+            if zoom_choice(ui, "FIT", fit_selected).clicked() {
+                app.zoom.zoomed = false;
+            }
+        });
+    });
+
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, width * 0.66), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, width * 0.66), Sense::click_and_drag());
     ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0x22, 0x22, 0x22));
     let Some(s) = &mut app.session else { return };
     let Some(photo) = s.active_photo().cloned() else { return };
-    let tex = s.previews.get(photo.id).or_else(|| s.thumbs.get(photo.id));
-    match tex {
-        Some(tex) => {
-            let img_rect = super::views::fit_rect(tex.size_vec2(), rect.shrink(4.0));
-            ui.painter().image(
-                tex.id(),
-                img_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+    let Some(tex) = s.previews.get(photo.id).or_else(|| s.thumbs.get(photo.id)) else {
+        if !photo.missing {
+            s.request(&photo, PreviewSize::Thumb);
         }
-        None => s.request(&photo, PreviewSize::Thumb),
+        return;
+    };
+    let size = super::views::rotated_size(tex.size_vec2(), photo.rotation);
+    let img_rect = super::views::fit_rect(size, rect.shrink(4.0));
+    super::views::paint_image(ui.painter(), tex.id(), img_rect, photo.rotation, Color32::WHITE);
+
+    // Click / drag: zoom in (if needed) and center the Loupe on that point.
+    if let Some(p) = resp.interact_pointer_pos()
+        && (resp.clicked() || resp.dragged())
+    {
+        let q = ((p - img_rect.min) / img_rect.size()).clamp(egui::Vec2::ZERO, egui::Vec2::splat(1.0));
+        app.zoom.center = q;
+        app.zoom.anchor = None;
+        app.zoom.zoomed = true;
+        app.view = View::Loupe;
     }
+    // The visible area, from the Loupe's last frame.
+    if app.zoom.zoomed
+        && app.view == View::Loupe
+        && let Some(v) = app.zoom.visible
+    {
+        let r = Rect::from_min_max(
+            img_rect.min + v.min.to_vec2() * img_rect.size(),
+            img_rect.min + v.max.to_vec2() * img_rect.size(),
+        );
+        ui.painter().rect_filled(r, 0.0, Color32::from_white_alpha(18));
+        ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Inside);
+    }
+}
+
+fn zoom_choice(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
+    let color = if on { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
+    ui.add(egui::Label::new(egui::RichText::new(text).size(11.0).color(color)).sense(Sense::click()))
 }
 
 fn catalog_section(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
@@ -393,8 +439,8 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 .into(),
             ));
             rows.push(("Capture Time", photo.capture_time.map(format_capture_time).unwrap_or_default()));
-            if let (Some(w), Some(h)) = (m.width, m.height) {
-                rows.push(("Dimensions", format!("{w} x {h}")));
+            if let Some(d) = dimensions(&m, photo.rotation) {
+                rows.push(("Dimensions", d));
             }
             rows.push((
                 "Camera",
@@ -407,8 +453,8 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 "File Type",
                 photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default(),
             ));
-            if let (Some(w), Some(h)) = (m.width, m.height) {
-                rows.push(("Dimensions", format!("{w} x {h}")));
+            if let Some(d) = dimensions(&m, photo.rotation) {
+                rows.push(("Dimensions", d));
             }
             rows.push((
                 "Date Time Original",
@@ -435,4 +481,11 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.end_row();
         }
     });
+}
+
+/// "6032 x 4032" as displayed: swapped when the photo is rotated a quarter turn.
+pub(super) fn dimensions(m: &catalog::PhotoMetadata, rotation: u8) -> Option<String> {
+    let (w, h) = (m.width?, m.height?);
+    let (w, h) = if rotation % 2 == 1 { (h, w) } else { (w, h) };
+    Some(format!("{w} x {h}"))
 }
