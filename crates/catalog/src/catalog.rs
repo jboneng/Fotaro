@@ -286,6 +286,24 @@ impl Catalog {
         self.conn.execute("UPDATE photos SET flag = ?1 WHERE id = ?2", params![flag as i64, photo_id])?;
         Ok(())
     }
+
+    /// Colour label name (`"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`) or `None`.
+    pub fn set_color_label(&self, photo_id: i64, label: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE photos SET color_label = ?1 WHERE id = ?2", params![label, photo_id])?;
+        Ok(())
+    }
+
+    /// Photo counts for the Catalog panel: (all photographs, previous import).
+    pub fn source_counts(&self) -> Result<(i64, i64)> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*),
+                    COUNT(*) FILTER (WHERE imported_at = (SELECT MAX(imported_at) FROM photos))
+               FROM photos",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
 }
 
 #[cfg(test)]

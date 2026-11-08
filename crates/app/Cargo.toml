@@ -7,6 +7,10 @@ publish.workspace = true
 
 [dependencies]
 catalog.workspace = true
+imaging.workspace = true
+image.workspace = true
+dunce.workspace = true
+chrono = "0.4.45"
 anyhow.workspace = true
 eframe.workspace = true
 env_logger.workspace = true

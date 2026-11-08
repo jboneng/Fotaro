@@ -102,7 +102,7 @@ This is a top-level requirement, not polish. Every phase is judged against "woul
 - [~] 2. LibRaw: `rsraw` rejected (refuses MSVC, LibRaw 0.21.3, needs libclang). Own `crates/libraw` (vendored 0.22.3 + C++ shim + safe wrapper) builds on MSVC. **Pending:** run `rawinfo` against real NEF/CR2/CR3/ARW/RAF/DNG + scanner TIFF samples.
 - [x] 3. Workspace (`app`, `catalog`, `libraw`)
 - [x] 4. Catalog: schema v1 + migrations, `sync_folder` (add/update/missing/restore; missing files keep metadata), folder & photo queries
-- [ ] 5. Imaging crate + preview cache
-- [ ] 6. Job system
-- [ ] 7. LrC-style UI shell
+- [x] 5. Imaging crate: RAW (embedded preview → half-size render fallback), 8/16-bit images, ICC → sRGB (lcms2), EXIF; preview cache (256 px + 2048 px JPEG, fingerprinted)
+- [x] 6. Job system: worker pool, Visible (LIFO, capped) / Normal / Background lanes, per-photo build lock, progress in identity plate
+- [x] 7. LrC-style UI shell: menus, identity plate + module picker, collapsible/solo panel sections, Navigator/Catalog/Folders/Collections, Histogram/Metadata, Grid (3 cell styles) / Loupe / full screen, filmstrip, toolbar, filter bar, Lights Out, toasts, shortcut table (docs/SHORTCUTS.md). Planned features show which phase delivers them.
 - [ ] 8. CI

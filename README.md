@@ -28,10 +28,14 @@ cargo run -p libraw --example rawinfo --release -- <raw files>   # RAW decode ch
 | Path             | Purpose                                                  |
 |------------------|----------------------------------------------------------|
 | `crates/app`     | egui application (binary `photo_library`)               |
-| `crates/catalog` | Folder scanning; SQLite catalog (in progress)           |
+| `crates/catalog` | SQLite catalog: schema, migrations, folder sync, queries |
+| `crates/imaging` | Decoding (RAW/images), ICC to sRGB, EXIF, preview cache |
 | `crates/libraw`  | Safe Rust wrapper + C++ shim over vendored LibRaw 0.22.3 |
 
 ## Third-party licences
 
 LibRaw is dual-licensed LGPL-2.1 / CDDL-1.0; this project uses and statically links it under
 **CDDL-1.0**. Its unmodified source is in `crates/libraw/vendor/LibRaw`.
+
+Development flags: `cargo run -p photo_library -- --catalog <dir.plcat> --add <folder>` opens (or
+creates) a catalog and imports a folder at startup. Keyboard shortcuts: [docs/SHORTCUTS.md](docs/SHORTCUTS.md).
