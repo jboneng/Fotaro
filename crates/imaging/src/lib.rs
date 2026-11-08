@@ -1,0 +1,16 @@
+//! Turning photo files into displayable pixels, and caching the results.
+//!
+//! - [`decode`]: RAW (embedded preview via LibRaw, full render as fallback) or
+//!   regular images (8/16-bit, ICC-managed to sRGB), oriented and size-limited.
+//! - [`read_metadata`]: camera/exposure metadata without decoding pixels.
+//! - [`PreviewCache`]: thumbnail + standard JPEG previews on disk, keyed by a file fingerprint.
+
+mod color;
+mod decode;
+mod metadata;
+mod preview;
+
+pub use decode::{SourceKind, decode};
+pub use image::RgbImage;
+pub use metadata::{Metadata, read_metadata};
+pub use preview::{BuiltPreviews, PreviewCache, PreviewSize, fingerprint};

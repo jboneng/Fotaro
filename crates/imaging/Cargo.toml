@@ -1,0 +1,22 @@
+[package]
+name = "imaging"
+description = "Decoding (RAW via LibRaw, images via `image`), color management and the preview cache"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+libraw.workspace = true
+image.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+lcms2 = "6.2.0"
+kamadak-exif = "0.6.2"
+chrono = "0.4.45"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

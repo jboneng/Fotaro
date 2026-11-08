@@ -53,11 +53,58 @@ pub struct PhotoRow {
     pub file_name: String,
     pub kind: FileKind,
     pub size_bytes: u64,
+    pub mtime_ms: i64,
     pub missing: bool,
     pub rating: u8,
     pub flag: Flag,
     pub color_label: Option<String>,
     pub capture_time: Option<i64>,
+}
+
+/// Camera/exposure metadata stored per photo. `capture_time` is "naive local"
+/// seconds (camera wall-clock time encoded as if UTC).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PhotoMetadata {
+    pub make: Option<String>,
+    pub model: Option<String>,
+    pub lens: Option<String>,
+    pub iso: Option<f64>,
+    pub shutter: Option<f64>,
+    pub aperture: Option<f64>,
+    pub focal_len: Option<f64>,
+    pub capture_time: Option<i64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Where the grid's photos come from (the LrC "source").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    AllPhotographs,
+    PreviousImport,
+    Folder { id: i64, include_subfolders: bool },
+}
+
+const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, f.missing,
+     p.rating, p.flag, p.color_label, p.capture_time";
+
+fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
+    let folder: String = r.get(1)?;
+    let name: String = r.get(2)?;
+    let kind: String = r.get(3)?;
+    Ok(PhotoRow {
+        id: r.get(0)?,
+        path: Path::new(&folder).join(&name),
+        file_name: name,
+        kind: FileKind::parse(&kind).unwrap_or(FileKind::Image),
+        size_bytes: r.get::<_, i64>(4)?.max(0) as u64,
+        mtime_ms: r.get(5)?,
+        missing: r.get(6)?,
+        rating: r.get::<_, i64>(7)?.clamp(0, 5) as u8,
+        flag: Flag::from_db(r.get(8)?),
+        color_label: r.get(9)?,
+        capture_time: r.get(10)?,
+    })
 }
 
 impl Catalog {
@@ -128,47 +175,105 @@ impl Catalog {
 
     /// Photos in a folder, optionally including all subfolders, sorted by path.
     pub fn photos_in_folder(&self, folder_id: i64, include_subfolders: bool) -> Result<Vec<PhotoRow>> {
-        let mut stmt = self.conn.prepare(
-            "WITH RECURSIVE tree(id) AS (
-                 SELECT ?1
-                 UNION ALL
-                 SELECT fo.id FROM folders fo JOIN tree ON fo.parent_id = tree.id WHERE ?2
-             )
-             SELECT p.id, fo.path, f.name, f.kind, f.size, f.missing,
-                    p.rating, p.flag, p.color_label, p.capture_time
-               FROM photos p
-               JOIN files f    ON f.id = p.master_file_id
-               JOIN folders fo ON fo.id = f.folder_id
-              WHERE f.folder_id IN tree
-              ORDER BY fo.path, f.name",
-        )?;
-        let rows = stmt.query_map(params![folder_id, include_subfolders], |r| {
-            let folder: String = r.get(1)?;
-            let name: String = r.get(2)?;
-            let kind: String = r.get(3)?;
-            Ok(PhotoRow {
-                id: r.get(0)?,
-                path: Path::new(&folder).join(&name),
-                file_name: name,
-                kind: FileKind::parse(&kind).unwrap_or(FileKind::Image),
-                size_bytes: r.get::<_, i64>(4)?.max(0) as u64,
-                missing: r.get(5)?,
-                rating: r.get::<_, i64>(6)?.clamp(0, 5) as u8,
-                flag: Flag::from_db(r.get(7)?),
-                color_label: r.get(8)?,
-                capture_time: r.get(9)?,
-            })
-        })?;
+        self.photos(Source::Folder { id: folder_id, include_subfolders })
+    }
+
+    /// Photos for a source, sorted by capture time (then path), like LrC's default.
+    pub fn photos(&self, source: Source) -> Result<Vec<PhotoRow>> {
+        let order = "ORDER BY p.capture_time IS NULL, p.capture_time, fo.path, f.name";
+        let from = "FROM photos p
+                    JOIN files f    ON f.id = p.master_file_id
+                    JOIN folders fo ON fo.id = f.folder_id";
+        let (sql, args): (String, Vec<i64>) = match source {
+            Source::AllPhotographs => (format!("SELECT {PHOTO_COLUMNS} {from} {order}"), vec![]),
+            Source::PreviousImport => (
+                format!(
+                    "SELECT {PHOTO_COLUMNS} {from}
+                      WHERE p.imported_at = (SELECT MAX(imported_at) FROM photos) {order}"
+                ),
+                vec![],
+            ),
+            Source::Folder { id, include_subfolders } => (
+                format!(
+                    "WITH RECURSIVE tree(id) AS (
+                         SELECT ?1
+                         UNION ALL
+                         SELECT fo.id FROM folders fo JOIN tree ON fo.parent_id = tree.id WHERE ?2
+                     )
+                     SELECT {PHOTO_COLUMNS} {from} WHERE f.folder_id IN tree {order}"
+                ),
+                vec![id, include_subfolders.into()],
+            ),
+        };
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), photo_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn photo(&self, photo_id: i64) -> Result<Option<(i64, u8, Flag)>> {
+    pub fn photo(&self, photo_id: i64) -> Result<Option<PhotoRow>> {
+        let sql = format!(
+            "SELECT {PHOTO_COLUMNS} FROM photos p
+               JOIN files f    ON f.id = p.master_file_id
+               JOIN folders fo ON fo.id = f.folder_id
+              WHERE p.id = ?1"
+        );
+        Ok(self.conn.query_row(&sql, [photo_id], photo_row).optional()?)
+    }
+
+    pub fn folder_by_path(&self, path: &Path) -> Result<Option<i64>> {
         Ok(self
             .conn
-            .query_row("SELECT id, rating, flag FROM photos WHERE id = ?1", [photo_id], |r| {
-                Ok((r.get(0)?, r.get::<_, i64>(1)? as u8, Flag::from_db(r.get(2)?)))
-            })
+            .query_row(
+                "SELECT id FROM folders WHERE path = ?1",
+                [path.to_string_lossy()],
+                |r| r.get(0),
+            )
             .optional()?)
+    }
+
+    pub fn metadata(&self, photo_id: i64) -> Result<Option<PhotoMetadata>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT e.camera_make, e.camera_model, e.lens, e.iso, e.shutter, e.aperture,
+                        e.focal_len, p.capture_time, e.width, e.height
+                   FROM exif e JOIN photos p ON p.id = e.photo_id WHERE e.photo_id = ?1",
+                [photo_id],
+                |r| {
+                    Ok(PhotoMetadata {
+                        make: r.get(0)?,
+                        model: r.get(1)?,
+                        lens: r.get(2)?,
+                        iso: r.get(3)?,
+                        shutter: r.get(4)?,
+                        aperture: r.get(5)?,
+                        focal_len: r.get(6)?,
+                        capture_time: r.get(7)?,
+                        width: r.get(8)?,
+                        height: r.get(9)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Store metadata read from the file; also sets the photo's capture time.
+    pub fn set_metadata(&self, photo_id: i64, m: &PhotoMetadata) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO exif
+                 (photo_id, camera_make, camera_model, lens, iso, shutter, aperture,
+                  focal_len, width, height)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                photo_id, m.make, m.model, m.lens, m.iso, m.shutter, m.aperture, m.focal_len,
+                m.width, m.height
+            ],
+        )?;
+        self.conn.execute(
+            "UPDATE photos SET capture_time = ?1 WHERE id = ?2",
+            params![m.capture_time, photo_id],
+        )?;
+        Ok(())
     }
 
     pub fn set_rating(&self, photo_id: i64, rating: u8) -> Result<()> {
@@ -207,6 +312,32 @@ mod tests {
         Catalog::create(tmp.path()).unwrap();
         assert!(Catalog::create(tmp.path()).is_err());
         assert!(Catalog::open(tmp.path().join("nope")).is_err());
+    }
+
+    #[test]
+    fn metadata_round_trips_and_orders_by_capture_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let photos = tmp.path().join("p");
+        std::fs::create_dir(&photos).unwrap();
+        for n in ["a.jpg", "b.jpg", "c.jpg"] {
+            std::fs::write(photos.join(n), b"x").unwrap();
+        }
+        let mut cat = Catalog::create(tmp.path().join("c.plcat")).unwrap();
+        cat.sync_folder(&photos).unwrap();
+        let all = cat.photos(Source::AllPhotographs).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(cat.photos(Source::PreviousImport).unwrap().len(), 3);
+
+        // Give c the earliest capture time and b a later one; a has none (sorts last).
+        let meta = |t| PhotoMetadata { make: Some("Nikon".into()), capture_time: Some(t), ..Default::default() };
+        cat.set_metadata(all[2].id, &meta(100)).unwrap();
+        cat.set_metadata(all[1].id, &meta(200)).unwrap();
+        let names: Vec<_> = cat.photos(Source::AllPhotographs).unwrap().into_iter().map(|p| p.file_name).collect();
+        assert_eq!(names, ["c.jpg", "b.jpg", "a.jpg"]);
+        assert_eq!(cat.metadata(all[2].id).unwrap().unwrap(), meta(100));
+        assert_eq!(cat.metadata(all[0].id).unwrap(), None);
+        assert_eq!(cat.photo(all[0].id).unwrap().unwrap().file_name, "a.jpg");
+        assert!(cat.folder_by_path(&dunce::canonicalize(&photos).unwrap()).unwrap().is_some());
     }
 
     #[test]
