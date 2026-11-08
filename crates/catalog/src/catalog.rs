@@ -128,8 +128,7 @@ impl Catalog {
     }
 
     fn open_db(dir: &Path, db: &Path) -> Result<Self> {
-        let mut conn =
-            Connection::open(db).with_context(|| format!("opening {}", db.display()))?;
+        let mut conn = Connection::open(db).with_context(|| format!("opening {}", db.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -223,11 +222,7 @@ impl Catalog {
     pub fn folder_by_path(&self, path: &Path) -> Result<Option<i64>> {
         Ok(self
             .conn
-            .query_row(
-                "SELECT id FROM folders WHERE path = ?1",
-                [path.to_string_lossy()],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM folders WHERE path = ?1", [path.to_string_lossy()], |r| r.get(0))
             .optional()?)
     }
 
@@ -265,8 +260,16 @@ impl Catalog {
                   focal_len, width, height)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                photo_id, m.make, m.model, m.lens, m.iso, m.shutter, m.aperture, m.focal_len,
-                m.width, m.height
+                photo_id,
+                m.make,
+                m.model,
+                m.lens,
+                m.iso,
+                m.shutter,
+                m.aperture,
+                m.focal_len,
+                m.width,
+                m.height
             ],
         )?;
         self.conn.execute(
@@ -289,8 +292,7 @@ impl Catalog {
 
     /// Colour label name (`"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`) or `None`.
     pub fn set_color_label(&self, photo_id: i64, label: Option<&str>) -> Result<()> {
-        self.conn
-            .execute("UPDATE photos SET color_label = ?1 WHERE id = ?2", params![label, photo_id])?;
+        self.conn.execute("UPDATE photos SET color_label = ?1 WHERE id = ?2", params![label, photo_id])?;
         Ok(())
     }
 
@@ -347,10 +349,12 @@ mod tests {
         assert_eq!(cat.photos(Source::PreviousImport).unwrap().len(), 3);
 
         // Give c the earliest capture time and b a later one; a has none (sorts last).
-        let meta = |t| PhotoMetadata { make: Some("Nikon".into()), capture_time: Some(t), ..Default::default() };
+        let meta =
+            |t| PhotoMetadata { make: Some("Nikon".into()), capture_time: Some(t), ..Default::default() };
         cat.set_metadata(all[2].id, &meta(100)).unwrap();
         cat.set_metadata(all[1].id, &meta(200)).unwrap();
-        let names: Vec<_> = cat.photos(Source::AllPhotographs).unwrap().into_iter().map(|p| p.file_name).collect();
+        let names: Vec<_> =
+            cat.photos(Source::AllPhotographs).unwrap().into_iter().map(|p| p.file_name).collect();
         assert_eq!(names, ["c.jpg", "b.jpg", "a.jpg"]);
         assert_eq!(cat.metadata(all[2].id).unwrap().unwrap(), meta(100));
         assert_eq!(cat.metadata(all[0].id).unwrap(), None);

@@ -76,8 +76,7 @@ impl PreviewCache {
     }
 
     pub fn path(&self, photo_id: i64, size: PreviewSize, fingerprint: u64) -> PathBuf {
-        self.bucket(photo_id)
-            .join(format!("{photo_id}_{}_{fingerprint:016x}.jpg", size.tag()))
+        self.bucket(photo_id).join(format!("{photo_id}_{}_{fingerprint:016x}.jpg", size.tag()))
     }
 
     /// The cached preview for this exact file version, if present.

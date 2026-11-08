@@ -105,4 +105,4 @@ This is a top-level requirement, not polish. Every phase is judged against "woul
 - [x] 5. Imaging crate: RAW (embedded preview → half-size render fallback), 8/16-bit images, ICC → sRGB (lcms2), EXIF; preview cache (256 px + 2048 px JPEG, fingerprinted)
 - [x] 6. Job system: worker pool, Visible (LIFO, capped) / Normal / Background lanes, per-photo build lock, progress in identity plate
 - [x] 7. LrC-style UI shell: menus, identity plate + module picker, collapsible/solo panel sections, Navigator/Catalog/Folders/Collections, Histogram/Metadata, Grid (3 cell styles) / Loupe / full screen, filmstrip, toolbar, filter bar, Lights Out, toasts, shortcut table (docs/SHORTCUTS.md). Planned features show which phase delivers them.
-- [ ] 8. CI
+- [x] 8. CI: GitHub Actions — fmt check; clippy (-D warnings) + tests on Windows, macOS, Linux

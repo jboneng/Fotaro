@@ -79,12 +79,25 @@ fn histogram(rgba: &[u8]) -> Box<Histogram> {
 }
 
 pub enum Event {
-    SyncDone { root: PathBuf, result: Result<SyncReport, String> },
+    SyncDone {
+        root: PathBuf,
+        result: Result<SyncReport, String>,
+    },
     /// `histogram` is computed for thumbnails (cheap, and plenty for display).
-    Image { photo_id: i64, size: PreviewSize, image: egui::ColorImage, histogram: Option<Box<Histogram>> },
-    ImageFailed { photo_id: i64, size: PreviewSize },
+    Image {
+        photo_id: i64,
+        size: PreviewSize,
+        image: egui::ColorImage,
+        histogram: Option<Box<Histogram>>,
+    },
+    ImageFailed {
+        photo_id: i64,
+        size: PreviewSize,
+    },
     /// Metadata (capture time, camera...) was read and stored for a photo.
-    MetadataUpdated { photo_id: i64 },
+    MetadataUpdated {
+        photo_id: i64,
+    },
 }
 
 const VISIBLE_CAP: usize = 300;

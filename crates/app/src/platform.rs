@@ -49,7 +49,10 @@ pub fn volume_of(path: &Path) -> (String, String) {
         ["Volumes", name, ..] => (format!("/Volumes/{name}"), (*name).to_owned()),
         ["media", user, name, ..] => (format!("/media/{user}/{name}"), (*name).to_owned()),
         ["mnt", name, ..] => (format!("/mnt/{name}"), (*name).to_owned()),
-        _ => ("/".to_owned(), if cfg!(target_os = "macos") { "Macintosh HD" } else { "File System" }.to_owned()),
+        _ => (
+            "/".to_owned(),
+            if cfg!(target_os = "macos") { "Macintosh HD" } else { "File System" }.to_owned(),
+        ),
     }
 }
 

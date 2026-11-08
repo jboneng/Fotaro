@@ -11,9 +11,15 @@ pub enum Dir {
 
 pub fn triangle(painter: &egui::Painter, center: Pos2, r: f32, dir: Dir, color: Color32) {
     let pts = match dir {
-        Dir::Down => vec![center + vec2(-r, -r * 0.6), center + vec2(r, -r * 0.6), center + vec2(0.0, r * 0.7)],
-        Dir::Right => vec![center + vec2(-r * 0.6, -r), center + vec2(-r * 0.6, r), center + vec2(r * 0.7, 0.0)],
-        Dir::Left => vec![center + vec2(r * 0.6, -r), center + vec2(r * 0.6, r), center + vec2(-r * 0.7, 0.0)],
+        Dir::Down => {
+            vec![center + vec2(-r, -r * 0.6), center + vec2(r, -r * 0.6), center + vec2(0.0, r * 0.7)]
+        }
+        Dir::Right => {
+            vec![center + vec2(-r * 0.6, -r), center + vec2(-r * 0.6, r), center + vec2(r * 0.7, 0.0)]
+        }
+        Dir::Left => {
+            vec![center + vec2(r * 0.6, -r), center + vec2(r * 0.6, r), center + vec2(-r * 0.7, 0.0)]
+        }
     };
     painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
 }
@@ -34,7 +40,11 @@ pub fn star(painter: &egui::Painter, center: Pos2, r: f32, filled: bool, color: 
     if filled {
         // Fan from the center: a star is not convex.
         for i in 0..10 {
-            painter.add(Shape::convex_polygon(vec![center, pts[i], pts[(i + 1) % 10]], color, Stroke::new(0.5, color)));
+            painter.add(Shape::convex_polygon(
+                vec![center, pts[i], pts[(i + 1) % 10]],
+                color,
+                Stroke::new(0.5, color),
+            ));
         }
     } else {
         painter.add(Shape::closed_line(pts, Stroke::new(1.0, color)));
@@ -54,7 +64,14 @@ pub fn stars(painter: &egui::Painter, center: Pos2, r: f32, count: u8, color: Co
 }
 
 /// A pennant flag; `rejected` adds a cross, like LrC's black reject flag.
-pub fn flag(painter: &egui::Painter, left_center: Pos2, size: f32, fill: Color32, outline: Color32, rejected: bool) {
+pub fn flag(
+    painter: &egui::Painter,
+    left_center: Pos2,
+    size: f32,
+    fill: Color32,
+    outline: Color32,
+    rejected: bool,
+) {
     let top = left_center + vec2(0.0, -size * 0.5);
     let pole = Stroke::new((size * 0.1).max(1.0), outline);
     painter.line_segment([top, top + vec2(0.0, size)], pole);

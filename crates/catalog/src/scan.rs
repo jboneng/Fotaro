@@ -7,14 +7,13 @@ use walkdir::WalkDir;
 
 /// Camera RAW extensions (compared case-insensitively). Decoded via LibRaw.
 pub const RAW_EXTENSIONS: &[&str] = &[
-    "3fr", "arw", "cr2", "cr3", "crw", "dng", "erf", "iiq", "kdc", "mef", "mos", "mrw", "nef",
-    "nrw", "orf", "pef", "raf", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
+    "3fr", "arw", "cr2", "cr3", "crw", "dng", "erf", "iiq", "kdc", "mef", "mos", "mrw", "nef", "nrw", "orf",
+    "pef", "raf", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
 ];
 
 /// Non-RAW image extensions (compared case-insensitively).
-pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "heic", "heif",
-];
+pub const IMAGE_EXTENSIONS: &[&str] =
+    &["jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "heic", "heif"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {

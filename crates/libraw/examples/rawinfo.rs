@@ -41,16 +41,34 @@ fn main() {
             Ok(libraw::Thumbnail::Jpeg(bytes)) => {
                 let p = out_dir.join(format!("{stem}.thumb.jpg"));
                 std::fs::write(&p, &bytes).unwrap();
-                println!("   thumb JPEG {}x{} {} KB in {:?} -> {}", i.thumb_width, i.thumb_height, bytes.len() / 1024, t.elapsed(), p.display());
+                println!(
+                    "   thumb JPEG {}x{} {} KB in {:?} -> {}",
+                    i.thumb_width,
+                    i.thumb_height,
+                    bytes.len() / 1024,
+                    t.elapsed(),
+                    p.display()
+                );
             }
-            Ok(libraw::Thumbnail::JpegXl(bytes)) => println!("   thumb JPEG XL {} KB in {:?}", bytes.len() / 1024, t.elapsed()),
-            Ok(libraw::Thumbnail::Bitmap(b)) => println!("   thumb bitmap {}x{}x{} @{}bit in {:?}", b.width, b.height, b.colors, b.bits, t.elapsed()),
+            Ok(libraw::Thumbnail::JpegXl(bytes)) => {
+                println!("   thumb JPEG XL {} KB in {:?}", bytes.len() / 1024, t.elapsed())
+            }
+            Ok(libraw::Thumbnail::Bitmap(b)) => println!(
+                "   thumb bitmap {}x{}x{} @{}bit in {:?}",
+                b.width,
+                b.height,
+                b.colors,
+                b.bits,
+                t.elapsed()
+            ),
             Err(e) => println!("   thumb FAILED: {e}"),
         }
 
         let t = Instant::now();
         match raw.render(true) {
-            Ok(b) => println!("   half-size render {}x{}x{} in {:?}", b.width, b.height, b.colors, t.elapsed()),
+            Ok(b) => {
+                println!("   half-size render {}x{}x{} in {:?}", b.width, b.height, b.colors, t.elapsed())
+            }
             Err(e) => println!("   render FAILED: {e}"),
         }
     }

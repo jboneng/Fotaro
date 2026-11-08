@@ -20,7 +20,13 @@ fn weak(text: impl Into<String>) -> RichText {
 }
 
 /// A full-width selectable row with a right-aligned count, like LrC's panel rows.
-fn source_row(ui: &mut egui::Ui, indent: f32, label: &str, count: Option<i64>, selected: bool) -> egui::Response {
+fn source_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    label: &str,
+    count: Option<i64>,
+    selected: bool,
+) -> egui::Response {
     let height = 19.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
     if selected {
@@ -78,7 +84,12 @@ fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     match tex {
         Some(tex) => {
             let img_rect = super::views::fit_rect(tex.size_vec2(), rect.shrink(4.0));
-            ui.painter().image(tex.id(), img_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            ui.painter().image(
+                tex.id(),
+                img_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
         None => s.request(&photo, PreviewSize::Thumb),
     }
@@ -150,7 +161,10 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let kids = children.get(&Some(f.id));
             let has_kids = kids.is_some_and(|k| !k.is_empty());
             let expanded = !s.collapsed_folders.contains(&f.id);
-            let name = f.path.file_name().map_or_else(|| f.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            let name = f
+                .path
+                .file_name()
+                .map_or_else(|| f.path.display().to_string(), |n| n.to_string_lossy().into_owned());
             let tri = match (has_kids, expanded) {
                 (false, _) => "   ",
                 (true, true) => "▼ ",
@@ -161,7 +175,8 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let resp = source_row(ui, indent, &format!("{tri}{name}"), Some(count), selected == Some(f.id));
             let resp = resp.on_hover_text(f.path.display().to_string());
             if resp.clicked() {
-                let tri_hit = resp.interact_pointer_pos().is_some_and(|p| p.x < resp.rect.left() + indent + 12.0);
+                let tri_hit =
+                    resp.interact_pointer_pos().is_some_and(|p| p.x < resp.rect.left() + indent + 12.0);
                 if tri_hit && has_kids {
                     toggles.push(f.id);
                 } else {
@@ -181,7 +196,9 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     ui.close();
                 }
                 ui.separator();
-                let _ = ui.add_enabled(false, egui::Button::new("Remove…")).on_disabled_hover_text("Arrives in Phase 1");
+                let _ = ui
+                    .add_enabled(false, egui::Button::new("Remove…"))
+                    .on_disabled_hover_text("Arrives in Phase 1");
             });
             if has_kids && expanded {
                 for k in kids.into_iter().flatten().rev() {
@@ -243,7 +260,10 @@ fn histogram(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             points.push(rect.right_bottom());
             // Draw as thin vertical bars (robust for non-convex shapes).
             for w in points.windows(2) {
-                painter.line_segment([egui::pos2(w[1].x, rect.bottom()), w[1]], egui::Stroke::new(rect.width() / 255.0 + 0.5, color));
+                painter.line_segment(
+                    [egui::pos2(w[1].x, rect.bottom()), w[1]],
+                    egui::Stroke::new(rect.width() / 255.0 + 0.5, color),
+                );
             }
         }
     }
@@ -309,28 +329,71 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
     let mut rows: Vec<(&str, String)> = Vec::new();
     rows.push(("File Name", photo.file_name.clone()));
-    rows.push(("Folder", photo.path.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    rows.push((
+        "Folder",
+        photo
+            .path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    ));
     if photo.missing {
         rows.push(("Status", "File is missing".into()));
     }
     match preset {
         MetadataPreset::Default => {
-            rows.push(("Rating", match photo.rating { 0 => "None".into(), 1 => "1 Star".into(), n => format!("{n} Stars") }));
-            rows.push(("Label", photo.color_label.clone().map(|l| { let mut l = l; l[..1].make_ascii_uppercase(); l }).unwrap_or_default()));
-            rows.push(("Pick", match photo.flag { Flag::Picked => "Flagged", Flag::Rejected => "Rejected", Flag::Unflagged => "Unflagged" }.into()));
+            rows.push((
+                "Rating",
+                match photo.rating {
+                    0 => "None".into(),
+                    1 => "1 Star".into(),
+                    n => format!("{n} Stars"),
+                },
+            ));
+            rows.push((
+                "Label",
+                photo
+                    .color_label
+                    .clone()
+                    .map(|l| {
+                        let mut l = l;
+                        l[..1].make_ascii_uppercase();
+                        l
+                    })
+                    .unwrap_or_default(),
+            ));
+            rows.push((
+                "Pick",
+                match photo.flag {
+                    Flag::Picked => "Flagged",
+                    Flag::Rejected => "Rejected",
+                    Flag::Unflagged => "Unflagged",
+                }
+                .into(),
+            ));
             rows.push(("Capture Time", photo.capture_time.map(format_capture_time).unwrap_or_default()));
             if let (Some(w), Some(h)) = (m.width, m.height) {
                 rows.push(("Dimensions", format!("{w} x {h}")));
             }
-            rows.push(("Camera", [m.make.clone(), m.model.clone()].into_iter().flatten().collect::<Vec<_>>().join(" ")));
+            rows.push((
+                "Camera",
+                [m.make.clone(), m.model.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "),
+            ));
         }
         MetadataPreset::Exif => {
             rows.push(("File Size", platform::human_bytes(photo.size_bytes)));
-            rows.push(("File Type", photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default()));
+            rows.push((
+                "File Type",
+                photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default(),
+            ));
             if let (Some(w), Some(h)) = (m.width, m.height) {
                 rows.push(("Dimensions", format!("{w} x {h}")));
             }
-            rows.push(("Date Time Original", photo.capture_time.map(format_capture_time).unwrap_or_default()));
+            rows.push((
+                "Date Time Original",
+                photo.capture_time.map(format_capture_time).unwrap_or_default(),
+            ));
             let exposure = match (m.shutter, m.aperture) {
                 (Some(t), Some(a)) => format!("{} at ƒ / {a:.1}", format_shutter(t)),
                 (Some(t), None) => format_shutter(t),

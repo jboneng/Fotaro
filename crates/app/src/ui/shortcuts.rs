@@ -143,19 +143,54 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(k(K::Num7), A::ColorLabel { label: "yellow", advance: false }, CULL, "Toggle Yellow label"),
     s(k(K::Num8), A::ColorLabel { label: "green", advance: false }, CULL, "Toggle Green label"),
     s(k(K::Num9), A::ColorLabel { label: "blue", advance: false }, CULL, "Toggle Blue label"),
-    s(shift(K::P), A::SetFlag { flag: Flag::Picked, advance: true }, CULL, "Flag as Pick and go to next photo"),
-    s(shift(K::X), A::SetFlag { flag: Flag::Rejected, advance: true }, CULL, "Flag as Rejected and go to next photo"),
-    s(shift(K::U), A::SetFlag { flag: Flag::Unflagged, advance: true }, CULL, "Remove flag and go to next photo"),
+    s(
+        shift(K::P),
+        A::SetFlag { flag: Flag::Picked, advance: true },
+        CULL,
+        "Flag as Pick and go to next photo",
+    ),
+    s(
+        shift(K::X),
+        A::SetFlag { flag: Flag::Rejected, advance: true },
+        CULL,
+        "Flag as Rejected and go to next photo",
+    ),
+    s(
+        shift(K::U),
+        A::SetFlag { flag: Flag::Unflagged, advance: true },
+        CULL,
+        "Remove flag and go to next photo",
+    ),
     s(shift(K::Num0), A::SetRating { stars: 0, advance: true }, CULL, "Remove rating and go to next photo"),
     s(shift(K::Num1), A::SetRating { stars: 1, advance: true }, CULL, "Rate 1 star and go to next photo"),
     s(shift(K::Num2), A::SetRating { stars: 2, advance: true }, CULL, "Rate 2 stars and go to next photo"),
     s(shift(K::Num3), A::SetRating { stars: 3, advance: true }, CULL, "Rate 3 stars and go to next photo"),
     s(shift(K::Num4), A::SetRating { stars: 4, advance: true }, CULL, "Rate 4 stars and go to next photo"),
     s(shift(K::Num5), A::SetRating { stars: 5, advance: true }, CULL, "Rate 5 stars and go to next photo"),
-    s(shift(K::Num6), A::ColorLabel { label: "red", advance: true }, CULL, "Toggle Red label and go to next photo"),
-    s(shift(K::Num7), A::ColorLabel { label: "yellow", advance: true }, CULL, "Toggle Yellow label and go to next photo"),
-    s(shift(K::Num8), A::ColorLabel { label: "green", advance: true }, CULL, "Toggle Green label and go to next photo"),
-    s(shift(K::Num9), A::ColorLabel { label: "blue", advance: true }, CULL, "Toggle Blue label and go to next photo"),
+    s(
+        shift(K::Num6),
+        A::ColorLabel { label: "red", advance: true },
+        CULL,
+        "Toggle Red label and go to next photo",
+    ),
+    s(
+        shift(K::Num7),
+        A::ColorLabel { label: "yellow", advance: true },
+        CULL,
+        "Toggle Yellow label and go to next photo",
+    ),
+    s(
+        shift(K::Num8),
+        A::ColorLabel { label: "green", advance: true },
+        CULL,
+        "Toggle Green label and go to next photo",
+    ),
+    s(
+        shift(K::Num9),
+        A::ColorLabel { label: "blue", advance: true },
+        CULL,
+        "Toggle Blue label and go to next photo",
+    ),
     // Selection & navigation
     s(k(K::ArrowRight), A::Next, SELECT, "Next photo"),
     s(k(K::ArrowLeft), A::Previous, SELECT, "Previous photo"),
@@ -232,7 +267,8 @@ impl Binding {
         // Shift+digit may arrive as a symbol ("!" for Shift+1), so fall back to the
         // physical key for Shift+digit bindings only. (Never otherwise: arrow keys can
         // report the numpad digit as their physical key.)
-        key == self.key || (self.shift && is_digit(self.key) && !is_logical_key_bound(key) && physical == Some(self.key))
+        key == self.key
+            || (self.shift && is_digit(self.key) && !is_logical_key_bound(key) && physical == Some(self.key))
     }
 }
 
@@ -244,8 +280,16 @@ fn is_logical_key_bound(key: Key) -> bool {
 fn is_digit(key: Key) -> bool {
     matches!(
         key,
-        Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4
-            | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9
+        Key::Num0
+            | Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
+            | Key::Num9
     )
 }
 

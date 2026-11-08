@@ -167,9 +167,7 @@ fn load_known(tx: &Transaction, root: &Path) -> Result<HashMap<PathBuf, Known>> 
 }
 
 fn folder_id(tx: &Transaction, path: &Path) -> Result<Option<i64>> {
-    Ok(tx
-        .query_row("SELECT id FROM folders WHERE path = ?1", [path_str(path)], |r| r.get(0))
-        .optional()?)
+    Ok(tx.query_row("SELECT id FROM folders WHERE path = ?1", [path_str(path)], |r| r.get(0)).optional()?)
 }
 
 fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Result<i64> {
@@ -179,10 +177,7 @@ fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Resul
         }
         return Ok(id);
     }
-    tx.execute(
-        "INSERT INTO folders (path, parent_id) VALUES (?1, ?2)",
-        params![path_str(path), parent_id],
-    )?;
+    tx.execute("INSERT INTO folders (path, parent_id) VALUES (?1, ?2)", params![path_str(path), parent_id])?;
     Ok(tx.last_insert_rowid())
 }
 

@@ -55,11 +55,16 @@ impl SectionStack {
         // Fixed-height painted header: triangle + title, mirrored on the right side.
         let (rect, header) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
         let painter = ui.painter_at(rect);
-        let bg = if header.hovered() { theme::SECTION_HEADER.gamma_multiply(1.25) } else { theme::SECTION_HEADER };
+        let bg =
+            if header.hovered() { theme::SECTION_HEADER.gamma_multiply(1.25) } else { theme::SECTION_HEADER };
         painter.rect_filled(rect, 0.0, bg);
         let (tri_x, text_pos, align) = match side {
-            Side::Left => (rect.left() + 12.0, rect.left_center() + egui::vec2(24.0, 0.0), Align2::LEFT_CENTER),
-            Side::Right => (rect.right() - 12.0, rect.right_center() - egui::vec2(24.0, 0.0), Align2::RIGHT_CENTER),
+            Side::Left => {
+                (rect.left() + 12.0, rect.left_center() + egui::vec2(24.0, 0.0), Align2::LEFT_CENTER)
+            }
+            Side::Right => {
+                (rect.right() - 12.0, rect.right_center() - egui::vec2(24.0, 0.0), Align2::RIGHT_CENTER)
+            }
         };
         let dir = match (open, side) {
             (true, _) => super::icons::Dir::Down,

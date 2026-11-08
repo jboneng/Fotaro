@@ -30,10 +30,8 @@ fn shortcut_for(action: Action) -> Option<String> {
 
 /// A menu item that runs a shortcut action, showing its key binding.
 fn menu_action(ui: &mut egui::Ui, app: &mut PhotoLibraryApp, text: &str, action: Action) {
-    let planned = SHORTCUTS
-        .iter()
-        .find(|s| s.action == action)
-        .is_some_and(|s| matches!(s.status, Status::Planned(_)));
+    let planned =
+        SHORTCUTS.iter().find(|s| s.action == action).is_some_and(|s| matches!(s.status, Status::Planned(_)));
     let mut button = egui::Button::new(text);
     if let Some(sc) = shortcut_for(action) {
         button = button.shortcut_text(sc);
@@ -112,12 +110,16 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             });
             ui.menu_button("Set Rating", |ui| {
                 menu_action(ui, app, "None", Action::SetRating { stars: 0, advance: false });
-                for (n, label) in ["1 Star", "2 Stars", "3 Stars", "4 Stars", "5 Stars"].into_iter().enumerate() {
+                for (n, label) in
+                    ["1 Star", "2 Stars", "3 Stars", "4 Stars", "5 Stars"].into_iter().enumerate()
+                {
                     menu_action(ui, app, label, Action::SetRating { stars: n as u8 + 1, advance: false });
                 }
             });
             ui.menu_button("Set Color Label", |ui| {
-                for (label, name) in [("red", "Red"), ("yellow", "Yellow"), ("green", "Green"), ("blue", "Blue")] {
+                for (label, name) in
+                    [("red", "Red"), ("yellow", "Yellow"), ("green", "Green"), ("blue", "Blue")]
+                {
                     menu_action(ui, app, name, Action::ColorLabel { label, advance: false });
                 }
             });
@@ -144,7 +146,9 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.separator();
             menu_action(ui, app, "Full Screen Preview", Action::FullScreenPreview);
             ui.menu_button("Lights Out", |ui| {
-                for (l, name) in [(Lights::On, "Lights On"), (Lights::Dim, "Lights Dim"), (Lights::Off, "Lights Off")] {
+                for (l, name) in
+                    [(Lights::On, "Lights On"), (Lights::Dim, "Lights Dim"), (Lights::Off, "Lights Off")]
+                {
                     if ui.add(egui::Button::new(name).selected(app.lights == l)).clicked() {
                         app.run(Command::SetLights(l));
                         ui.close();
@@ -335,19 +339,35 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
     // Edge arrows for hidden panels.
     let mid_y = full.center().y;
-    if !app.ui.show_left && edge_toggle(&ctx, "edge_left", egui::pos2(full.left() + 2.0, mid_y), Align2::LEFT_CENTER, "▶") {
+    if !app.ui.show_left
+        && edge_toggle(&ctx, "edge_left", egui::pos2(full.left() + 2.0, mid_y), Align2::LEFT_CENTER, "▶")
+    {
         app.ui.show_left = true;
     }
-    if !app.ui.show_right && edge_toggle(&ctx, "edge_right", egui::pos2(full.right() - 2.0, mid_y), Align2::RIGHT_CENTER, "◀") {
+    if !app.ui.show_right
+        && edge_toggle(&ctx, "edge_right", egui::pos2(full.right() - 2.0, mid_y), Align2::RIGHT_CENTER, "◀")
+    {
         app.ui.show_right = true;
     }
     if !app.ui.show_filmstrip
-        && edge_toggle(&ctx, "edge_bottom", egui::pos2(full.center().x, full.bottom() - 1.0), Align2::CENTER_BOTTOM, "▲")
+        && edge_toggle(
+            &ctx,
+            "edge_bottom",
+            egui::pos2(full.center().x, full.bottom() - 1.0),
+            Align2::CENTER_BOTTOM,
+            "▲",
+        )
     {
         app.ui.show_filmstrip = true;
     }
     if !app.ui.show_top
-        && edge_toggle(&ctx, "edge_top", egui::pos2(full.center().x, full.top() + 22.0), Align2::CENTER_TOP, "▼")
+        && edge_toggle(
+            &ctx,
+            "edge_top",
+            egui::pos2(full.center().x, full.top() + 22.0),
+            Align2::CENTER_TOP,
+            "▼",
+        )
     {
         app.ui.show_top = true;
     }
@@ -366,7 +386,11 @@ fn toast(app: &mut PhotoLibraryApp, ctx: &egui::Context, center: egui::Rect) {
     }
     let fade = 1.0 - (age.as_secs_f32() / TOAST_TIME.as_secs_f32()).powi(4);
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("toast")));
-    let galley = painter.layout_no_wrap(t.text.clone(), egui::FontId::proportional(17.0), theme::TEXT_STRONG.gamma_multiply(fade));
+    let galley = painter.layout_no_wrap(
+        t.text.clone(),
+        egui::FontId::proportional(17.0),
+        theme::TEXT_STRONG.gamma_multiply(fade),
+    );
     let rect = egui::Rect::from_center_size(center.center(), galley.size() + egui::vec2(36.0, 20.0));
     painter.rect_filled(rect, 6.0, Color32::from_black_alpha((200.0 * fade) as u8));
     painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
@@ -377,7 +401,8 @@ fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
     // Lights Out: dim (or black out) everything except the photo area.
     if app.lights != Lights::On {
         let alpha = if app.lights == Lights::Dim { 205 } else { 255 };
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("lights_out")));
+        let painter =
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("lights_out")));
         for r in &app.panel_rects {
             painter.rect_filled(*r, 0.0, Color32::from_black_alpha(alpha));
         }
@@ -404,13 +429,18 @@ fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
                             ui.separator();
                         }
                         ui.horizontal(|ui| {
-                            ui.add_sized([130.0, 16.0], egui::Label::new(RichText::new(s.binding.label()).monospace()));
+                            ui.add_sized(
+                                [130.0, 16.0],
+                                egui::Label::new(RichText::new(s.binding.label()).monospace()),
+                            );
                             let text = RichText::new(s.description);
                             match s.status {
                                 Status::Available => ui.label(text),
                                 Status::Planned(phase) => {
                                     ui.label(text.color(theme::TEXT_WEAK));
-                                    ui.label(RichText::new(format!("({phase})")).small().color(theme::TEXT_WEAK))
+                                    ui.label(
+                                        RichText::new(format!("({phase})")).small().color(theme::TEXT_WEAK),
+                                    )
                                 }
                             };
                         });

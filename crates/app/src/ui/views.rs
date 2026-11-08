@@ -34,7 +34,9 @@ fn paint_stars(painter: &egui::Painter, center: egui::Pos2, rating: u8, size: f3
 fn paint_flag(painter: &egui::Painter, left_center: egui::Pos2, flag: Flag, size: f32) {
     match flag {
         Flag::Picked => icons::flag(painter, left_center, size, theme::PICK, Color32::from_gray(0x30), false),
-        Flag::Rejected => icons::flag(painter, left_center, size, theme::REJECT, Color32::from_gray(0x10), true),
+        Flag::Rejected => {
+            icons::flag(painter, left_center, size, theme::REJECT, Color32::from_gray(0x10), true)
+        }
         Flag::Unflagged => {}
     }
 }
@@ -77,15 +79,39 @@ fn paint_cell(
 
     if style == GridStyle::Compact {
         // Big faint index number behind the photo.
-        painter.text(cell.left_top() + egui::vec2(6.0, 2.0), Align2::LEFT_TOP, (st.index + 1).to_string(), FontId::proportional(cell.height() * 0.22), theme::CELL_INDEX);
+        painter.text(
+            cell.left_top() + egui::vec2(6.0, 2.0),
+            Align2::LEFT_TOP,
+            (st.index + 1).to_string(),
+            FontId::proportional(cell.height() * 0.22),
+            theme::CELL_INDEX,
+        );
     }
     if style == GridStyle::Expanded {
         let y = cell.top() + header / 2.0;
-        painter.text(egui::pos2(cell.left() + 6.0, y), Align2::LEFT_CENTER, (st.index + 1).to_string(), FontId::proportional(13.0), text_color);
+        painter.text(
+            egui::pos2(cell.left() + 6.0, y),
+            Align2::LEFT_CENTER,
+            (st.index + 1).to_string(),
+            FontId::proportional(13.0),
+            text_color,
+        );
         let ext = photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
-        painter.text(egui::pos2(cell.right() - 6.0, y), Align2::RIGHT_CENTER, ext, FontId::proportional(10.5), text_color);
+        painter.text(
+            egui::pos2(cell.right() - 6.0, y),
+            Align2::RIGHT_CENTER,
+            ext,
+            FontId::proportional(10.5),
+            text_color,
+        );
         let name = photo.file_name.rsplit_once('.').map_or(photo.file_name.as_str(), |(n, _)| n);
-        painter.text(egui::pos2(cell.left() + 30.0, y), Align2::LEFT_CENTER, name, FontId::proportional(11.0), text_color);
+        painter.text(
+            egui::pos2(cell.left() + 30.0, y),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::proportional(11.0),
+            text_color,
+        );
     }
 
     let margin = (cell.width() * 0.09).max(6.0);
@@ -97,15 +123,27 @@ fn paint_cell(
         Some(tex) => {
             let r = fit_rect(tex.size_vec2(), image_area);
             painter.rect_filled(r.translate(egui::vec2(1.5, 1.5)), 0.0, Color32::from_black_alpha(90));
-            let tint = if photo.flag == Flag::Rejected { Color32::from_white_alpha(90) } else { Color32::WHITE };
+            let tint =
+                if photo.flag == Flag::Rejected { Color32::from_white_alpha(90) } else { Color32::WHITE };
             painter.image(tex.id(), r, UV, tint);
-            painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_black_alpha(120)), egui::StrokeKind::Outside);
+            painter.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(1.0, Color32::from_black_alpha(120)),
+                egui::StrokeKind::Outside,
+            );
         }
         None => {
             let r = Rect::from_center_size(image_area.center(), image_area.size() * egui::vec2(0.8, 0.6));
             painter.rect_filled(r, 0.0, Color32::from_black_alpha(25));
             if failed || photo.missing {
-                painter.text(r.center(), Align2::CENTER_CENTER, "⚠", FontId::proportional(18.0), Color32::from_black_alpha(140));
+                painter.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    "⚠",
+                    FontId::proportional(18.0),
+                    Color32::from_black_alpha(140),
+                );
             }
         }
     }
@@ -113,12 +151,24 @@ fn paint_cell(
     if footer > 0.0 {
         let y = cell.bottom() - footer / 2.0 - 2.0;
         paint_flag(&painter, egui::pos2(cell.left() + 7.0, y), photo.flag, 13.0);
-        paint_stars(&painter, egui::pos2(cell.center().x, y), photo.rating, 11.0, if st.selected { theme::TEXT_STRONG } else { theme::STAR });
+        paint_stars(
+            &painter,
+            egui::pos2(cell.center().x, y),
+            photo.rating,
+            11.0,
+            if st.selected { theme::TEXT_STRONG } else { theme::STAR },
+        );
     } else if style == GridStyle::Minimal && photo.flag != Flag::Unflagged {
         paint_flag(&painter, cell.left_top() + egui::vec2(5.0, 9.0), photo.flag, 12.0);
     }
     if photo.missing {
-        painter.text(cell.right_top() + egui::vec2(-6.0, header + 4.0), Align2::RIGHT_TOP, "!", FontId::proportional(15.0), theme::MISSING);
+        painter.text(
+            cell.right_top() + egui::vec2(-6.0, header + 4.0),
+            Align2::RIGHT_TOP,
+            "!",
+            FontId::proportional(15.0),
+            theme::MISSING,
+        );
     }
 }
 
@@ -130,7 +180,9 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
         }
         ui.separator();
         ui.menu_button("Set Flag", |ui| {
-            for (name, flag) in [("Flagged", Flag::Picked), ("Unflagged", Flag::Unflagged), ("Rejected", Flag::Rejected)] {
+            for (name, flag) in
+                [("Flagged", Flag::Picked), ("Unflagged", Flag::Unflagged), ("Rejected", Flag::Rejected)]
+            {
                 if ui.button(name).clicked() {
                     app.run(Command::Action(Action::SetFlag { flag, advance: false }));
                     ui.close();
@@ -139,7 +191,11 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
         });
         ui.menu_button("Set Rating", |ui| {
             for stars in 0..=5u8 {
-                let label = match stars { 0 => "None".to_string(), 1 => "1 Star".to_string(), n => format!("{n} Stars") };
+                let label = match stars {
+                    0 => "None".to_string(),
+                    1 => "1 Star".to_string(),
+                    n => format!("{n} Stars"),
+                };
                 if ui.button(label).clicked() {
                     app.run(Command::Action(Action::SetRating { stars, advance: false }));
                     ui.close();
@@ -147,7 +203,8 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
             }
         });
         ui.menu_button("Set Color Label", |ui| {
-            for (label, name) in [("red", "Red"), ("yellow", "Yellow"), ("green", "Green"), ("blue", "Blue")] {
+            for (label, name) in [("red", "Red"), ("yellow", "Yellow"), ("green", "Green"), ("blue", "Blue")]
+            {
                 if ui.button(name).clicked() {
                     app.run(Command::Action(Action::ColorLabel { label, advance: false }));
                     ui.close();
@@ -155,12 +212,18 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
             }
         });
         ui.separator();
-        let _ = ui.add_enabled(false, egui::Button::new("Edit In")).on_disabled_hover_text("Arrives in Phase 7");
+        let _ =
+            ui.add_enabled(false, egui::Button::new("Edit In")).on_disabled_hover_text("Arrives in Phase 7");
     });
 }
 
 /// Handle a click on a photo (cell or filmstrip frame).
-fn handle_click(app: &mut PhotoLibraryApp, resp: &egui::Response, photo: &PhotoRow, open_loupe_on_double: bool) {
+fn handle_click(
+    app: &mut PhotoLibraryApp,
+    resp: &egui::Response,
+    photo: &PhotoRow,
+    open_loupe_on_double: bool,
+) {
     if resp.clicked() || resp.secondary_clicked() {
         let mods = resp.ctx.input(|i| i.modifiers);
         if let Some(s) = &mut app.session {
@@ -188,7 +251,11 @@ pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     if s.photos.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("No photos here yet.\nUse File ▸ Import Photos (Add Folder) to add some.").color(theme::TEXT_WEAK).size(14.0));
+            ui.label(
+                RichText::new("No photos here yet.\nUse File ▸ Import Photos (Add Folder) to add some.")
+                    .color(theme::TEXT_WEAK)
+                    .size(14.0),
+            );
         });
         return;
     }
@@ -218,15 +285,23 @@ pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             for col in 0..cols {
                 let i = row * cols + col;
                 let Some(photo) = s.photos.get(i).cloned() else { break };
-                let rect = Rect::from_min_size(row_rect.min + egui::vec2(4.0 + col as f32 * cell_w, 0.0), egui::vec2(cell_w, cell_h));
+                let rect = Rect::from_min_size(
+                    row_rect.min + egui::vec2(4.0 + col as f32 * cell_w, 0.0),
+                    egui::vec2(cell_w, cell_h),
+                );
                 let tex = s.thumbs.get(photo.id);
                 if tex.is_none() && !photo.missing {
                     s.request(&photo, PreviewSize::Thumb);
                 }
-                let st = CellState { index: i, selected: s.selected.contains(&photo.id), active: s.active == Some(photo.id) };
+                let st = CellState {
+                    index: i,
+                    selected: s.selected.contains(&photo.id),
+                    active: s.active == Some(photo.id),
+                };
                 paint_cell(ui, rect, &photo, tex.as_ref(), s.thumbs.is_failed(photo.id), style, &st);
                 let resp = ui.interact(rect, egui::Id::unique(("cell", photo.id)), Sense::click());
-                let resp = if photo.missing { resp.on_hover_text("The file could not be found.") } else { resp };
+                let resp =
+                    if photo.missing { resp.on_hover_text("The file could not be found.") } else { resp };
                 clicks.push((resp, photo));
             }
         }
@@ -272,9 +347,17 @@ fn info_overlay(app: &mut PhotoLibraryApp, ui: &egui::Ui, rect: Rect, photo: &Ph
     };
     let painter = ui.painter_at(rect);
     let pos = rect.left_top() + egui::vec2(14.0, 10.0);
-    for (i, (text, size)) in [(photo.file_name.as_str(), 15.0), (line2.as_str(), 12.0)].into_iter().enumerate() {
+    for (i, (text, size)) in
+        [(photo.file_name.as_str(), 15.0), (line2.as_str(), 12.0)].into_iter().enumerate()
+    {
         let p = pos + egui::vec2(0.0, i as f32 * 20.0);
-        painter.text(p + egui::vec2(1.0, 1.0), Align2::LEFT_TOP, text, FontId::proportional(size), Color32::from_black_alpha(160));
+        painter.text(
+            p + egui::vec2(1.0, 1.0),
+            Align2::LEFT_TOP,
+            text,
+            FontId::proportional(size),
+            Color32::from_black_alpha(160),
+        );
         painter.text(p, Align2::LEFT_TOP, text, FontId::proportional(size), theme::TEXT_STRONG);
     }
 }
@@ -298,7 +381,13 @@ fn draw_preview(s: &mut Session, ui: &egui::Ui, photo: &PhotoRow, rect: Rect) {
                 s.request(photo, PreviewSize::Thumb);
             }
             let msg = if photo.missing { "The file could not be found." } else { "Loading…" };
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, msg, FontId::proportional(14.0), theme::TEXT_WEAK);
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                msg,
+                FontId::proportional(14.0),
+                theme::TEXT_WEAK,
+            );
         }
     }
 }
@@ -375,7 +464,8 @@ pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         && app.view == View::Loupe
         && let Some(i) = s.active_index()
     {
-        scroll = scroll.horizontal_scroll_offset((i as f32 * item - ui.available_width() / 2.0 + item / 2.0).max(0.0));
+        scroll = scroll
+            .horizontal_scroll_offset((i as f32 * item - ui.available_width() / 2.0 + item / 2.0).max(0.0));
     }
 
     let mut clicks = Vec::new();
@@ -387,21 +477,39 @@ pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         let origin = ui.max_rect().min;
         for i in first..last {
             let photo = s.photos[i].clone();
-            let rect = Rect::from_min_size(origin + egui::vec2(i as f32 * item, 0.0), egui::vec2(item, height)).shrink(2.0);
+            let rect =
+                Rect::from_min_size(origin + egui::vec2(i as f32 * item, 0.0), egui::vec2(item, height))
+                    .shrink(2.0);
             let selected = s.selected.contains(&photo.id);
             let active = s.active == Some(photo.id);
-            let bg = if active { theme::CELL_ACTIVE } else if selected { theme::CELL_SELECTED } else { Color32::from_rgb(0x3a, 0x3a, 0x3a) };
+            let bg = if active {
+                theme::CELL_ACTIVE
+            } else if selected {
+                theme::CELL_SELECTED
+            } else {
+                Color32::from_rgb(0x3a, 0x3a, 0x3a)
+            };
             ui.painter().rect_filled(rect, 1.0, bg);
             match s.thumbs.get(photo.id) {
                 Some(tex) => {
-                    let tint = if photo.flag == Flag::Rejected { Color32::from_white_alpha(90) } else { Color32::WHITE };
+                    let tint = if photo.flag == Flag::Rejected {
+                        Color32::from_white_alpha(90)
+                    } else {
+                        Color32::WHITE
+                    };
                     ui.painter().image(tex.id(), fit_rect(tex.size_vec2(), rect.shrink(5.0)), UV, tint);
                 }
                 None if !photo.missing => s.request(&photo, PreviewSize::Thumb),
                 None => {}
             }
             paint_flag(ui.painter(), rect.left_top() + egui::vec2(4.0, 8.0), photo.flag, 10.0);
-            paint_stars(ui.painter(), rect.center_bottom() - egui::vec2(0.0, 6.0), photo.rating, 8.0, theme::TEXT_STRONG);
+            paint_stars(
+                ui.painter(),
+                rect.center_bottom() - egui::vec2(0.0, 6.0),
+                photo.rating,
+                8.0,
+                theme::TEXT_STRONG,
+            );
             let resp = ui.interact(rect, egui::Id::unique(("film", photo.id)), Sense::click());
             clicks.push((resp, photo));
         }
@@ -416,12 +524,20 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
         let views = [(View::Grid, "▦", "Grid (G)"), (View::Loupe, "▢", "Loupe (E)")];
         for (v, icon, tip) in views {
-            if ui.add(egui::Button::new(RichText::new(icon).size(15.0)).selected(app.view == v)).on_hover_text(tip).clicked() {
+            if ui
+                .add(egui::Button::new(RichText::new(icon).size(15.0)).selected(app.view == v))
+                .on_hover_text(tip)
+                .clicked()
+            {
                 app.run(Command::Action(if v == View::Grid { Action::GridView } else { Action::LoupeView }));
             }
         }
-        let _ = ui.add_enabled(false, egui::Button::new(RichText::new("XY").size(12.0))).on_disabled_hover_text("Compare (C) arrives in Phase 6");
-        let _ = ui.add_enabled(false, egui::Button::new(RichText::new("▦▦").size(12.0))).on_disabled_hover_text("Survey (N) arrives in Phase 6");
+        let _ = ui
+            .add_enabled(false, egui::Button::new(RichText::new("XY").size(12.0)))
+            .on_disabled_hover_text("Compare (C) arrives in Phase 6");
+        let _ = ui
+            .add_enabled(false, egui::Button::new(RichText::new("▦▦").size(12.0)))
+            .on_disabled_hover_text("Survey (N) arrives in Phase 6");
         ui.separator();
         ui.label(RichText::new("Sort:").color(theme::TEXT_WEAK));
         ui.label("Capture Time");
@@ -438,7 +554,14 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             (Flag::Rejected, theme::REJECT, "Set as Rejected (X)"),
         ] {
             let (resp, rect) = icons::icon_button(ui, egui::vec2(22.0, 20.0), flag == target);
-            icons::flag(ui.painter(), rect.left_center() + egui::vec2(7.0, 0.0), 12.0, fill, Color32::from_gray(0x15), target == Flag::Rejected);
+            icons::flag(
+                ui.painter(),
+                rect.left_center() + egui::vec2(7.0, 0.0),
+                12.0,
+                fill,
+                Color32::from_gray(0x15),
+                target == Flag::Rejected,
+            );
             if resp.on_hover_text(tip).clicked() {
                 let f = if flag == target { Flag::Unflagged } else { target };
                 app.run(Command::Action(Action::SetFlag { flag: f, advance: false }));
@@ -461,7 +584,12 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::click());
             ui.painter().rect_filled(rect, 1.0, c);
             if label.as_deref() == Some(name) {
-                ui.painter().rect_stroke(rect.expand(1.5), 1.0, Stroke::new(1.0, theme::TEXT_STRONG), egui::StrokeKind::Outside);
+                ui.painter().rect_stroke(
+                    rect.expand(1.5),
+                    1.0,
+                    Stroke::new(1.0, theme::TEXT_STRONG),
+                    egui::StrokeKind::Outside,
+                );
             }
             if resp.on_hover_text(format!("Toggle {name} label ({key})")).clicked() {
                 app.run(Command::Action(Action::ColorLabel { label: name, advance: false }));

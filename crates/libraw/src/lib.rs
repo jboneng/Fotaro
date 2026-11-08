@@ -79,9 +79,7 @@ pub enum Error {
 impl Error {
     fn from_code(code: c_int) -> Self {
         // SAFETY: LibRaw::strerror returns a static string for any code.
-        let message = unsafe { CStr::from_ptr(ffi::pl_strerror(code)) }
-            .to_string_lossy()
-            .into_owned();
+        let message = unsafe { CStr::from_ptr(ffi::pl_strerror(code)) }.to_string_lossy().into_owned();
         Error::LibRaw { code, message }
     }
 }
@@ -195,9 +193,7 @@ impl RawFile {
         let raw = NonNull::new(unsafe { ffi::pl_new() }).ok_or(Error::OutOfMemory)?;
         let this = RawFile { raw, _map: map };
         // SAFETY: `raw` is valid and the buffer lives as long as `this`.
-        check(unsafe {
-            ffi::pl_open_buffer(this.raw.as_ptr(), this._map.as_ptr().cast(), this._map.len())
-        })?;
+        check(unsafe { ffi::pl_open_buffer(this.raw.as_ptr(), this._map.as_ptr().cast(), this._map.len()) })?;
         Ok(this)
     }
 
@@ -243,10 +239,7 @@ impl RawFile {
         Ok(img.bitmap())
     }
 
-    fn call_image(
-        &mut self,
-        f: impl FnOnce(*mut c_void, *mut ffi::Image) -> c_int,
-    ) -> Result<OwnedImage> {
+    fn call_image(&mut self, f: impl FnOnce(*mut c_void, *mut ffi::Image) -> c_int) -> Result<OwnedImage> {
         // SAFETY: Image is plain-old-data.
         let mut img = OwnedImage(unsafe { std::mem::zeroed() });
         check(f(self.raw.as_ptr(), &mut img.0))?;

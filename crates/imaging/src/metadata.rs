@@ -41,10 +41,8 @@ fn positive(v: f32) -> Option<f64> {
 
 pub(crate) fn from_raw_info(info: &libraw::RawInfo) -> Metadata {
     use chrono::TimeZone;
-    let rotated = matches!(
-        info.orientation,
-        libraw::Orientation::Rotate90Cw | libraw::Orientation::Rotate90Ccw
-    );
+    let rotated =
+        matches!(info.orientation, libraw::Orientation::Rotate90Cw | libraw::Orientation::Rotate90Ccw);
     let (w, h) = if rotated { (info.height, info.width) } else { (info.width, info.height) };
     Metadata {
         make: non_empty(&info.make),
@@ -87,9 +85,7 @@ pub(crate) fn read_exif(path: &Path) -> Result<Metadata> {
     };
     let field = |tag| exif.get_field(tag, In::PRIMARY);
     let text = |tag| match field(tag).map(|f| &f.value) {
-        Some(Value::Ascii(parts)) => {
-            parts.first().and_then(|b| non_empty(&String::from_utf8_lossy(b)))
-        }
+        Some(Value::Ascii(parts)) => parts.first().and_then(|b| non_empty(&String::from_utf8_lossy(b))),
         _ => None,
     };
     let number = |tag| {

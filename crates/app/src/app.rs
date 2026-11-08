@@ -447,7 +447,13 @@ impl PhotoLibraryApp {
         }
     }
 
-    fn apply_to_targets(&mut self, describe: impl Fn(usize) -> String, f: impl Fn(&Catalog, i64) -> Result<()>, update: impl Fn(&mut PhotoRow), advance: bool) {
+    fn apply_to_targets(
+        &mut self,
+        describe: impl Fn(usize) -> String,
+        f: impl Fn(&Catalog, i64) -> Result<()>,
+        update: impl Fn(&mut PhotoRow),
+        advance: bool,
+    ) {
         let Some(s) = &mut self.session else { return };
         let ids = s.targets(self.view);
         if ids.is_empty() {

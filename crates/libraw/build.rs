@@ -20,11 +20,7 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let libraw = manifest.join("vendor/LibRaw");
     let src = libraw.join("src");
-    assert!(
-        src.is_dir(),
-        "LibRaw sources missing at {}. Run: git submodule update --init",
-        src.display()
-    );
+    assert!(src.is_dir(), "LibRaw sources missing at {}. Run: git submodule update --init", src.display());
 
     let mut sources = Vec::new();
     collect_sources(&src, &mut sources);
