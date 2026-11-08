@@ -15,9 +15,12 @@ lcms2 = "6.2.0"
 kamadak-exif = "0.6.2"
 chrono = "0.4.45"
 jpeg-encoder = { version = "0.7.1", features = ["simd"] }
+fast_image_resize = { version = "6.1.0", features = ["image"] }
+memmap2 = "0.9"
 
 [dev-dependencies]
 tempfile.workspace = true
+catalog.workspace = true
 
 [lints]
 workspace = true

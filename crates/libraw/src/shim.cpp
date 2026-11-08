@@ -1,5 +1,6 @@
 #include "shim.h"
 
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -56,6 +57,26 @@ void pl_get_info(void *raw, pl_info *out) {
     copy_str(out->make, sizeof(out->make), d.idata.make);
     copy_str(out->model, sizeof(out->model), d.idata.model);
     copy_str(out->lens, sizeof(out->lens), d.lens.Lens);
+    if (!out->lens[0]) copy_str(out->lens, sizeof(out->lens), d.lens.makernotes.Lens);
+    if (!out->lens[0]) {
+        // Nikon NEFs (and others) often only carry the lens' focal/aperture range;
+        // describe it the way converters do, e.g. "24.0-70.0 mm f/2.8" or "60.0 mm f/2.8".
+        const libraw_makernotes_lens_t &m = d.lens.makernotes;
+        float lo = m.MinFocal > 0 ? m.MinFocal : d.lens.MinFocal;
+        float hi = m.MaxFocal > 0 ? m.MaxFocal : d.lens.MaxFocal;
+        float ap = m.MaxAp4MinFocal > 0 ? m.MaxAp4MinFocal : d.lens.MaxAp4MinFocal;
+        float ap2 = m.MaxAp4MaxFocal > 0 ? m.MaxAp4MaxFocal : d.lens.MaxAp4MaxFocal;
+        if (lo > 0 && hi > 0) {
+            int n = (lo == hi) ? std::snprintf(out->lens, sizeof(out->lens), "%.1f mm", lo)
+                               : std::snprintf(out->lens, sizeof(out->lens), "%.1f-%.1f mm", lo, hi);
+            if (n > 0 && ap > 0 && static_cast<size_t>(n) < sizeof(out->lens)) {
+                if (ap2 > 0 && ap2 != ap)
+                    std::snprintf(out->lens + n, sizeof(out->lens) - n, " f/%.1f-%.1f", ap, ap2);
+                else
+                    std::snprintf(out->lens + n, sizeof(out->lens) - n, " f/%.1f", ap);
+            }
+        }
+    }
     out->iso = d.other.iso_speed;
     out->shutter = d.other.shutter;
     out->aperture = d.other.aperture;

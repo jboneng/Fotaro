@@ -99,7 +99,7 @@ This is a top-level requirement, not polish. Every phase is judged against "woul
 
 ## Progress (Phase 0)
 - [x] 1. Plan + initial commit
-- [~] 2. LibRaw: `rsraw` rejected (refuses MSVC, LibRaw 0.21.3, needs libclang). Own `crates/libraw` (vendored 0.22.3 + C++ shim + safe wrapper) builds on MSVC. **Pending:** run `rawinfo` against real NEF/CR2/CR3/ARW/RAF/DNG + scanner TIFF samples.
+- [x] 2. LibRaw: `rsraw` rejected (refuses MSVC, LibRaw 0.21.3, needs libclang). Own `crates/libraw` (vendored 0.22.3 + C++ shim + safe wrapper) builds on MSVC. Verified on real samples (see "Real-file check" below); CR2/CR3/ARW/RAF still untested for lack of files.
 - [x] 3. Workspace (`app`, `catalog`, `libraw`)
 - [x] 4. Catalog: schema v1 + migrations, `sync_folder` (add/update/missing/restore; missing files keep metadata), folder & photo queries
 - [x] 5. Imaging crate: RAW (embedded preview → half-size render fallback), 8/16-bit images, ICC → sRGB (lcms2), EXIF; preview cache (256 px + 2048 px JPEG, fingerprinted)
@@ -131,3 +131,24 @@ Measure again with `PHOTOLIB_PERF=1` (frame stats) and the `imaging` `bench` exa
 - [x] Library ▸ Previews ▸ Build Standard-Sized Previews
 - [ ] "Find Missing Folder…" / "Update Folder Location…" for relinking moved folders
 - [ ] Purge previews orphaned by older app versions or crashes
+
+### Real-file check (2026-11-08)
+A 15-file sample of the user's own library lives in `testdata/real/` (git-ignored, 1.3 GB):
+D750 NEFs, a D750-converted DNG, SilverFast/Plustek OpticFilm 8200i raw-negative DNGs, a
+"SilverScan Studio" linear DNG, 16-bit scanner TIFFs (incl. the `_IR` infrared channel), NegPy
+`.NEF.tiff` output, and PNG/JPEG exports. Decode them all with
+`cargo run -p imaging --example decode --release -- <out dir> testdata/real/*/*`.
+
+All 15 decode with correct orientation and colour (negatives display as negatives, as in LrC).
+Fixes from this pass:
+- Resizing with `fast_image_resize` (SIMD) instead of `image`: a 24 MP NEF standard preview went
+  from 1.4 s to 0.20 s, thumbnails from 32 ms to 11 ms.
+- Embedded RAW previews must reach 75% of the requested size; the 1024 px previews inside converted
+  DNGs looked soft in the loupe, so those are rendered instead (as LrC does).
+- Files without a capture date (scans, exports) use the file's modification time, like LrC.
+- Lens names for Nikon NEFs, built from the makernote focal/aperture range ("60.0 mm f/2.8").
+- Image files are memory-mapped for decoding (TIFF decoding seeks a lot; a BufReader was ~2x slower).
+
+Still slowish: 184 MB 16-bit TIFFs take 1–2.5 s and SilverFast raw DNGs ~2 s per standard preview
+(timings were noisy while Windows Defender scanned the freshly copied files). Fine for background
+building; revisit with 1:1 previews in Phase 2.

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use fast_image_resize as fir;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader, RgbImage};
 
@@ -15,26 +16,41 @@ pub enum SourceKind {
     Image,
 }
 
-/// Embedded RAW previews smaller than this (longest side) trigger a real render instead.
-const MIN_EMBEDDED_PX: u32 = 640;
+/// An embedded RAW preview is used when its longest side is at least this fraction of the
+/// requested size. Smaller ones (e.g. the 1024 px previews in converted DNGs) look soft in
+/// the loupe, so the RAW is rendered instead, as LrC does for standard previews.
+const MIN_EMBEDDED_FRACTION: f32 = 0.75;
 
 /// Decode `path` to an sRGB image whose longest side is at most `max_px`,
 /// rotated for display. Also returns the file's metadata (read while decoding).
 pub fn decode(path: &Path, kind: SourceKind, max_px: u32) -> Result<(RgbImage, Metadata)> {
-    match kind {
+    let (img, meta) = match kind {
         SourceKind::Raw => decode_raw(path, max_px),
         SourceKind::Image => decode_image(path, max_px),
     }
-    .with_context(|| format!("decoding {}", path.display()))
+    .with_context(|| format!("decoding {}", path.display()))?;
+    Ok((img, metadata::with_file_time_fallback(meta, path)))
 }
 
 fn fit(img: DynamicImage, max_px: u32) -> DynamicImage {
-    if img.width().max(img.height()) <= max_px {
-        img
-    } else if max_px <= 512 {
-        img.thumbnail(max_px, max_px)
-    } else {
-        img.resize(max_px, max_px, FilterType::CatmullRom)
+    let (w, h) = (img.width(), img.height());
+    let longest = w.max(h);
+    if longest <= max_px {
+        return img;
+    }
+    let scale = max_px as f64 / longest as f64;
+    let (dw, dh) = (((w as f64 * scale).round() as u32).max(1), ((h as f64 * scale).round() as u32).max(1));
+
+    // fast_image_resize (SIMD) is ~20x faster than `image`'s resize: a 24 MP
+    // CatmullRom reduction drops from ~750 ms to a few tens of ms.
+    let mut dst = DynamicImage::new(dw, dh, img.color());
+    let opts = fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom));
+    match fir::Resizer::new().resize(&img, &mut dst, &opts) {
+        Ok(()) => dst,
+        Err(e) => {
+            log::debug!("fast resize unavailable for {:?} ({e}), using fallback", img.color());
+            img.resize(max_px, max_px, FilterType::CatmullRom)
+        }
     }
 }
 
@@ -63,7 +79,7 @@ fn decode_raw(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
     let meta = metadata::from_raw_info(&info);
 
     // Fast path: the camera's embedded preview (what LrC calls "embedded previews").
-    let wanted = max_px.min(MIN_EMBEDDED_PX);
+    let wanted = (max_px as f32 * MIN_EMBEDDED_FRACTION) as u32;
     let embedded = match raw.thumbnail() {
         Ok(libraw::Thumbnail::Jpeg(bytes)) => image::load_from_memory(&bytes).ok(),
         Ok(libraw::Thumbnail::Bitmap(b)) => bitmap_to_image(b).ok(),
@@ -83,7 +99,15 @@ fn decode_raw(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
 }
 
 fn decode_image(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
-    let mut decoder = ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
+    // Memory-map instead of `ImageReader::open`: TIFF decoding seeks a lot, and every seek
+    // discards a BufReader's buffer (a 184 MB 16-bit TIFF decoded in 2 s that way vs 1 s).
+    let file = std::fs::File::open(path)?;
+    // SAFETY: the map is read-only and dropped before returning. If another process
+    // truncates the file meanwhile we may read garbage (or fault), the same risk every
+    // mmap-based viewer accepts; LibRaw files are opened the same way.
+    let map = unsafe { memmap2::Mmap::map(&file)? };
+    let mut decoder =
+        ImageReader::new(std::io::Cursor::new(&map[..])).with_guessed_format()?.into_decoder()?;
     let icc = decoder.icc_profile().ok().flatten();
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut img = DynamicImage::from_decoder(decoder)?;
@@ -149,8 +173,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("small.png");
         RgbImage::from_pixel(40, 30, Rgb([1, 2, 3])).save(&path).unwrap();
-        let (out, _) = decode(&path, SourceKind::Image, 256).unwrap();
+        let (out, meta) = decode(&path, SourceKind::Image, 256).unwrap();
         assert_eq!((out.width(), out.height()), (40, 30));
+        assert!(meta.capture_time.is_some(), "files without EXIF fall back to the file date");
+        assert_eq!(crate::read_metadata(&path, SourceKind::Image).unwrap().capture_time, meta.capture_time);
     }
 
     #[test]

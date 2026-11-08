@@ -63,13 +63,26 @@ pub(crate) fn from_raw_info(info: &libraw::RawInfo) -> Metadata {
 
 /// Read metadata only (no pixel decoding).
 pub fn read_metadata(path: &Path, kind: SourceKind) -> Result<Metadata> {
-    match kind {
+    let meta = match kind {
         SourceKind::Raw => {
             let raw = libraw::RawFile::open(path).with_context(|| format!("opening {}", path.display()))?;
-            Ok(from_raw_info(&raw.info()))
+            from_raw_info(&raw.info())
         }
-        SourceKind::Image => read_exif(path),
+        SourceKind::Image => read_exif(path)?,
+    };
+    Ok(with_file_time_fallback(meta, path))
+}
+
+/// Like LrC, use the file's modification time as the capture time when the file has
+/// none (scanner output, exports, screenshots), so these sort sensibly by Capture Time.
+pub(crate) fn with_file_time_fallback(mut meta: Metadata, path: &Path) -> Metadata {
+    if meta.capture_time.is_none() {
+        meta.capture_time = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|t| chrono::DateTime::<chrono::Local>::from(t).naive_local().and_utc().timestamp());
     }
+    meta
 }
 
 /// EXIF for JPEG/TIFF/PNG/WebP/HEIF. Files without EXIF yield empty metadata.
