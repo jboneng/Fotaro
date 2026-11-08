@@ -9,7 +9,7 @@ mod sync;
 pub use catalog::{
     CATALOG_EXTENSION, Catalog, Flag, Folder, PhotoMetadata, PhotoRow, SortKey, SortOrder, Source,
 };
-pub use folders::validate_folder_name;
+pub use folders::{Relocated, validate_folder_name};
 pub use scan::{FileKind, Photo, file_kind, is_photo, scan};
 pub use schema::LATEST_VERSION as SCHEMA_VERSION;
 pub use sync::{MetadataReader, SyncReport};

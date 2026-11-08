@@ -129,8 +129,8 @@ Measure again with `PHOTOLIB_PERF=1` (frame stats) and the `imaging` `bench` exa
 - [x] Home / End / Page Up / Page Down
 - [x] Folder operations (LrC context menu): missing-folder "?" (checked off the UI thread), Create Folder inside…, Rename… (disk + catalog, undone on failure), Remove… (catalog only, purges previews), Synchronize Folder…, Show Parent Folder, Show in Explorer/Finder
 - [x] Library ▸ Previews ▸ Build Standard-Sized Previews
-- [ ] "Find Missing Folder…" / "Update Folder Location…" for relinking moved folders
-- [ ] Purge previews orphaned by older app versions or crashes
+- [x] "Find Missing Folder…" (missing folders) / "Update Folder Location…" (present ones): repoint a folder and its subfolders, keeping ratings etc.; refuses a location holding none of its photos or one that collides with catalog folders; re-syncs afterwards
+- [x] Orphaned-preview cleanup on catalog open (removed photos, old versions, `.tmp` leftovers; previews newer than the catalog snapshot are kept; skipped for an empty catalog)
 
 ### Real-file check (2026-11-08)
 A 15-file sample of the user's own library lives in `testdata/real/` (git-ignored, 1.3 GB):

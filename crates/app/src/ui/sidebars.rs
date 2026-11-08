@@ -195,6 +195,10 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                         ui.close();
                     }
                 };
+                if missing {
+                    item(ui, "Find Missing Folder…", true, Command::LocateFolder(f.id));
+                    ui.separator();
+                }
                 item(
                     ui,
                     &format!("Create Folder inside \"{name}\"…"),
@@ -205,6 +209,9 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 item(ui, "Remove…", true, Command::RemoveFolder(f.id));
                 ui.separator();
                 item(ui, "Synchronize Folder…", !missing, Command::SyncFolder(f.id));
+                if !missing {
+                    item(ui, "Update Folder Location…", true, Command::LocateFolder(f.id));
+                }
                 item(ui, "Show Parent Folder", f.parent_id.is_none(), Command::ShowParentFolder(f.id));
                 ui.separator();
                 item(ui, platform::REVEAL_LABEL, !missing, Command::Reveal(f.path.clone()));

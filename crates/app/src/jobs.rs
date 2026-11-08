@@ -51,6 +51,9 @@ pub enum Job {
     CheckFolders { folders: Vec<(i64, PathBuf)> },
     /// Delete cached previews of photos removed from the catalog.
     PurgePreviews { photo_ids: Vec<i64> },
+    /// Delete previews that no catalog photo will ask for again (crash leftovers, old
+    /// versions, photos removed by older app versions). Run once per catalog open.
+    PurgeOrphanPreviews,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,7 +65,10 @@ enum JobKey {
 impl Job {
     fn key(&self) -> Option<JobKey> {
         match self {
-            Job::Sync { .. } | Job::CheckFolders { .. } | Job::PurgePreviews { .. } => None,
+            Job::Sync { .. }
+            | Job::CheckFolders { .. }
+            | Job::PurgePreviews { .. }
+            | Job::PurgeOrphanPreviews => None,
             Job::Load { photo, size } => Some(JobKey::Load(photo.id, *size)),
             Job::BuildPreviews { photo } => Some(JobKey::Build(photo.id)),
         }
@@ -404,6 +410,34 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                 shared.cache.remove(id);
             }
         }
+        Job::PurgeOrphanPreviews => {
+            let started = std::time::Instant::now();
+            // Previews written after this moment are kept whatever the snapshot says.
+            let snapshot = std::time::SystemTime::now();
+            let current: std::collections::HashMap<i64, u64> = match cat.photo_versions() {
+                Ok(v) => {
+                    v.into_iter().map(|(id, size, mtime)| (id, imaging::fingerprint(size, mtime))).collect()
+                }
+                Err(e) => {
+                    log::warn!("skipping preview cleanup: {e:#}");
+                    return;
+                }
+            };
+            // An empty catalog next to a full cache smells like a damaged or wrong catalog
+            // database, not like intent (removing folders already purges their previews).
+            if current.is_empty() {
+                log::info!("preview cleanup skipped: the catalog has no photos");
+                return;
+            }
+            let r = shared.cache.purge_orphans(snapshot, |id, fp| current.get(&id) == Some(&fp));
+            log::info!(
+                "preview cleanup: removed {} of {} files ({}) in {:.0?}",
+                r.removed,
+                r.scanned,
+                crate::platform::human_bytes(r.bytes),
+                started.elapsed()
+            );
+        }
         Job::BuildPreviews { photo } => {
             if photo.path.exists()
                 && let Err(e) = ensure_previews(shared, cat, &photo)
@@ -463,7 +497,9 @@ mod tests {
                 Job::Load { photo, .. } => format!("load{}", photo.id),
                 Job::Sync { .. } => "sync".into(),
                 Job::BuildPreviews { photo } => format!("build{}", photo.id),
-                Job::CheckFolders { .. } | Job::PurgePreviews { .. } => "other".into(),
+                Job::CheckFolders { .. } | Job::PurgePreviews { .. } | Job::PurgeOrphanPreviews => {
+                    "other".into()
+                }
             })
             .collect();
         assert_eq!(order, ["load3", "load2", "sync", "build1"]);

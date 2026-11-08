@@ -300,6 +300,16 @@ impl Catalog {
         Ok(self.conn.query_row(&sql, [photo_id], photo_row).optional()?)
     }
 
+    /// (photo id, file size, file mtime in ms) for every photo: what preview fingerprints
+    /// are computed from, without touching the disk.
+    pub fn photo_versions(&self) -> Result<Vec<(i64, u64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, f.size, f.mtime_ms FROM photos p JOIN files f ON f.id = p.master_file_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn folder_by_path(&self, path: &Path) -> Result<Option<i64>> {
         Ok(self
             .conn

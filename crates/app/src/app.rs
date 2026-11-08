@@ -109,6 +109,8 @@ pub enum Command {
     RemoveFolder(i64),
     ConfirmRemoveFolder(i64),
     ShowParentFolder(i64),
+    /// "Find Missing Folder…" / "Update Folder Location…": pick where the folder is now.
+    LocateFolder(i64),
     /// Open the "Create Folder" / "Rename" dialogs.
     CreateFolderIn(i64),
     RenameFolder(i64),
@@ -191,6 +193,7 @@ impl Session {
         };
         s.refresh_tree()?;
         s.reload_photos()?;
+        s.jobs.submit_normal(Job::PurgeOrphanPreviews);
         Ok(s)
     }
 
@@ -763,6 +766,34 @@ impl PhotoLibraryApp {
                 s.catalog.show_parent_folder(id)?;
                 Ok("Showing parent folder".into())
             }),
+            Command::LocateFolder(id) => {
+                let Some(s) = &self.session else { return };
+                let Some(f) = s.folders.iter().find(|f| f.id == id) else { return };
+                let name = folder_name(&f.path);
+                let title = if s.missing_folders.contains(&id) {
+                    format!("Find Missing Folder \"{name}\"")
+                } else {
+                    format!("Update Folder Location for \"{name}\"")
+                };
+                // Start the dialog at the closest part of the old path that still exists.
+                let start = f.path.ancestors().skip(1).find(|p| p.is_dir()).map(Path::to_path_buf);
+                let mut dialog = rfd::FileDialog::new().set_title(title);
+                if let Some(start) = start {
+                    dialog = dialog.set_directory(start);
+                }
+                if let Some(new) = dialog.pick_folder() {
+                    self.folder_op(|s| {
+                        let moved = s.catalog.relocate_folder(id, &new)?;
+                        // Refresh missing/changed files at the new location.
+                        s.jobs.submit_normal(Job::Sync { root: moved.path.clone() });
+                        let mut msg = format!("\"{name}\" now points to {}", moved.path.display());
+                        if moved.found < moved.total {
+                            msg += &format!(" ({} of {} photos found)", moved.found, moved.total);
+                        }
+                        Ok(msg)
+                    });
+                }
+            }
             Command::CreateFolderIn(parent) => {
                 self.dialog = Some(Dialog::CreateFolder { parent, name: String::new() })
             }

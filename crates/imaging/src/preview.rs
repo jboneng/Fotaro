@@ -141,12 +141,107 @@ impl PreviewCache {
     pub fn remove(&self, photo_id: i64) {
         self.remove_stale(photo_id, u64::MAX);
     }
+
+    /// Delete previews nothing will ever ask for again: photos no longer in the catalog,
+    /// older versions of changed files, and temp files from interrupted writes. These pile
+    /// up after crashes, older app versions, or catalog edits made while previews built.
+    ///
+    /// `wanted(photo_id, fingerprint)` says whether a preview is still current. Files
+    /// modified after `snapshot` are kept: the caller's `wanted` view of the catalog was
+    /// taken then, so newer previews may belong to photos it does not know about yet.
+    /// Files that do not look like previews are left alone.
+    pub fn purge_orphans(
+        &self,
+        snapshot: std::time::SystemTime,
+        wanted: impl Fn(i64, u64) -> bool,
+    ) -> PurgeReport {
+        let mut report = PurgeReport::default();
+        let Ok(buckets) = std::fs::read_dir(&self.root) else { return report };
+        for bucket in buckets.flatten() {
+            let Ok(entries) = std::fs::read_dir(bucket.path()) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(parsed) = parse_preview_name(&name) else { continue };
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.modified().is_ok_and(|m| m >= snapshot) {
+                    continue;
+                }
+                report.scanned += 1;
+                let orphan = match parsed {
+                    PreviewName::Temp => true,
+                    PreviewName::Preview { photo_id, fingerprint } => !wanted(photo_id, fingerprint),
+                };
+                if orphan && std::fs::remove_file(entry.path()).is_ok() {
+                    report.removed += 1;
+                    report.bytes += meta.len();
+                }
+            }
+        }
+        report
+    }
+}
+
+/// What [`PreviewCache::purge_orphans`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeReport {
+    pub scanned: usize,
+    pub removed: usize,
+    pub bytes: u64,
+}
+
+enum PreviewName {
+    Preview { photo_id: i64, fingerprint: u64 },
+    Temp,
+}
+
+/// Parse `<photo_id>_<t|s>_<fingerprint:016x>.jpg` (or the `.tmp` written before the rename).
+fn parse_preview_name(name: &str) -> Option<PreviewName> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    let mut parts = stem.split('_');
+    let photo_id = parts.next()?.parse().ok()?;
+    let tag = parts.next()?;
+    let fp = parts.next()?;
+    if parts.next().is_some() || !matches!(tag, "t" | "s") || fp.len() != 16 {
+        return None;
+    }
+    let fingerprint = u64::from_str_radix(fp, 16).ok()?;
+    match ext {
+        "jpg" => Some(PreviewName::Preview { photo_id, fingerprint }),
+        "tmp" => Some(PreviewName::Temp),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::Rgb;
+
+    #[test]
+    fn purges_orphans_but_keeps_current_new_and_foreign_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::new(tmp.path().join("previews"));
+        let touch = |p: PathBuf| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"jpeg").unwrap();
+            p
+        };
+        let current = touch(cache.path(1, PreviewSize::Thumb, 0xaa));
+        let old_version = touch(cache.path(1, PreviewSize::Standard, 0xbb));
+        let removed_photo = touch(cache.path(2, PreviewSize::Thumb, 0xcc));
+        let temp = touch(cache.path(3, PreviewSize::Standard, 0xdd).with_extension("tmp"));
+        let foreign = touch(cache.bucket(4).join("notes.txt"));
+
+        let snapshot = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        let wanted = |id: i64, fp: u64| (id, fp) == (1, 0xaa);
+        // Previews written after the catalog snapshot are never touched.
+        let r = cache.purge_orphans(std::time::SystemTime::UNIX_EPOCH, wanted);
+        assert_eq!(r.removed, 0);
+        let r = cache.purge_orphans(snapshot, wanted);
+        assert_eq!((r.scanned, r.removed, r.bytes), (4, 3, 12));
+        assert!(current.exists() && foreign.exists());
+        assert!(!old_version.exists() && !removed_photo.exists() && !temp.exists());
+    }
 
     #[test]
     fn fingerprint_changes_with_size_or_mtime() {
