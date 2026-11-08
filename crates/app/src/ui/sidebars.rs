@@ -162,8 +162,19 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             };
             let indent = 4.0 + depth as f32 * 14.0;
             let count = if include_subfolders { tree.totals[&f.id] } else { f.photo_count };
-            let resp = source_row(ui, indent, &format!("{tri}{name}"), Some(count), selected == Some(f.id));
-            let resp = resp.on_hover_text(f.path.display().to_string());
+            let missing = s.missing_folders.contains(&f.id);
+            let label = if missing { format!("{tri}{name}  ?") } else { format!("{tri}{name}") };
+            let resp = source_row(ui, indent, &label, Some(count), selected == Some(f.id));
+            if missing {
+                // LrC greys out folders it can't find (e.g. an unplugged drive).
+                ui.painter().rect_filled(resp.rect, 0.0, Color32::from_black_alpha(90));
+            }
+            let tip = if missing {
+                format!("{}\nThis folder could not be found.", f.path.display())
+            } else {
+                f.path.display().to_string()
+            };
+            let resp = resp.on_hover_text(tip);
             if resp.clicked() {
                 let tri_hit =
                     resp.interact_pointer_pos().is_some_and(|p| p.x < resp.rect.left() + indent + 12.0);
@@ -176,19 +187,27 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             if resp.double_clicked() && has_kids {
                 toggles.push(f.id);
             }
+            // Same items and order as LrC's Folders panel context menu.
             resp.context_menu(|ui| {
-                if ui.button("Synchronize Folder…").clicked() {
-                    commands.push(Command::SyncFolder(f.id));
-                    ui.close();
-                }
-                if ui.button(platform::REVEAL_LABEL).clicked() {
-                    commands.push(Command::Reveal(f.path.clone()));
-                    ui.close();
-                }
+                let mut item = |ui: &mut egui::Ui, text: &str, enabled: bool, cmd: Command| {
+                    if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
+                        commands.push(cmd);
+                        ui.close();
+                    }
+                };
+                item(
+                    ui,
+                    &format!("Create Folder inside \"{name}\"…"),
+                    !missing,
+                    Command::CreateFolderIn(f.id),
+                );
+                item(ui, "Rename…", !missing, Command::RenameFolder(f.id));
+                item(ui, "Remove…", true, Command::RemoveFolder(f.id));
                 ui.separator();
-                let _ = ui
-                    .add_enabled(false, egui::Button::new("Remove…"))
-                    .on_disabled_hover_text("Arrives in Phase 1");
+                item(ui, "Synchronize Folder…", !missing, Command::SyncFolder(f.id));
+                item(ui, "Show Parent Folder", f.parent_id.is_none(), Command::ShowParentFolder(f.id));
+                ui.separator();
+                item(ui, platform::REVEAL_LABEL, !missing, Command::Reveal(f.path.clone()));
             });
             if has_kids && expanded {
                 for &k in kids.into_iter().flatten().rev() {

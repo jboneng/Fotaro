@@ -18,7 +18,7 @@ use eframe::egui::{self, Align, Align2, Color32, Layout, RichText};
 
 use super::shortcuts::{Action, SHORTCUTS, Status};
 use super::{sidebars, theme, views};
-use crate::app::{Command, Lights, PhotoLibraryApp, View};
+use crate::app::{Command, Dialog, Lights, PhotoLibraryApp, View};
 use catalog::Flag;
 
 const TOAST_TIME: Duration = Duration::from_millis(1400);
@@ -98,6 +98,11 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.separator();
             menu_action(ui, app, "Previous Photo", Action::Previous);
             menu_action(ui, app, "Next Photo", Action::Next);
+            ui.separator();
+            ui.menu_button("Previews", |ui| {
+                let any = app.session.as_ref().is_some_and(|s| !s.selected.is_empty());
+                menu_cmd(ui, app, "Build Standard-Sized Previews", any, Command::BuildPreviews);
+            });
         });
         ui.menu_button("Photo", |ui| {
             let reveal = active_path.clone().map_or(Command::Planned("", ""), Command::Reveal);
@@ -450,6 +455,8 @@ fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
         app.show_shortcuts = open;
     }
 
+    dialogs(app, ctx);
+
     if let Some(err) = app.error.clone() {
         let mut open = true;
         egui::Window::new("Something went wrong")
@@ -477,4 +484,87 @@ pub(super) fn timed<R>(name: &str, f: impl FnOnce() -> R) -> R {
         log::warn!("slow section: {name} took {:.0?}", started.elapsed());
     }
     r
+}
+
+/// Modal dialogs: Remove folder confirmation, Create Folder and Rename prompts.
+fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+    let Some(dialog) = app.dialog.as_mut() else { return };
+    let mut close = false;
+    let mut run = None;
+
+    let title = match dialog {
+        Dialog::ConfirmRemoveFolder { .. } => "Remove Folder",
+        Dialog::CreateFolder { .. } => "Create Folder",
+        Dialog::RenameFolder { .. } => "Rename Folder",
+    };
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_min_width(340.0);
+            match dialog {
+                Dialog::ConfirmRemoveFolder { id, name, photos } => {
+                    ui.label(
+                        RichText::new(format!("Remove the folder \"{name}\" from the catalog?")).strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(format!(
+                        "{photos} photo{} and any subfolders will be removed from this catalog, \
+                         with their ratings, flags and labels.\nThe files on disk are not touched.",
+                        if *photos == 1 { "" } else { "s" }
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Remove").clicked() {
+                            run = Some(Command::ConfirmRemoveFolder(*id));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::CreateFolder { parent, name } | Dialog::RenameFolder { id: parent, name } => {
+                    let renaming = title == "Rename Folder";
+                    ui.label(if renaming { "New folder name:" } else { "Folder name:" });
+                    let resp = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                    if !resp.has_focus() && !resp.lost_focus() {
+                        resp.request_focus();
+                    }
+                    let valid = catalog::validate_folder_name(name);
+                    if let Err(e) = &valid
+                        && !name.is_empty()
+                    {
+                        ui.label(RichText::new(e.to_string()).color(theme::MISSING).size(11.0));
+                    }
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.add_enabled(
+                            valid.is_ok(),
+                            egui::Button::new(if renaming { "Rename" } else { "Create" }),
+                        );
+                        if (ok.clicked() || enter) && valid.is_ok() {
+                            let name = name.clone();
+                            run = Some(if renaming {
+                                Command::ApplyRenameFolder { id: *parent, name }
+                            } else {
+                                Command::ApplyCreateFolder { parent: *parent, name }
+                            });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+            }
+        });
+
+    if let Some(cmd) = run {
+        app.run(cmd);
+        close = true;
+    }
+    if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.dialog = None;
+    }
 }

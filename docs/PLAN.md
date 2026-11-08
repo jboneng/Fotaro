@@ -127,5 +127,7 @@ Measure again with `PHOTOLIB_PERF=1` (frame stats) and the `imaging` `bench` exa
 - [x] 10k-photo performance pass
 - [x] Sort options (Capture Time, Added Order, Pick, Label Color, Rating, File Name, Extension, Aspect Ratio) + direction
 - [x] Home / End / Page Up / Page Down
-- [ ] Folder operations: missing-folder badge, Remove from catalog, Show parent, Create subfolder, Rename
-- [ ] Preview management: purge orphaned previews, "Build Standard-Sized Previews"
+- [x] Folder operations (LrC context menu): missing-folder "?" (checked off the UI thread), Create Folder inside…, Rename… (disk + catalog, undone on failure), Remove… (catalog only, purges previews), Synchronize Folder…, Show Parent Folder, Show in Explorer/Finder
+- [x] Library ▸ Previews ▸ Build Standard-Sized Previews
+- [ ] "Find Missing Folder…" / "Update Folder Location…" for relinking moved folders
+- [ ] Purge previews orphaned by older app versions or crashes

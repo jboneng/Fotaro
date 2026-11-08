@@ -105,6 +105,23 @@ pub enum Command {
     SyncFolder(i64),
     SetSource(Source),
     SetSort(catalog::SortOrder),
+    /// Ask for confirmation, then remove a folder (and subfolders) from the catalog.
+    RemoveFolder(i64),
+    ConfirmRemoveFolder(i64),
+    ShowParentFolder(i64),
+    /// Open the "Create Folder" / "Rename" dialogs.
+    CreateFolderIn(i64),
+    RenameFolder(i64),
+    ApplyCreateFolder {
+        parent: i64,
+        name: String,
+    },
+    ApplyRenameFolder {
+        id: i64,
+        name: String,
+    },
+    /// Build standard previews for the selected photos.
+    BuildPreviews,
     Reveal(PathBuf),
     SetLights(Lights),
     /// A not-yet-implemented feature; shows when it arrives.
@@ -124,6 +141,8 @@ pub struct Session {
     events: Receiver<Event>,
     pub folders: Vec<Folder>,
     pub folder_tree: FolderTree,
+    /// Catalog folders not found on disk (checked in the background).
+    pub missing_folders: HashSet<i64>,
     pub collapsed_folders: HashSet<i64>,
     pub free_space: crate::platform::FreeSpaceCache,
     pub counts: (i64, i64),
@@ -152,6 +171,7 @@ impl Session {
             events,
             folders: Vec::new(),
             folder_tree: FolderTree::default(),
+            missing_folders: HashSet::new(),
             collapsed_folders: HashSet::new(),
             free_space: Default::default(),
             counts: (0, 0),
@@ -177,6 +197,8 @@ impl Session {
     pub fn refresh_tree(&mut self) -> Result<()> {
         self.folders = self.catalog.folders()?;
         self.folder_tree = FolderTree::build(&self.folders);
+        let folders = self.folders.iter().map(|f| (f.id, f.path.clone())).collect();
+        self.jobs.submit_normal(Job::CheckFolders { folders });
         self.counts = self.catalog.source_counts()?;
         Ok(())
     }
@@ -351,6 +373,7 @@ impl Session {
                     PreviewSize::Thumb => self.thumbs.mark_failed(photo_id),
                     PreviewSize::Standard => self.previews.mark_failed(photo_id),
                 },
+                Event::FoldersChecked { missing } => self.missing_folders = missing,
                 Event::MetadataUpdated { photo_id } => {
                     if self.active == Some(photo_id) {
                         self.metadata = None;
@@ -386,6 +409,8 @@ pub struct PhotoLibraryApp {
     pub show_shortcuts: bool,
     pub toast: Option<Toast>,
     pub error: Option<String>,
+    /// The open modal dialog, if any.
+    pub dialog: Option<Dialog>,
     pub commands: Vec<Command>,
     /// Rects of panels drawn this frame (dimmed by Lights Out).
     pub panel_rects: Vec<egui::Rect>,
@@ -412,6 +437,7 @@ impl PhotoLibraryApp {
             show_shortcuts: false,
             toast: None,
             error: None,
+            dialog: None,
             commands: Vec::new(),
             panel_rects: Vec::new(),
             grid_cols: 1,
@@ -718,6 +744,54 @@ impl PhotoLibraryApp {
             Command::Reveal(path) => crate::platform::reveal(&path),
             Command::SetLights(l) => self.lights = l,
             Command::Planned(what, phase) => self.notify(format!("{what} arrives in {phase}")),
+            Command::RemoveFolder(id) => {
+                if let Some(s) = &self.session
+                    && let Some(f) = s.folders.iter().find(|f| f.id == id)
+                {
+                    let photos = s.folder_tree.totals.get(&id).copied().unwrap_or(0);
+                    self.dialog =
+                        Some(Dialog::ConfirmRemoveFolder { id, name: folder_name(&f.path), photos });
+                }
+            }
+            Command::ConfirmRemoveFolder(id) => self.folder_op(|s| {
+                let removed = s.catalog.remove_folder(id)?;
+                let n = removed.len();
+                s.jobs.submit_normal(Job::PurgePreviews { photo_ids: removed });
+                Ok(format!("Removed {n} photos from the catalog"))
+            }),
+            Command::ShowParentFolder(id) => self.folder_op(|s| {
+                s.catalog.show_parent_folder(id)?;
+                Ok("Showing parent folder".into())
+            }),
+            Command::CreateFolderIn(parent) => {
+                self.dialog = Some(Dialog::CreateFolder { parent, name: String::new() })
+            }
+            Command::RenameFolder(id) => {
+                if let Some(f) = self.session.as_ref().and_then(|s| s.folders.iter().find(|f| f.id == id)) {
+                    self.dialog = Some(Dialog::RenameFolder { id, name: folder_name(&f.path) });
+                }
+            }
+            Command::ApplyCreateFolder { parent, name } => self.folder_op(|s| {
+                s.catalog.create_subfolder(parent, &name)?;
+                Ok(format!("Created folder {}", name.trim()))
+            }),
+            Command::ApplyRenameFolder { id, name } => self.folder_op(|s| {
+                s.catalog.rename_folder(id, &name)?;
+                Ok(format!("Renamed folder to {}", name.trim()))
+            }),
+            Command::BuildPreviews => {
+                if let Some(s) = &self.session {
+                    let photos: Vec<PhotoRef> = s
+                        .photos
+                        .iter()
+                        .filter(|p| s.selected.contains(&p.id) && !p.missing)
+                        .map(PhotoRef::from)
+                        .collect();
+                    let n = photos.len();
+                    s.jobs.build_previews(photos);
+                    self.notify(format!("Building previews for {n} photos"));
+                }
+            }
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
@@ -817,5 +891,41 @@ mod tests {
         assert_eq!(t.totals[&3], 4);
         assert_eq!(t.children[&Some(1)], vec![1, 3]);
         assert_eq!(t.volumes.len(), 1);
+    }
+}
+
+/// Modal dialogs (LrC-style confirmations and name prompts).
+// Variant names mirror the dialog titles; more (non-folder) dialogs will follow.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone)]
+pub enum Dialog {
+    ConfirmRemoveFolder { id: i64, name: String, photos: i64 },
+    CreateFolder { parent: i64, name: String },
+    RenameFolder { id: i64, name: String },
+}
+
+pub fn folder_name(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+impl PhotoLibraryApp {
+    /// Run a folder operation, then refresh the folder tree and grid. If the grid's
+    /// folder no longer exists, fall back to All Photographs.
+    fn folder_op(&mut self, op: impl FnOnce(&mut Session) -> Result<String>) {
+        let Some(s) = &mut self.session else { return };
+        let result = op(s).and_then(|msg| {
+            s.refresh_tree()?;
+            if let Source::Folder { id, .. } = s.source
+                && !s.folders.iter().any(|f| f.id == id)
+            {
+                s.source = Source::AllPhotographs;
+            }
+            s.reload_photos()?;
+            Ok(msg)
+        });
+        match result {
+            Ok(msg) => self.notify(msg),
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
     }
 }

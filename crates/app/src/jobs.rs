@@ -47,6 +47,10 @@ pub enum Job {
     Load { photo: PhotoRef, size: PreviewSize },
     /// Make sure both previews exist on disk (and metadata is read).
     BuildPreviews { photo: PhotoRef },
+    /// Check which catalog folders still exist on disk (can be slow for network drives).
+    CheckFolders { folders: Vec<(i64, PathBuf)> },
+    /// Delete cached previews of photos removed from the catalog.
+    PurgePreviews { photo_ids: Vec<i64> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,7 +62,7 @@ enum JobKey {
 impl Job {
     fn key(&self) -> Option<JobKey> {
         match self {
-            Job::Sync { .. } => None,
+            Job::Sync { .. } | Job::CheckFolders { .. } | Job::PurgePreviews { .. } => None,
             Job::Load { photo, size } => Some(JobKey::Load(photo.id, *size)),
             Job::BuildPreviews { photo } => Some(JobKey::Build(photo.id)),
         }
@@ -93,6 +97,10 @@ pub enum Event {
     ImageFailed {
         photo_id: i64,
         size: PreviewSize,
+    },
+    /// Folders (by id) that no longer exist on disk.
+    FoldersChecked {
+        missing: HashSet<i64>,
     },
     /// Metadata (capture time, camera...) was read and stored for a photo.
     MetadataUpdated {
@@ -198,6 +206,13 @@ impl JobSystem {
         self.submit(job, Lane::Normal);
     }
 
+    /// Build previews in the background (Library ▸ Previews ▸ Build Standard-Sized Previews).
+    pub fn build_previews(&self, photos: impl IntoIterator<Item = PhotoRef>) {
+        for photo in photos {
+            self.submit(Job::BuildPreviews { photo }, Lane::Background);
+        }
+    }
+
     fn submit(&self, job: Job, lane: Lane) {
         submit(&self.shared, job, lane);
     }
@@ -245,7 +260,18 @@ fn submit(shared: &Shared, job: Job, lane: Lane) {
             }
         }
         Lane::Normal => lanes.normal.push_back(job),
-        Lane::Background => lanes.background.push_back(job),
+        Lane::Background => {
+            // Progress accounting happens under the queue lock, so a worker can never
+            // count a job as done before it was counted as queued.
+            let p = &shared.progress;
+            if p.previews_done.load(Ordering::Relaxed) >= p.previews_total.load(Ordering::Relaxed) {
+                p.previews_total.store(0, Ordering::Relaxed);
+                p.previews_done.store(0, Ordering::Relaxed);
+                *p.previews_started.lock().unwrap() = Some(std::time::Instant::now());
+            }
+            p.previews_total.fetch_add(1, Ordering::Relaxed);
+            lanes.background.push_back(job);
+        }
     }
     drop(lanes);
     // Only some workers take background jobs, so wake everyone for those.
@@ -369,6 +395,15 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
             };
             let _ = shared.events.send(event);
         }
+        Job::CheckFolders { folders } => {
+            let missing = folders.into_iter().filter(|(_, p)| !p.is_dir()).map(|(id, _)| id).collect();
+            let _ = shared.events.send(Event::FoldersChecked { missing });
+        }
+        Job::PurgePreviews { photo_ids } => {
+            for id in photo_ids {
+                shared.cache.remove(id);
+            }
+        }
         Job::BuildPreviews { photo } => {
             if photo.path.exists()
                 && let Err(e) = ensure_previews(shared, cat, &photo)
@@ -400,13 +435,6 @@ fn sync_and_queue(shared: &Shared, cat: &mut Catalog, root: &std::path::Path) ->
             .map(PhotoRef::from)
             .filter(|p| !shared.cache.has_all(p.id, p.fingerprint))
             .collect();
-        let p = &shared.progress;
-        if p.previews_done.load(Ordering::Relaxed) >= p.previews_total.load(Ordering::Relaxed) {
-            p.previews_total.store(0, Ordering::Relaxed);
-            p.previews_done.store(0, Ordering::Relaxed);
-            *p.previews_started.lock().unwrap() = Some(std::time::Instant::now());
-        }
-        p.previews_total.fetch_add(todo.len(), Ordering::Relaxed);
         for photo in todo {
             submit(shared, Job::BuildPreviews { photo }, Lane::Background);
         }
@@ -435,6 +463,7 @@ mod tests {
                 Job::Load { photo, .. } => format!("load{}", photo.id),
                 Job::Sync { .. } => "sync".into(),
                 Job::BuildPreviews { photo } => format!("build{}", photo.id),
+                Job::CheckFolders { .. } | Job::PurgePreviews { .. } => "other".into(),
             })
             .collect();
         assert_eq!(order, ["load3", "load2", "sync", "build1"]);
