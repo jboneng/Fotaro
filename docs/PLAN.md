@@ -96,3 +96,13 @@ This is a top-level requirement, not polish. Every phase is judged against "woul
 ## Open items to verify later
 - How NegPy is launched from the command line or by file association (needed for Phase 7).
 - How Luminar Neo writes back its result (same folder as the original or a separate export path?).
+
+## Progress (Phase 0)
+- [x] 1. Plan + initial commit
+- [~] 2. LibRaw: `rsraw` rejected (refuses MSVC, LibRaw 0.21.3, needs libclang). Own `crates/libraw` (vendored 0.22.3 + C++ shim + safe wrapper) builds on MSVC. **Pending:** run `rawinfo` against real NEF/CR2/CR3/ARW/RAF/DNG + scanner TIFF samples.
+- [x] 3. Workspace (`app`, `catalog`, `libraw`)
+- [x] 4. Catalog: schema v1 + migrations, `sync_folder` (add/update/missing/restore; missing files keep metadata), folder & photo queries
+- [ ] 5. Imaging crate + preview cache
+- [ ] 6. Job system
+- [ ] 7. LrC-style UI shell
+- [ ] 8. CI

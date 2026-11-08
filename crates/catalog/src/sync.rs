@@ -1,0 +1,273 @@
+//! "Add" import and "Synchronize Folder": reconcile a folder tree on disk with the catalog.
+//!
+//! Files that vanished are marked `missing` rather than deleted, so ratings,
+//! keywords and collections survive unplugged drives and renamed volumes (as in LrC).
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use rusqlite::{OptionalExtension, Transaction, params};
+use walkdir::WalkDir;
+
+use crate::catalog::Catalog;
+use crate::scan::file_kind;
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    pub added: usize,
+    pub updated: usize,
+    pub restored: usize,
+    pub missing: usize,
+    pub errors: usize,
+}
+
+struct Known {
+    id: i64,
+    size: i64,
+    mtime_ms: i64,
+    missing: bool,
+}
+
+/// Hidden files and folders, plus macOS AppleDouble `._*` files, are never photos.
+fn is_hidden(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().starts_with('.')
+}
+
+fn unix_ms(t: SystemTime) -> i64 {
+    t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+fn path_str(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
+impl Catalog {
+    /// Add `root` (recursively) to the catalog, or re-synchronize it if already present.
+    pub fn sync_folder(&mut self, root: impl AsRef<Path>) -> Result<SyncReport> {
+        let root = dunce::canonicalize(root.as_ref())
+            .with_context(|| format!("resolving {}", root.as_ref().display()))?;
+        anyhow::ensure!(root.is_dir(), "{} is not a directory", root.display());
+
+        let tx = self.conn.transaction()?;
+        let mut report = SyncReport::default();
+        let mut known = load_known(&tx, &root)?;
+        let mut folder_ids: HashMap<PathBuf, i64> = HashMap::new();
+        let now = unix_ms(SystemTime::now()) / 1000;
+
+        let walker = WalkDir::new(&root)
+            .follow_links(false)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|e| e.depth() == 0 || !is_hidden(e.file_name()));
+
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(err) => {
+                    log::warn!("sync: skipping entry: {err}");
+                    report.errors += 1;
+                    continue;
+                }
+            };
+            let path = entry.path();
+
+            if entry.file_type().is_dir() {
+                let parent_id = match path.parent() {
+                    Some(parent) if entry.depth() > 0 => folder_ids.get(parent).copied(),
+                    // The root: link it under an existing catalog folder if there is one.
+                    Some(parent) => folder_id(&tx, parent)?,
+                    None => None,
+                };
+                let id = ensure_folder(&tx, path, parent_id)?;
+                folder_ids.insert(path.to_path_buf(), id);
+                continue;
+            }
+
+            let Some(kind) = file_kind(path).filter(|_| entry.file_type().is_file()) else {
+                continue;
+            };
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(err) => {
+                    log::warn!("sync: no metadata for {}: {err}", path.display());
+                    report.errors += 1;
+                    continue;
+                }
+            };
+            let size = meta.len() as i64;
+            let mtime_ms = meta.modified().map(unix_ms).unwrap_or(0);
+
+            match known.remove(path) {
+                Some(k) if k.size != size || k.mtime_ms != mtime_ms => {
+                    tx.execute(
+                        "UPDATE files SET size = ?1, mtime_ms = ?2, missing = 0 WHERE id = ?3",
+                        params![size, mtime_ms, k.id],
+                    )?;
+                    report.updated += 1;
+                }
+                Some(k) if k.missing => {
+                    tx.execute("UPDATE files SET missing = 0 WHERE id = ?1", [k.id])?;
+                    report.restored += 1;
+                }
+                Some(_) => {}
+                None => {
+                    let folder_id = *path
+                        .parent()
+                        .and_then(|p| folder_ids.get(p))
+                        .context("file outside walked folders")?;
+                    let name = entry.file_name().to_string_lossy();
+                    let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+                    tx.execute(
+                        "INSERT INTO files (folder_id, name, ext, kind, size, mtime_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![folder_id, name, ext, kind.as_str(), size, mtime_ms],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO photos (master_file_id, imported_at) VALUES (?1, ?2)",
+                        params![tx.last_insert_rowid(), now],
+                    )?;
+                    report.added += 1;
+                }
+            }
+        }
+
+        for k in known.into_values().filter(|k| !k.missing) {
+            tx.execute("UPDATE files SET missing = 1 WHERE id = ?1", [k.id])?;
+            report.missing += 1;
+        }
+
+        tx.commit()?;
+        log::info!("synchronized {}: {report:?}", root.display());
+        Ok(report)
+    }
+}
+
+/// Files already in the catalog at or below `root`, keyed by full path.
+fn load_known(tx: &Transaction, root: &Path) -> Result<HashMap<PathBuf, Known>> {
+    let root_s = path_str(root);
+    let sep = std::path::MAIN_SEPARATOR;
+    let prefix = if root_s.ends_with(sep) { root_s.clone() } else { format!("{root_s}{sep}") };
+
+    let mut stmt = tx.prepare(
+        "SELECT f.id, fo.path, f.name, f.size, f.mtime_ms, f.missing
+           FROM files f JOIN folders fo ON fo.id = f.folder_id
+          WHERE fo.path = ?1 OR substr(fo.path, 1, length(?2)) = ?2",
+    )?;
+    let rows = stmt.query_map(params![root_s, prefix], |r| {
+        let folder: String = r.get(1)?;
+        let name: String = r.get(2)?;
+        Ok((
+            Path::new(&folder).join(name),
+            Known { id: r.get(0)?, size: r.get(3)?, mtime_ms: r.get(4)?, missing: r.get(5)? },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn folder_id(tx: &Transaction, path: &Path) -> Result<Option<i64>> {
+    Ok(tx
+        .query_row("SELECT id FROM folders WHERE path = ?1", [path_str(path)], |r| r.get(0))
+        .optional()?)
+}
+
+fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Result<i64> {
+    if let Some(id) = folder_id(tx, path)? {
+        if parent_id.is_some() {
+            tx.execute("UPDATE folders SET parent_id = ?1 WHERE id = ?2", params![parent_id, id])?;
+        }
+        return Ok(id);
+    }
+    tx.execute(
+        "INSERT INTO folders (path, parent_id) VALUES (?1, ?2)",
+        params![path_str(path), parent_id],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::Flag;
+    use std::fs;
+
+    fn setup() -> (tempfile::TempDir, PathBuf, Catalog) {
+        let tmp = tempfile::tempdir().unwrap();
+        let photos = tmp.path().join("Photos");
+        fs::create_dir_all(photos.join("2026/Trip")).unwrap();
+        fs::write(photos.join("a.NEF"), b"raw").unwrap();
+        fs::write(photos.join("2026/b.jpg"), b"jpeg").unwrap();
+        fs::write(photos.join("2026/Trip/c.tif"), b"tiff").unwrap();
+        fs::write(photos.join("2026/Trip/notes.txt"), b"x").unwrap();
+        fs::write(photos.join("2026/Trip/._c.tif"), b"appledouble").unwrap();
+        fs::create_dir_all(photos.join(".cache")).unwrap();
+        fs::write(photos.join(".cache/hidden.jpg"), b"x").unwrap();
+        let cat = Catalog::create(tmp.path().join("Cat.plcat")).unwrap();
+        (tmp, photos, cat)
+    }
+
+    #[test]
+    fn adds_photos_and_folder_tree() {
+        let (_tmp, photos, mut cat) = setup();
+        let r = cat.sync_folder(&photos).unwrap();
+        assert_eq!(r, SyncReport { added: 3, ..Default::default() });
+
+        let folders = cat.folders().unwrap();
+        assert_eq!(folders.len(), 3, "{folders:?}");
+        let root = &folders[0];
+        assert_eq!(root.parent_id, None);
+        assert_eq!(root.photo_count, 1);
+        assert!(folders[1..].iter().all(|f| f.parent_id.is_some()));
+
+        let all = cat.photos_in_folder(root.id, true).unwrap();
+        let names: Vec<_> = all.iter().map(|p| p.file_name.as_str()).collect();
+        assert_eq!(names, ["a.NEF", "b.jpg", "c.tif"]);
+        assert_eq!(all[0].kind, crate::FileKind::Raw);
+        assert_eq!(cat.photos_in_folder(root.id, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resync_is_a_no_op_then_detects_changes() {
+        let (_tmp, photos, mut cat) = setup();
+        cat.sync_folder(&photos).unwrap();
+        assert_eq!(cat.sync_folder(&photos).unwrap(), SyncReport::default());
+
+        fs::write(photos.join("2026/b.jpg"), b"a longer jpeg").unwrap();
+        fs::write(photos.join("new.ARW"), b"raw").unwrap();
+        let r = cat.sync_folder(&photos).unwrap();
+        assert_eq!(r, SyncReport { added: 1, updated: 1, ..Default::default() });
+    }
+
+    #[test]
+    fn missing_files_keep_their_metadata_and_can_be_restored() {
+        let (_tmp, photos, mut cat) = setup();
+        cat.sync_folder(&photos).unwrap();
+        let root = cat.folders().unwrap()[0].id;
+        let a = cat.photos_in_folder(root, false).unwrap()[0].clone();
+        cat.set_rating(a.id, 4).unwrap();
+        cat.set_flag(a.id, Flag::Picked).unwrap();
+
+        fs::remove_file(&a.path).unwrap();
+        assert_eq!(cat.sync_folder(&photos).unwrap(), SyncReport { missing: 1, ..Default::default() });
+        let gone = &cat.photos_in_folder(root, false).unwrap()[0];
+        assert!(gone.missing);
+        assert_eq!((gone.rating, gone.flag), (4, Flag::Picked));
+
+        fs::write(&a.path, b"raw").unwrap();
+        let r = cat.sync_folder(&photos).unwrap();
+        assert_eq!(r.restored + r.updated, 1, "{r:?}");
+        let back = &cat.photos_in_folder(root, false).unwrap()[0];
+        assert!(!back.missing);
+        assert_eq!((back.id, back.rating), (a.id, 4));
+    }
+
+    #[test]
+    fn syncing_a_subfolder_links_it_under_existing_parent() {
+        let (_tmp, photos, mut cat) = setup();
+        cat.sync_folder(&photos).unwrap();
+        let r = cat.sync_folder(photos.join("2026")).unwrap();
+        assert_eq!(r, SyncReport::default());
+        assert_eq!(cat.folders().unwrap().iter().filter(|f| f.parent_id.is_none()).count(), 1);
+    }
+}

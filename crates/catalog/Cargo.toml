@@ -1,6 +1,6 @@
 [package]
 name = "catalog"
-description = "Photo catalog: folder scanning and (soon) the SQLite catalog"
+description = "Photo catalog: SQLite database, folder sync and scanning"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -9,6 +9,8 @@ publish.workspace = true
 anyhow.workspace = true
 log.workspace = true
 walkdir.workspace = true
+rusqlite.workspace = true
+dunce.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

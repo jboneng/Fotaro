@@ -1,5 +1,11 @@
-//! The photo catalog. No GUI code lives in this crate.
+//! The photo catalog: SQLite database, folder sync and scanning. No GUI code here.
 
+mod catalog;
 pub mod scan;
+mod schema;
+mod sync;
 
-pub use scan::{Photo, is_photo, scan};
+pub use catalog::{CATALOG_EXTENSION, Catalog, Flag, Folder, PhotoRow};
+pub use scan::{FileKind, Photo, file_kind, is_photo, scan};
+pub use schema::LATEST_VERSION as SCHEMA_VERSION;
+pub use sync::SyncReport;

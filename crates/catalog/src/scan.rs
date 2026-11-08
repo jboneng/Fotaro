@@ -5,10 +5,51 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
-/// File extensions treated as photos (compared case-insensitively).
-pub const PHOTO_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "heic",
+/// Camera RAW extensions (compared case-insensitively). Decoded via LibRaw.
+pub const RAW_EXTENSIONS: &[&str] = &[
+    "3fr", "arw", "cr2", "cr3", "crw", "dng", "erf", "iiq", "kdc", "mef", "mos", "mrw", "nef",
+    "nrw", "orf", "pef", "raf", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
 ];
+
+/// Non-RAW image extensions (compared case-insensitively).
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff", "heic", "heif",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Raw,
+    Image,
+}
+
+impl FileKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileKind::Raw => "raw",
+            FileKind::Image => "image",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "raw" => Some(FileKind::Raw),
+            "image" => Some(FileKind::Image),
+            _ => None,
+        }
+    }
+}
+
+pub fn file_kind(path: &Path) -> Option<FileKind> {
+    let ext = path.extension()?.to_str()?;
+    let has = |list: &[&str]| list.iter().any(|e| e.eq_ignore_ascii_case(ext));
+    if has(RAW_EXTENSIONS) {
+        Some(FileKind::Raw)
+    } else if has(IMAGE_EXTENSIONS) {
+        Some(FileKind::Image)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Photo {
@@ -18,9 +59,7 @@ pub struct Photo {
 }
 
 pub fn is_photo(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| PHOTO_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(ext)))
+    file_kind(path).is_some()
 }
 
 /// Recursively scan `root` for photos, sorted by path.
@@ -70,6 +109,9 @@ mod tests {
         assert!(is_photo(Path::new("a.jpg")));
         assert!(is_photo(Path::new("B.JPEG")));
         assert!(is_photo(Path::new("dir/c.Png")));
+        assert_eq!(file_kind(Path::new("x.NEF")), Some(FileKind::Raw));
+        assert_eq!(file_kind(Path::new("x.cr3")), Some(FileKind::Raw));
+        assert_eq!(file_kind(Path::new("scan.tif")), Some(FileKind::Image));
         assert!(!is_photo(Path::new("notes.txt")));
         assert!(!is_photo(Path::new("no_extension")));
     }
