@@ -1,0 +1,23 @@
+[package]
+name = "libraw"
+description = "Safe Rust wrapper around a vendored LibRaw (used under CDDL 1.0)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+# LibRaw is dual-licensed LGPL-2.1 / CDDL-1.0; we statically link it under CDDL-1.0.
+license = "MIT AND CDDL-1.0"
+build = "build.rs"
+
+[dependencies]
+memmap2 = "0.9"
+# Needed by LibRaw for deflate-compressed (incl. floating-point) DNGs.
+libz-sys = { version = "1", default-features = false, features = ["static"] }
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
