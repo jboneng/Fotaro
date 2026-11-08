@@ -111,12 +111,13 @@ struct Lanes {
 }
 
 impl Lanes {
-    fn pop(&mut self) -> Option<Job> {
+    /// Next job for a worker; `background` says whether this worker may take bulk work.
+    fn pop(&mut self, background: bool) -> Option<Job> {
         let job = self
             .visible
             .pop_back()
             .or_else(|| self.normal.pop_front())
-            .or_else(|| self.background.pop_front())?;
+            .or_else(|| if background { self.background.pop_front() } else { None })?;
         if let Some(k) = job.key() {
             self.keys.remove(&k);
         }
@@ -129,6 +130,7 @@ impl Lanes {
 pub struct Progress {
     previews_total: AtomicUsize,
     previews_done: AtomicUsize,
+    previews_started: Mutex<Option<std::time::Instant>>,
     syncing: Mutex<Option<String>>,
 }
 
@@ -171,15 +173,20 @@ impl JobSystem {
             building: Mutex::new(HashSet::new()),
             building_done: Condvar::new(),
         });
-        let workers = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let workers = cores.saturating_sub(1).max(1);
+        // Workers run at the lowest OS priority, so the UI thread always wins the CPU.
+        // Bulk preview building leaves one worker free for on-screen requests.
+        let background_workers = workers.saturating_sub(1).max(1);
         for i in 0..workers {
+            let may_background = i < background_workers;
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name(format!("worker-{i}"))
-                .spawn(move || worker_loop(&shared))
+                .spawn(move || worker_loop(&shared, may_background))
                 .expect("spawn worker thread");
         }
-        log::info!("started {workers} worker threads");
+        log::info!("started {workers} worker threads ({background_workers} for background work)");
         (JobSystem { shared }, rx)
     }
 
@@ -241,10 +248,14 @@ fn submit(shared: &Shared, job: Job, lane: Lane) {
         Lane::Background => lanes.background.push_back(job),
     }
     drop(lanes);
-    shared.wake.notify_one();
+    // Only some workers take background jobs, so wake everyone for those.
+    if matches!(lane, Lane::Background) { shared.wake.notify_all() } else { shared.wake.notify_one() }
 }
 
-fn worker_loop(shared: &Shared) {
+fn worker_loop(shared: &Shared, may_background: bool) {
+    if let Err(e) = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min) {
+        log::debug!("could not lower worker thread priority: {e:?}");
+    }
     // Each worker has its own SQLite connection (WAL mode allows this safely).
     let mut catalog: Option<Catalog> = None;
     loop {
@@ -254,7 +265,7 @@ fn worker_loop(shared: &Shared) {
                 if shared.shutdown.load(Ordering::SeqCst) {
                     return;
                 }
-                if let Some(job) = lanes.pop() {
+                if let Some(job) = lanes.pop(may_background) {
                     break job;
                 }
                 lanes = shared.wake.wait(lanes).unwrap();
@@ -311,8 +322,12 @@ fn ensure_previews(shared: &Shared, cat: &Catalog, photo: &PhotoRef) -> Result<(
     let result = (|| {
         anyhow::ensure!(photo.path.exists(), "file is missing");
         let built = shared.cache.build(photo.id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
-        cat.set_metadata(photo.id, &to_catalog_metadata(built.metadata))?;
-        let _ = shared.events.send(Event::MetadataUpdated { photo_id: photo.id });
+        // Sync normally stored metadata already; only fill it in if that failed, so
+        // preview workers (many threads) rarely contend for the SQLite write lock.
+        if cat.metadata(photo.id)?.is_none() {
+            cat.set_metadata(photo.id, &to_catalog_metadata(built.metadata))?;
+            let _ = shared.events.send(Event::MetadataUpdated { photo_id: photo.id });
+        }
         Ok(())
     })();
     shared.building.lock().unwrap().remove(&photo.id);
@@ -325,7 +340,9 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
         Job::Sync { root } => {
             *shared.progress.syncing.lock().unwrap() =
                 Some(format!("Synchronizing {}", root.file_name().unwrap_or_default().to_string_lossy()));
+            let started = std::time::Instant::now();
             let result = sync_and_queue(shared, cat, &root).map_err(|e| format!("{e:#}"));
+            log::info!("sync of {} took {:.2?}", root.display(), started.elapsed());
             *shared.progress.syncing.lock().unwrap() = None;
             let _ = shared.events.send(Event::SyncDone { root, result });
         }
@@ -358,13 +375,22 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
             {
                 log::warn!("building previews for {}: {e:#}", photo.path.display());
             }
-            shared.progress.previews_done.fetch_add(1, Ordering::Relaxed);
+            let p = &shared.progress;
+            let done = p.previews_done.fetch_add(1, Ordering::Relaxed) + 1;
+            if done == p.previews_total.load(Ordering::Relaxed)
+                && let Some(t) = p.previews_started.lock().unwrap().take()
+            {
+                log::info!("built previews for {done} photos in {:.1?}", t.elapsed());
+            }
         }
     }
 }
 
 fn sync_and_queue(shared: &Shared, cat: &mut Catalog, root: &std::path::Path) -> Result<SyncReport> {
-    let report = cat.sync_folder(root)?;
+    let reader = |path: &std::path::Path, kind: FileKind| {
+        imaging::read_metadata(path, source_kind(kind)).ok().map(to_catalog_metadata)
+    };
+    let report = cat.sync_folder_with(root, Some(&reader))?;
     let canonical = dunce::canonicalize(root)?;
     if let Some(folder) = cat.folder_by_path(&canonical)? {
         let todo: Vec<PhotoRef> = cat
@@ -378,6 +404,7 @@ fn sync_and_queue(shared: &Shared, cat: &mut Catalog, root: &std::path::Path) ->
         if p.previews_done.load(Ordering::Relaxed) >= p.previews_total.load(Ordering::Relaxed) {
             p.previews_total.store(0, Ordering::Relaxed);
             p.previews_done.store(0, Ordering::Relaxed);
+            *p.previews_started.lock().unwrap() = Some(std::time::Instant::now());
         }
         p.previews_total.fetch_add(todo.len(), Ordering::Relaxed);
         for photo in todo {
@@ -403,7 +430,7 @@ mod tests {
         lanes.visible.push_back(Job::Load { photo: photo(2), size: PreviewSize::Thumb });
         lanes.visible.push_back(Job::Load { photo: photo(3), size: PreviewSize::Thumb });
 
-        let order: Vec<String> = std::iter::from_fn(|| lanes.pop())
+        let order: Vec<String> = std::iter::from_fn(|| lanes.pop(true))
             .map(|j| match j {
                 Job::Load { photo, .. } => format!("load{}", photo.id),
                 Job::Sync { .. } => "sync".into(),
@@ -411,5 +438,13 @@ mod tests {
             })
             .collect();
         assert_eq!(order, ["load3", "load2", "sync", "build1"]);
+    }
+
+    #[test]
+    fn foreground_only_workers_never_take_background_jobs() {
+        let mut lanes = Lanes::default();
+        lanes.background.push_back(Job::BuildPreviews { photo: photo(1) });
+        assert!(lanes.pop(false).is_none());
+        assert!(lanes.pop(true).is_some());
     }
 }

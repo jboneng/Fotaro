@@ -85,6 +85,75 @@ pub enum Source {
     Folder { id: i64, include_subfolders: bool },
 }
 
+/// Grid sort criteria, following LrC's toolbar "Sort" menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum SortKey {
+    #[default]
+    CaptureTime,
+    AddedOrder,
+    FileName,
+    Extension,
+    Rating,
+    Pick,
+    LabelColor,
+    AspectRatio,
+}
+
+impl SortKey {
+    pub const ALL: [SortKey; 8] = [
+        SortKey::CaptureTime,
+        SortKey::AddedOrder,
+        SortKey::Pick,
+        SortKey::LabelColor,
+        SortKey::Rating,
+        SortKey::FileName,
+        SortKey::Extension,
+        SortKey::AspectRatio,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::CaptureTime => "Capture Time",
+            SortKey::AddedOrder => "Added Order",
+            SortKey::FileName => "File Name",
+            SortKey::Extension => "Extension",
+            SortKey::Rating => "Rating",
+            SortKey::Pick => "Pick",
+            SortKey::LabelColor => "Label Color",
+            SortKey::AspectRatio => "Aspect Ratio",
+        }
+    }
+
+    /// SQL ORDER BY terms (ascending), each ending with stable tie-breakers.
+    /// Higher ratings and picks come first, as in LrC.
+    fn order_by(self) -> &'static str {
+        match self {
+            SortKey::CaptureTime => "p.capture_time IS NULL, p.capture_time, fo.path, f.name",
+            SortKey::AddedOrder => "p.id",
+            SortKey::FileName => "f.name COLLATE NOCASE, fo.path",
+            SortKey::Extension => "f.ext, f.name COLLATE NOCASE, fo.path",
+            SortKey::Rating => "p.rating DESC, p.capture_time IS NULL, p.capture_time, fo.path, f.name",
+            SortKey::Pick => "p.flag DESC, p.capture_time IS NULL, p.capture_time, fo.path, f.name",
+            SortKey::LabelColor => {
+                "CASE p.color_label WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 WHEN 'green' THEN 3
+                     WHEN 'blue' THEN 4 WHEN 'purple' THEN 5 ELSE 6 END,
+                 p.capture_time IS NULL, p.capture_time, fo.path, f.name"
+            }
+            SortKey::AspectRatio => {
+                "e.width IS NULL, CAST(e.width AS REAL) / MAX(e.height, 1),
+                 p.capture_time IS NULL, p.capture_time, fo.path, f.name"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct SortOrder {
+    pub key: SortKey,
+    /// Reverse the whole order (LrC's A–Z / Z–A toggle).
+    pub descending: bool,
+}
+
 const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, f.missing,
      p.rating, p.flag, p.color_label, p.capture_time";
 
@@ -179,10 +248,18 @@ impl Catalog {
 
     /// Photos for a source, sorted by capture time (then path), like LrC's default.
     pub fn photos(&self, source: Source) -> Result<Vec<PhotoRow>> {
-        let order = "ORDER BY p.capture_time IS NULL, p.capture_time, fo.path, f.name";
+        self.photos_sorted(source, SortOrder::default())
+    }
+
+    /// Photos for a source in the given sort order. Ties always fall back to
+    /// capture time, then path, so the order is stable.
+    pub fn photos_sorted(&self, source: Source, sort: SortOrder) -> Result<Vec<PhotoRow>> {
+        let order = format!("ORDER BY {}", sort.key.order_by());
+        let order = order.as_str();
         let from = "FROM photos p
                     JOIN files f    ON f.id = p.master_file_id
-                    JOIN folders fo ON fo.id = f.folder_id";
+                    JOIN folders fo ON fo.id = f.folder_id
+                    LEFT JOIN exif e ON e.photo_id = p.id";
         let (sql, args): (String, Vec<i64>) = match source {
             Source::AllPhotographs => (format!("SELECT {PHOTO_COLUMNS} {from} {order}"), vec![]),
             Source::PreviousImport => (
@@ -206,7 +283,11 @@ impl Catalog {
         };
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args), photo_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut photos: Vec<PhotoRow> = rows.collect::<rusqlite::Result<_>>()?;
+        if sort.descending {
+            photos.reverse();
+        }
+        Ok(photos)
     }
 
     pub fn photo(&self, photo_id: i64) -> Result<Option<PhotoRow>> {
@@ -254,31 +335,8 @@ impl Catalog {
 
     /// Store metadata read from the file; also sets the photo's capture time.
     pub fn set_metadata(&self, photo_id: i64, m: &PhotoMetadata) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO exif
-                 (photo_id, camera_make, camera_model, lens, iso, shutter, aperture,
-                  focal_len, width, height)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                photo_id,
-                m.make,
-                m.model,
-                m.lens,
-                m.iso,
-                m.shutter,
-                m.aperture,
-                m.focal_len,
-                m.width,
-                m.height
-            ],
-        )?;
-        self.conn.execute(
-            "UPDATE photos SET capture_time = ?1 WHERE id = ?2",
-            params![m.capture_time, photo_id],
-        )?;
-        Ok(())
+        write_metadata(&self.conn, photo_id, m)
     }
-
     pub fn set_rating(&self, photo_id: i64, rating: u8) -> Result<()> {
         anyhow::ensure!(rating <= 5, "rating must be 0-5, got {rating}");
         self.conn.execute("UPDATE photos SET rating = ?1 WHERE id = ?2", params![rating, photo_id])?;
@@ -306,6 +364,31 @@ impl Catalog {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?)
     }
+}
+
+/// Store metadata for a photo (also sets its capture time). Shared by
+/// [`Catalog::set_metadata`] and folder sync (inside its transaction).
+pub(crate) fn write_metadata(conn: &Connection, photo_id: i64, m: &PhotoMetadata) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO exif
+             (photo_id, camera_make, camera_model, lens, iso, shutter, aperture,
+              focal_len, width, height)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            photo_id,
+            m.make,
+            m.model,
+            m.lens,
+            m.iso,
+            m.shutter,
+            m.aperture,
+            m.focal_len,
+            m.width,
+            m.height
+        ],
+    )?;
+    conn.execute("UPDATE photos SET capture_time = ?1 WHERE id = ?2", params![m.capture_time, photo_id])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -360,6 +443,42 @@ mod tests {
         assert_eq!(cat.metadata(all[0].id).unwrap(), None);
         assert_eq!(cat.photo(all[0].id).unwrap().unwrap().file_name, "a.jpg");
         assert!(cat.folder_by_path(&dunce::canonicalize(&photos).unwrap()).unwrap().is_some());
+    }
+
+    #[test]
+    fn sort_orders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let photos = tmp.path().join("p");
+        std::fs::create_dir(&photos).unwrap();
+        for n in ["b.jpg", "A.png", "c.NEF"] {
+            std::fs::write(photos.join(n), b"x").unwrap();
+        }
+        let mut cat = Catalog::create(tmp.path().join("c.plcat")).unwrap();
+        cat.sync_folder(&photos).unwrap();
+        let id = |name: &str| {
+            cat.photos(Source::AllPhotographs).unwrap().into_iter().find(|p| p.file_name == name).unwrap().id
+        };
+        let (a, b, c) = (id("A.png"), id("b.jpg"), id("c.NEF"));
+        cat.set_rating(b, 5).unwrap();
+        cat.set_rating(c, 3).unwrap();
+        cat.set_flag(c, Flag::Picked).unwrap();
+        cat.set_color_label(a, Some("green")).unwrap();
+        cat.set_color_label(c, Some("red")).unwrap();
+
+        let names = |key, descending| -> Vec<String> {
+            cat.photos_sorted(Source::AllPhotographs, SortOrder { key, descending })
+                .unwrap()
+                .into_iter()
+                .map(|p| p.file_name)
+                .collect()
+        };
+        assert_eq!(names(SortKey::FileName, false), ["A.png", "b.jpg", "c.NEF"]);
+        assert_eq!(names(SortKey::FileName, true), ["c.NEF", "b.jpg", "A.png"]);
+        assert_eq!(names(SortKey::Extension, false), ["b.jpg", "c.NEF", "A.png"]);
+        assert_eq!(names(SortKey::Rating, false), ["b.jpg", "c.NEF", "A.png"]);
+        assert_eq!(names(SortKey::Pick, false)[0], "c.NEF");
+        assert_eq!(names(SortKey::LabelColor, false), ["c.NEF", "A.png", "b.jpg"]);
+        assert_eq!(names(SortKey::AspectRatio, false).len(), 3);
     }
 
     #[test]

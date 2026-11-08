@@ -284,7 +284,7 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         .default_size(118.0)
         .size_range(80.0..=220.0)
         .frame(panel_frame(theme::PANEL))
-        .show_collapsible(ui, &mut show, |ui| views::filmstrip(app, ui))
+        .show_collapsible(ui, &mut show, |ui| timed("filmstrip", || views::filmstrip(app, ui)))
     {
         app.panel_rects.push(r.response.rect);
     }
@@ -296,7 +296,7 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         .default_size(250.0)
         .size_range(190.0..=460.0)
         .frame(panel_frame(theme::PANEL))
-        .show_collapsible(ui, &mut show, |ui| sidebars::left(app, ui))
+        .show_collapsible(ui, &mut show, |ui| timed("left panels", || sidebars::left(app, ui)))
     {
         app.panel_rects.push(r.response.rect);
     }
@@ -308,7 +308,7 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         .default_size(270.0)
         .size_range(210.0..=460.0)
         .frame(panel_frame(theme::PANEL))
-        .show_collapsible(ui, &mut show, |ui| sidebars::right(app, ui))
+        .show_collapsible(ui, &mut show, |ui| timed("right panels", || sidebars::right(app, ui)))
     {
         app.panel_rects.push(r.response.rect);
     }
@@ -330,7 +330,7 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             app.panel_rects.push(r.response.rect);
         }
         match app.view {
-            View::Grid => views::grid(app, ui),
+            View::Grid => timed("grid", || views::grid(app, ui)),
             View::Loupe => views::loupe(app, ui),
         }
         ui.max_rect()
@@ -467,4 +467,14 @@ fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
             app.error = None;
         }
     }
+}
+
+/// Run a drawing section, logging it if it takes long enough to cause a visible hitch.
+pub(super) fn timed<R>(name: &str, f: impl FnOnce() -> R) -> R {
+    let started = std::time::Instant::now();
+    let r = f();
+    if started.elapsed() > Duration::from_millis(40) {
+        log::warn!("slow section: {name} took {:.0?}", started.elapsed());
+    }
+    r
 }

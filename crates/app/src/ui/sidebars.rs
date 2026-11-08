@@ -1,8 +1,6 @@
 //! Left (Navigator, Catalog, Folders, Collections) and right (Histogram,
 //! Keywording, Keyword List, Metadata) panel stacks.
 
-use std::collections::{BTreeMap, HashMap};
-
 use catalog::{Flag, Folder, Source};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense};
 use imaging::PreviewSize;
@@ -57,9 +55,13 @@ fn source_row(
 pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut stack = std::mem::take(&mut app.ui.left);
-        stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| navigator(app, ui));
+        stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| {
+            super::layout::timed("navigator", || navigator(app, ui))
+        });
         stack.section(ui, Side::Left, "Catalog", LEFT, true, |ui| catalog_section(app, ui));
-        stack.section(ui, Side::Left, "Folders", LEFT, true, |ui| folders(app, ui));
+        stack.section(ui, Side::Left, "Folders", LEFT, true, |ui| {
+            super::layout::timed("folders", || folders(app, ui))
+        });
         stack.section(ui, Side::Left, "Collections", LEFT, true, |ui| {
             ui.horizontal(|ui| {
                 ui.label(weak("No collections yet."));
@@ -121,21 +123,9 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         return;
     }
 
-    let children: HashMap<Option<i64>, Vec<&Folder>> = s.folders.iter().fold(HashMap::new(), |mut m, f| {
-        m.entry(f.parent_id).or_default().push(f);
-        m
-    });
-    // Photo counts including subfolders (LrC shows these when subfolders are included).
-    fn total(id: i64, children: &HashMap<Option<i64>, Vec<&Folder>>, own: &HashMap<i64, i64>) -> i64 {
-        own[&id] + children.get(&Some(id)).map_or(0, |c| c.iter().map(|f| total(f.id, children, own)).sum())
-    }
-    let own: HashMap<i64, i64> = s.folders.iter().map(|f| (f.id, f.photo_count)).collect();
-
-    let mut volumes: BTreeMap<String, (String, Vec<&Folder>)> = BTreeMap::new();
-    for root in children.get(&None).into_iter().flatten() {
-        let (key, name) = platform::volume_of(&root.path);
-        volumes.entry(key).or_insert_with(|| (name, Vec::new())).1.push(root);
-    }
+    // The tree structure is computed once per catalog change (see `FolderTree`).
+    let tree = &s.folder_tree;
+    let folders = &s.folders;
 
     let selected = match s.source {
         Source::Folder { id, .. } => Some(id),
@@ -145,20 +135,20 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let mut commands = Vec::new();
     let mut toggles = Vec::new();
 
-    for (key, (name, roots)) in &volumes {
+    for (key, name, roots) in &tree.volumes {
         // Volume header: name and free space.
         ui.horizontal(|ui| {
             ui.label(RichText::new(name).color(theme::TEXT_STRONG).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(free) = platform::free_space(std::path::Path::new(key)) {
+                if let Some(free) = s.free_space.get(key) {
                     ui.label(weak(format!("{} free", platform::human_bytes(free))).size(10.5));
                 }
             });
         });
 
-        let mut stack: Vec<(&Folder, usize)> = roots.iter().rev().map(|f| (*f, 0)).collect();
+        let mut stack: Vec<(&Folder, usize)> = roots.iter().rev().map(|&i| (&folders[i], 0)).collect();
         while let Some((f, depth)) = stack.pop() {
-            let kids = children.get(&Some(f.id));
+            let kids = tree.children.get(&Some(f.id));
             let has_kids = kids.is_some_and(|k| !k.is_empty());
             let expanded = !s.collapsed_folders.contains(&f.id);
             let name = f
@@ -171,7 +161,7 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 (true, false) => "▶ ",
             };
             let indent = 4.0 + depth as f32 * 14.0;
-            let count = if include_subfolders { total(f.id, &children, &own) } else { f.photo_count };
+            let count = if include_subfolders { tree.totals[&f.id] } else { f.photo_count };
             let resp = source_row(ui, indent, &format!("{tri}{name}"), Some(count), selected == Some(f.id));
             let resp = resp.on_hover_text(f.path.display().to_string());
             if resp.clicked() {
@@ -201,8 +191,8 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     .on_disabled_hover_text("Arrives in Phase 1");
             });
             if has_kids && expanded {
-                for k in kids.into_iter().flatten().rev() {
-                    stack.push((k, depth + 1));
+                for &k in kids.into_iter().flatten().rev() {
+                    stack.push((&folders[k], depth + 1));
                 }
             }
         }
@@ -222,14 +212,18 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut stack = std::mem::take(&mut app.ui.right);
-        stack.section(ui, Side::Right, "Histogram", RIGHT, true, |ui| histogram(app, ui));
+        stack.section(ui, Side::Right, "Histogram", RIGHT, true, |ui| {
+            super::layout::timed("histogram", || histogram(app, ui))
+        });
         stack.section(ui, Side::Right, "Keywording", RIGHT, false, |ui| {
             ui.label(weak("Keyword tags arrive in Phase 3."));
         });
         stack.section(ui, Side::Right, "Keyword List", RIGHT, false, |ui| {
             ui.label(weak("Keyword list arrives in Phase 3."));
         });
-        stack.section(ui, Side::Right, "Metadata", RIGHT, true, |ui| metadata(app, ui));
+        stack.section(ui, Side::Right, "Metadata", RIGHT, true, |ui| {
+            super::layout::timed("metadata", || metadata(app, ui))
+        });
         app.ui.right = stack;
     });
 }

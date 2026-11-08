@@ -74,6 +74,10 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `←` | Previous photo | ✅ |
 | `↑` | Photo above (Grid) | ✅ |
 | `↓` | Photo below (Grid) | ✅ |
+| `Home` | First photo | ✅ |
+| `End` | Last photo | ✅ |
+| `Page Up` | Page up (Grid) | ✅ |
+| `Page Down` | Page down (Grid) | ✅ |
 | `Ctrl+A` | Select all | ✅ |
 | `Ctrl+D` | Select none | ✅ |
 

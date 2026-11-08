@@ -106,3 +106,26 @@ This is a top-level requirement, not polish. Every phase is judged against "woul
 - [x] 6. Job system: worker pool, Visible (LIFO, capped) / Normal / Background lanes, per-photo build lock, progress in identity plate
 - [x] 7. LrC-style UI shell: menus, identity plate + module picker, collapsible/solo panel sections, Navigator/Catalog/Folders/Collections, Histogram/Metadata, Grid (3 cell styles) / Loupe / full screen, filmstrip, toolbar, filter bar, Lights Out, toasts, shortcut table (docs/SHORTCUTS.md). Planned features show which phase delivers them.
 - [x] 8. CI: GitHub Actions — fmt check; clippy (-D warnings) + tests on Windows, macOS, Linux
+
+## Progress (Phase 1)
+Baseline measured with a generated 10,000-photo library (100 folders, 1600 px JPEGs), release build,
+16-thread laptop:
+
+| | First run | After fixes |
+|---|---|---|
+| Import (sync) | 0.4 s, no metadata | 1.2 s **with** capture dates/camera data |
+| Build all previews | 315 s | 222 s |
+| Frames over 16.7 ms while building | ~10% | 0.4% |
+| Frames over 100 ms | many (one 13 s) | 0 |
+| Scrolling after build | 5 ms/frame | 5 ms/frame |
+
+Fixes: metadata read in parallel during sync (one transaction, no reload churn, no SQLite write
+contention from workers); SIMD `jpeg-encoder` for previews; free-space queries off the UI thread;
+folder tree computed once per change; workers at lowest OS priority; mimalloc allocator.
+Measure again with `PHOTOLIB_PERF=1` (frame stats) and the `imaging` `bench` example.
+
+- [x] 10k-photo performance pass
+- [x] Sort options (Capture Time, Added Order, Pick, Label Color, Rating, File Name, Extension, Aspect Ratio) + direction
+- [x] Home / End / Page Up / Page Down
+- [ ] Folder operations: missing-folder badge, Remove from catalog, Show parent, Create subfolder, Rename
+- [ ] Preview management: purge orphaned previews, "Build Standard-Sized Previews"

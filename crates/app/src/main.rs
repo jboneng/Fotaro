@@ -3,11 +3,17 @@
 
 mod app;
 mod jobs;
+mod perf;
 mod platform;
 mod textures;
 mod ui;
 
 use std::path::PathBuf;
+
+// mimalloc avoids allocator lock contention between the UI thread and the many
+// worker threads that allocate large image buffers.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use app::PhotoLibraryApp;
 

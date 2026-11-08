@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use walkdir::WalkDir;
 
-use crate::catalog::Catalog;
-use crate::scan::file_kind;
+use crate::catalog::{Catalog, PhotoMetadata, write_metadata};
+use crate::scan::{FileKind, file_kind};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SyncReport {
@@ -43,25 +43,69 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// Reads camera metadata for a file during sync (supplied by the caller, so this
+/// crate needs no image decoders). Must be thread-safe: files are read in parallel.
+pub type MetadataReader<'a> = &'a (dyn Fn(&Path, FileKind) -> Option<PhotoMetadata> + Sync);
+
+/// What the walk found for one photo file.
+struct FileChange {
+    path: PathBuf,
+    kind: FileKind,
+    size: i64,
+    mtime_ms: i64,
+    /// `None` for new files.
+    existing_id: Option<i64>,
+    metadata: Option<PhotoMetadata>,
+}
+
+/// Read metadata for `files` on all cores.
+fn read_metadata_parallel(files: &mut [FileChange], reader: MetadataReader) {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let chunk = files.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for part in files.chunks_mut(chunk) {
+            scope.spawn(move || {
+                for f in part {
+                    f.metadata = reader(&f.path, f.kind);
+                }
+            });
+        }
+    });
+}
+
 impl Catalog {
     /// Add `root` (recursively) to the catalog, or re-synchronize it if already present.
     pub fn sync_folder(&mut self, root: impl AsRef<Path>) -> Result<SyncReport> {
+        self.sync_folder_with(root, None)
+    }
+
+    /// Like [`Catalog::sync_folder`], also reading metadata (capture time, camera...) of
+    /// new and changed files so they sort correctly straight away.
+    ///
+    /// Work happens in three phases so the write lock is held only briefly:
+    /// walk + diff (read-only), metadata reading (no lock), then one transaction.
+    pub fn sync_folder_with(
+        &mut self,
+        root: impl AsRef<Path>,
+        reader: Option<MetadataReader>,
+    ) -> Result<SyncReport> {
         let root = dunce::canonicalize(root.as_ref())
             .with_context(|| format!("resolving {}", root.as_ref().display()))?;
         anyhow::ensure!(root.is_dir(), "{} is not a directory", root.display());
 
-        let tx = self.conn.transaction()?;
+        let t_walk = std::time::Instant::now();
+        // Phase 1: walk the tree and diff against the catalog.
         let mut report = SyncReport::default();
-        let mut known = load_known(&tx, &root)?;
-        let mut folder_ids: HashMap<PathBuf, i64> = HashMap::new();
-        let now = unix_ms(SystemTime::now()) / 1000;
+        let mut known = load_known(&self.conn, &root)?;
+        let mut dirs: Vec<(PathBuf, usize)> = Vec::new();
+        let mut changes: Vec<FileChange> = Vec::new();
+        let mut restored: Vec<i64> = Vec::new();
 
         let walker = WalkDir::new(&root)
             .follow_links(false)
             .sort_by_file_name()
             .into_iter()
             .filter_entry(|e| e.depth() == 0 || !is_hidden(e.file_name()));
-
         for entry in walker {
             let entry = match entry {
                 Ok(e) => e,
@@ -72,19 +116,10 @@ impl Catalog {
                 }
             };
             let path = entry.path();
-
             if entry.file_type().is_dir() {
-                let parent_id = match path.parent() {
-                    Some(parent) if entry.depth() > 0 => folder_ids.get(parent).copied(),
-                    // The root: link it under an existing catalog folder if there is one.
-                    Some(parent) => folder_id(&tx, parent)?,
-                    None => None,
-                };
-                let id = ensure_folder(&tx, path, parent_id)?;
-                folder_ids.insert(path.to_path_buf(), id);
+                dirs.push((path.to_path_buf(), entry.depth()));
                 continue;
             }
-
             let Some(kind) = file_kind(path).filter(|_| entry.file_type().is_file()) else {
                 continue;
             };
@@ -98,59 +133,107 @@ impl Catalog {
             };
             let size = meta.len() as i64;
             let mtime_ms = meta.modified().map(unix_ms).unwrap_or(0);
-
+            let change = |existing_id| FileChange {
+                path: path.to_path_buf(),
+                kind,
+                size,
+                mtime_ms,
+                existing_id,
+                metadata: None,
+            };
             match known.remove(path) {
-                Some(k) if k.size != size || k.mtime_ms != mtime_ms => {
+                Some(k) if k.size != size || k.mtime_ms != mtime_ms => changes.push(change(Some(k.id))),
+                Some(k) if k.missing => restored.push(k.id),
+                Some(_) => {}
+                None => changes.push(change(None)),
+            }
+        }
+
+        let walk_time = t_walk.elapsed();
+        let t_meta = std::time::Instant::now();
+        // Phase 2: metadata for new/changed files, in parallel, without holding a lock.
+        if let Some(reader) = reader {
+            read_metadata_parallel(&mut changes, reader);
+        }
+
+        let meta_time = t_meta.elapsed();
+        let t_write = std::time::Instant::now();
+        // Phase 3: apply everything in one transaction.
+        let tx = self.conn.transaction()?;
+        let now = unix_ms(SystemTime::now()) / 1000;
+        let mut folder_ids: HashMap<PathBuf, i64> = HashMap::new();
+        for (path, depth) in &dirs {
+            let parent_id = match path.parent() {
+                Some(parent) if *depth > 0 => folder_ids.get(parent).copied(),
+                // The root: link it under an existing catalog folder if there is one.
+                Some(parent) => folder_id(&tx, parent)?,
+                None => None,
+            };
+            let id = ensure_folder(&tx, path, parent_id)?;
+            folder_ids.insert(path.clone(), id);
+        }
+
+        for c in &changes {
+            let photo_id = match c.existing_id {
+                Some(file_id) => {
                     tx.execute(
                         "UPDATE files SET size = ?1, mtime_ms = ?2, missing = 0 WHERE id = ?3",
-                        params![size, mtime_ms, k.id],
+                        params![c.size, c.mtime_ms, file_id],
                     )?;
                     report.updated += 1;
+                    tx.query_row("SELECT id FROM photos WHERE master_file_id = ?1", [file_id], |r| r.get(0))?
                 }
-                Some(k) if k.missing => {
-                    tx.execute("UPDATE files SET missing = 0 WHERE id = ?1", [k.id])?;
-                    report.restored += 1;
-                }
-                Some(_) => {}
                 None => {
-                    let folder_id = *path
+                    let folder_id = *c
+                        .path
                         .parent()
                         .and_then(|p| folder_ids.get(p))
                         .context("file outside walked folders")?;
-                    let name = entry.file_name().to_string_lossy();
-                    let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+                    let name = c.path.file_name().unwrap_or_default().to_string_lossy();
+                    let ext = c.path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
                     tx.execute(
                         "INSERT INTO files (folder_id, name, ext, kind, size, mtime_ms)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![folder_id, name, ext, kind.as_str(), size, mtime_ms],
+                        params![folder_id, name, ext, c.kind.as_str(), c.size, c.mtime_ms],
                     )?;
                     tx.execute(
                         "INSERT INTO photos (master_file_id, imported_at) VALUES (?1, ?2)",
                         params![tx.last_insert_rowid(), now],
                     )?;
                     report.added += 1;
+                    tx.last_insert_rowid()
                 }
+            };
+            if let Some(m) = &c.metadata {
+                write_metadata(&tx, photo_id, m)?;
             }
         }
-
+        for id in &restored {
+            tx.execute("UPDATE files SET missing = 0 WHERE id = ?1", [id])?;
+        }
+        report.restored = restored.len();
         for k in known.into_values().filter(|k| !k.missing) {
             tx.execute("UPDATE files SET missing = 1 WHERE id = ?1", [k.id])?;
             report.missing += 1;
         }
 
         tx.commit()?;
-        log::info!("synchronized {}: {report:?}", root.display());
+        log::info!(
+            "synchronized {}: {report:?} (walk {walk_time:.2?}, metadata {meta_time:.2?}, write {:.2?})",
+            root.display(),
+            t_write.elapsed()
+        );
         Ok(report)
     }
 }
 
 /// Files already in the catalog at or below `root`, keyed by full path.
-fn load_known(tx: &Transaction, root: &Path) -> Result<HashMap<PathBuf, Known>> {
+fn load_known(conn: &Connection, root: &Path) -> Result<HashMap<PathBuf, Known>> {
     let root_s = path_str(root);
     let sep = std::path::MAIN_SEPARATOR;
     let prefix = if root_s.ends_with(sep) { root_s.clone() } else { format!("{root_s}{sep}") };
 
-    let mut stmt = tx.prepare(
+    let mut stmt = conn.prepare(
         "SELECT f.id, fo.path, f.name, f.size, f.mtime_ms, f.missing
            FROM files f JOIN folders fo ON fo.id = f.folder_id
           WHERE fo.path = ?1 OR substr(fo.path, 1, length(?2)) = ?2",
@@ -184,7 +267,7 @@ fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::Flag;
+    use crate::catalog::{Flag, PhotoMetadata};
     use std::fs;
 
     fn setup() -> (tempfile::TempDir, PathBuf, Catalog) {
@@ -255,6 +338,34 @@ mod tests {
         let back = &cat.photos_in_folder(root, false).unwrap()[0];
         assert!(!back.missing);
         assert_eq!((back.id, back.rating), (a.id, 4));
+    }
+
+    #[test]
+    fn reads_metadata_during_sync_so_capture_order_is_immediate() {
+        let (_tmp, photos, mut cat) = setup();
+        // Pretend capture times are the reverse of file-name order.
+        let reader = |p: &Path, _kind: FileKind| {
+            let t = match p.file_name()?.to_str()? {
+                "a.NEF" => 300,
+                "b.jpg" => 200,
+                "c.tif" => 100,
+                _ => return None,
+            };
+            Some(PhotoMetadata { capture_time: Some(t), model: Some("Test".into()), ..Default::default() })
+        };
+        cat.sync_folder_with(&photos, Some(&reader)).unwrap();
+        let names: Vec<_> =
+            cat.photos(crate::Source::AllPhotographs).unwrap().into_iter().map(|p| p.file_name).collect();
+        assert_eq!(names, ["c.tif", "b.jpg", "a.NEF"]);
+
+        // Changed files get their metadata re-read.
+        fs::write(photos.join("a.NEF"), b"edited raw").unwrap();
+        let reader2 =
+            |_: &Path, _: FileKind| Some(PhotoMetadata { capture_time: Some(50), ..Default::default() });
+        let r = cat.sync_folder_with(&photos, Some(&reader2)).unwrap();
+        assert_eq!(r.updated, 1);
+        let first = &cat.photos(crate::Source::AllPhotographs).unwrap()[0];
+        assert_eq!((first.file_name.as_str(), first.capture_time), ("a.NEF", Some(50)));
     }
 
     #[test]

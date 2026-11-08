@@ -11,6 +11,7 @@ log.workspace = true
 walkdir.workspace = true
 rusqlite.workspace = true
 dunce.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

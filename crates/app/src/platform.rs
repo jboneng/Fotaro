@@ -31,9 +31,35 @@ pub fn reveal(path: &Path) {
     }
 }
 
-/// Free space on the volume holding `path`, if it can be determined.
-pub fn free_space(path: &Path) -> Option<u64> {
-    fs4::available_space(path).ok()
+/// Free space per volume, refreshed on a background thread. Querying the OS can
+/// block for hundreds of milliseconds while the disk is busy, so it must never
+/// happen while drawing.
+#[derive(Default)]
+pub struct FreeSpaceCache {
+    values: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    refreshing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    last_refresh: Option<std::time::Instant>,
+}
+
+impl FreeSpaceCache {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Cached free bytes for a volume key from [`volume_of`]; schedules a refresh when stale.
+    pub fn get(&mut self, volume: &str) -> Option<u64> {
+        let value = self.values.lock().unwrap().get(volume).copied();
+        let stale = self.last_refresh.is_none_or(|t| t.elapsed() > Self::MAX_AGE) || value.is_none();
+        if stale && !self.refreshing.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.last_refresh = Some(std::time::Instant::now());
+            let (values, refreshing, key) = (self.values.clone(), self.refreshing.clone(), volume.to_owned());
+            std::thread::spawn(move || {
+                if let Ok(free) = fs4::available_space(Path::new(&key)) {
+                    values.lock().unwrap().insert(key, free);
+                }
+                refreshing.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        value
+    }
 }
 
 /// Group a folder path under its volume, the way LrC's Folders panel does.

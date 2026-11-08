@@ -34,6 +34,10 @@ pub enum Action {
     Previous,
     Up,
     Down,
+    First,
+    Last,
+    PageUp,
+    PageDown,
     SelectAll,
     SelectNone,
     ZoomToggle,
@@ -196,6 +200,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(k(K::ArrowLeft), A::Previous, SELECT, "Previous photo"),
     s(k(K::ArrowUp), A::Up, SELECT, "Photo above (Grid)"),
     s(k(K::ArrowDown), A::Down, SELECT, "Photo below (Grid)"),
+    s(k(K::Home), A::First, SELECT, "First photo"),
+    s(k(K::End), A::Last, SELECT, "Last photo"),
+    s(k(K::PageUp), A::PageUp, SELECT, "Page up (Grid)"),
+    s(k(K::PageDown), A::PageDown, SELECT, "Page down (Grid)"),
     s(ctrl(K::A), A::SelectAll, SELECT, "Select all"),
     s(ctrl(K::D), A::SelectNone, SELECT, "Select none"),
     // Organizing
@@ -231,6 +239,8 @@ pub fn key_name(key: Key) -> &'static str {
         Key::ArrowUp => "↑",
         Key::ArrowDown => "↓",
         Key::Escape => "Esc",
+        Key::PageUp => "Page Up",
+        Key::PageDown => "Page Down",
         other => other.name(),
     }
 }

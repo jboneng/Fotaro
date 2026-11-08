@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, RgbImage};
 
 use crate::decode::{SourceKind, decode};
@@ -114,11 +113,13 @@ impl PreviewCache {
         let path = self.path(photo_id, size, fp);
         // Write to a temp name then rename, so a crash never leaves a truncated preview.
         let tmp = path.with_extension("tmp");
-        let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        JpegEncoder::new_with_quality(&mut out, size.quality())
-            .encode_image(img)
+        // jpeg-encoder (SIMD) is ~3x faster than image's encoder for previews.
+        let (w, h) = (u16::try_from(img.width())?, u16::try_from(img.height())?);
+        let mut buf = Vec::with_capacity(img.as_raw().len() / 10);
+        jpeg_encoder::Encoder::new(&mut buf, size.quality())
+            .encode(img.as_raw(), w, h, jpeg_encoder::ColorType::Rgb)
             .context("encoding preview JPEG")?;
-        drop(out);
+        std::fs::write(&tmp, &buf)?;
         std::fs::rename(&tmp, &path)?;
         Ok(path)
     }

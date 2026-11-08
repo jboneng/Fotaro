@@ -64,6 +64,7 @@ pub struct UiState {
     /// Loupe info overlay: 0 = off, 1 = Info 1, 2 = Info 2.
     pub info_overlay: u8,
     pub metadata_preset: MetadataPreset,
+    pub sort: catalog::SortOrder,
 }
 
 impl Default for UiState {
@@ -82,6 +83,7 @@ impl Default for UiState {
             grid_style: GridStyle::Compact,
             info_overlay: 1,
             metadata_preset: MetadataPreset::Default,
+            sort: catalog::SortOrder::default(),
         }
     }
 }
@@ -102,6 +104,7 @@ pub enum Command {
     OpenCatalog,
     SyncFolder(i64),
     SetSource(Source),
+    SetSort(catalog::SortOrder),
     Reveal(PathBuf),
     SetLights(Lights),
     /// A not-yet-implemented feature; shows when it arrives.
@@ -120,9 +123,12 @@ pub struct Session {
     pub jobs: JobSystem,
     events: Receiver<Event>,
     pub folders: Vec<Folder>,
+    pub folder_tree: FolderTree,
     pub collapsed_folders: HashSet<i64>,
+    pub free_space: crate::platform::FreeSpaceCache,
     pub counts: (i64, i64),
     pub source: Source,
+    pub sort: catalog::SortOrder,
     pub photos: Vec<PhotoRow>,
     pub index_of: HashMap<i64, usize>,
     pub selected: HashSet<i64>,
@@ -137,7 +143,7 @@ pub struct Session {
 }
 
 impl Session {
-    fn open(ctx: &egui::Context, catalog: Catalog) -> Result<Self> {
+    fn open(ctx: &egui::Context, catalog: Catalog, sort: catalog::SortOrder) -> Result<Self> {
         let cache = PreviewCache::new(catalog.previews_dir());
         let (jobs, events) = JobSystem::start(ctx.clone(), catalog.dir().to_path_buf(), cache);
         let mut s = Session {
@@ -145,9 +151,12 @@ impl Session {
             jobs,
             events,
             folders: Vec::new(),
+            folder_tree: FolderTree::default(),
             collapsed_folders: HashSet::new(),
+            free_space: Default::default(),
             counts: (0, 0),
             source: Source::AllPhotographs,
+            sort,
             photos: Vec::new(),
             index_of: HashMap::new(),
             selected: HashSet::new(),
@@ -167,13 +176,18 @@ impl Session {
 
     pub fn refresh_tree(&mut self) -> Result<()> {
         self.folders = self.catalog.folders()?;
+        self.folder_tree = FolderTree::build(&self.folders);
         self.counts = self.catalog.source_counts()?;
         Ok(())
     }
 
     /// Reload the grid's photos, keeping selection for photos that are still there.
     pub fn reload_photos(&mut self) -> Result<()> {
-        self.photos = self.catalog.photos(self.source)?;
+        let started = Instant::now();
+        self.photos = self.catalog.photos_sorted(self.source, self.sort)?;
+        if started.elapsed() > Duration::from_millis(50) {
+            log::warn!("slow reload: {} photos in {:.0?}", self.photos.len(), started.elapsed());
+        }
         self.index_of = self.photos.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
         self.selected.retain(|id| self.index_of.contains_key(id));
         if self.active.is_none_or(|id| !self.index_of.contains_key(&id)) {
@@ -289,8 +303,11 @@ impl Session {
     }
 
     fn process_events(&mut self, ctx: &egui::Context) -> Vec<String> {
+        let started = Instant::now();
         let mut messages = Vec::new();
+        let mut handled = 0usize;
         for event in self.events.try_iter().collect::<Vec<_>>() {
+            handled += 1;
             match event {
                 Event::SyncDone { root, result } => {
                     let name = root.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -352,6 +369,9 @@ impl Session {
         if let Some(t) = self.reload_due {
             ctx.request_repaint_after(t.saturating_duration_since(Instant::now()));
         }
+        if started.elapsed() > Duration::from_millis(50) {
+            log::warn!("slow event processing: {handled} events in {:.0?}", started.elapsed());
+        }
         messages
     }
 }
@@ -371,7 +391,10 @@ pub struct PhotoLibraryApp {
     pub panel_rects: Vec<egui::Rect>,
     /// Grid geometry from the last frame, for Up/Down and scroll-to-active.
     pub grid_cols: usize,
+    /// Whole rows visible in the grid (for Page Up / Page Down).
+    pub grid_rows_visible: usize,
     pub grid_scroll: (f32, f32),
+    perf: crate::perf::FrameStats,
 }
 
 impl PhotoLibraryApp {
@@ -392,7 +415,9 @@ impl PhotoLibraryApp {
             commands: Vec::new(),
             panel_rects: Vec::new(),
             grid_cols: 1,
+            grid_rows_visible: 1,
             grid_scroll: (0.0, 0.0),
+            perf: crate::perf::FrameStats::from_env(),
         };
         if let Some(dir) = args.catalog {
             let create = !dir.join("catalog.db").is_file();
@@ -424,7 +449,7 @@ impl PhotoLibraryApp {
 
     fn open_catalog(&mut self, ctx: &egui::Context, dir: &Path, create: bool) {
         let result = if create { Catalog::create(dir) } else { Catalog::open(dir) }
-            .and_then(|c| Session::open(ctx, c));
+            .and_then(|c| Session::open(ctx, c, self.ui.sort));
         match result {
             Ok(session) => {
                 log::info!("opened catalog {}", dir.display());
@@ -595,6 +620,17 @@ impl PhotoLibraryApp {
                 let d = if action == Action::Up { -cols } else { cols };
                 self.with_session(|s| s.move_active(d));
             }
+            Action::First => self.with_session(|s| s.move_active(-(s.photos.len() as isize))),
+            Action::Last => self.with_session(|s| s.move_active(s.photos.len() as isize)),
+            Action::PageUp | Action::PageDown => {
+                let step = if self.view == View::Grid {
+                    (self.grid_cols * self.grid_rows_visible).max(1) as isize
+                } else {
+                    1
+                };
+                let d = if action == Action::PageUp { -step } else { step };
+                self.with_session(|s| s.move_active(d));
+            }
             Action::SelectAll => self.with_session(|s| s.selected = s.photos.iter().map(|p| p.id).collect()),
             Action::SelectNone => self.with_session(|s| s.selected.clear()),
             Action::Import => self.add_folder(),
@@ -658,6 +694,16 @@ impl PhotoLibraryApp {
                     self.notify(format!("Synchronizing {name}"));
                 }
             }
+            Command::SetSort(sort) => {
+                self.ui.sort = sort;
+                if let Some(s) = &mut self.session {
+                    s.sort = sort;
+                    if let Err(e) = s.reload_photos() {
+                        self.error = Some(format!("{e:#}"));
+                    }
+                    s.scroll_to_active = true;
+                }
+            }
             Command::SetSource(source) => {
                 if let Some(s) = &mut self.session {
                     s.source = source;
@@ -678,7 +724,8 @@ impl PhotoLibraryApp {
 }
 
 impl eframe::App for PhotoLibraryApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.perf.record(frame.info().cpu_usage);
         let ctx = ui.ctx().clone();
         if let Some(s) = &mut self.session {
             s.thumbs.begin_frame();
@@ -692,7 +739,11 @@ impl eframe::App for PhotoLibraryApp {
             self.commands.push(Command::Action(sc.action));
         }
 
+        let draw_started = Instant::now();
         crate::ui::layout::draw(self, ui);
+        if draw_started.elapsed() > Duration::from_millis(100) {
+            log::warn!("slow frame: drawing took {:.0?}", draw_started.elapsed());
+        }
 
         for cmd in std::mem::take(&mut self.commands) {
             self.execute(&ctx, cmd);
@@ -703,5 +754,68 @@ impl eframe::App for PhotoLibraryApp {
         let settings = Settings { last_catalog: self.last_catalog.clone(), ui: std::mem::take(&mut self.ui) };
         eframe::set_value(storage, eframe::APP_KEY, &settings);
         self.ui = settings.ui;
+    }
+}
+
+/// Folders panel structure, computed when the catalog's folders change rather than
+/// every frame. Indices refer to `Session::folders`.
+#[derive(Default)]
+pub struct FolderTree {
+    pub children: HashMap<Option<i64>, Vec<usize>>,
+    /// Photo counts including all subfolders.
+    pub totals: HashMap<i64, i64>,
+    /// (volume key, display name, root folder indices), sorted by key.
+    pub volumes: Vec<(String, String, Vec<usize>)>,
+}
+
+impl FolderTree {
+    pub fn build(folders: &[Folder]) -> Self {
+        let mut children: HashMap<Option<i64>, Vec<usize>> = HashMap::new();
+        for (i, f) in folders.iter().enumerate() {
+            children.entry(f.parent_id).or_default().push(i);
+        }
+        let index: HashMap<i64, usize> = folders.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
+        // Folders are sorted by path, so children come after parents: sum in reverse.
+        let mut totals: HashMap<i64, i64> = folders.iter().map(|f| (f.id, f.photo_count)).collect();
+        for f in folders.iter().rev() {
+            if let Some(parent) = f.parent_id.filter(|p| index.contains_key(p)) {
+                let own = totals[&f.id];
+                *totals.entry(parent).or_default() += own;
+            }
+        }
+        let mut volumes: std::collections::BTreeMap<String, (String, Vec<usize>)> = Default::default();
+        for &i in children.get(&None).into_iter().flatten() {
+            let (key, name) = crate::platform::volume_of(&folders[i].path);
+            volumes.entry(key).or_insert_with(|| (name, Vec::new())).1.push(i);
+        }
+        let volumes = volumes.into_iter().map(|(k, (n, roots))| (k, n, roots)).collect();
+        FolderTree { children, totals, volumes }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(id: i64, path: &str, parent: Option<i64>, count: i64) -> Folder {
+        Folder { id, path: PathBuf::from(path), parent_id: parent, photo_count: count }
+    }
+
+    #[test]
+    fn folder_tree_totals_include_subfolders() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let p = |s: &str| s.replace('/', &sep.to_string());
+        let folders = vec![
+            folder(1, &p("/photos"), None, 1),
+            folder(2, &p("/photos/2025"), Some(1), 2),
+            folder(3, &p("/photos/2025/trip"), Some(2), 4),
+            folder(4, &p("/photos/2026"), Some(1), 8),
+        ];
+        let t = FolderTree::build(&folders);
+        assert_eq!(t.totals[&1], 15);
+        assert_eq!(t.totals[&2], 6);
+        assert_eq!(t.totals[&3], 4);
+        assert_eq!(t.children[&Some(1)], vec![1, 3]);
+        assert_eq!(t.volumes.len(), 1);
     }
 }

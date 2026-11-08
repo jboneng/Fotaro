@@ -307,6 +307,7 @@ pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         }
     });
     app.grid_scroll = (out.state.clamped_offset().y, out.inner_rect.height());
+    app.grid_rows_visible = ((out.inner_rect.height() / cell_h).floor() as usize).max(1);
 
     for (resp, photo) in clicks {
         handle_click(app, &resp, &photo, true);
@@ -540,7 +541,26 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             .on_disabled_hover_text("Survey (N) arrives in Phase 6");
         ui.separator();
         ui.label(RichText::new("Sort:").color(theme::TEXT_WEAK));
-        ui.label("Capture Time");
+        let mut sort = app.ui.sort;
+        let dir = if sort.descending { "Z↑A" } else { "A↓Z" };
+        if ui
+            .add(egui::Button::new(RichText::new(dir).size(10.5)).frame(false))
+            .on_hover_text("Reverse sort direction")
+            .clicked()
+        {
+            sort.descending = !sort.descending;
+        }
+        egui::ComboBox::from_id_salt("sort_key").selected_text(sort.key.label()).width(110.0).show_ui(
+            ui,
+            |ui| {
+                for key in catalog::SortKey::ALL {
+                    ui.selectable_value(&mut sort.key, key, key.label());
+                }
+            },
+        );
+        if sort != app.ui.sort {
+            app.run(Command::SetSort(sort));
+        }
         ui.separator();
 
         // Flag / rating / label controls for the active photo (or selection).
