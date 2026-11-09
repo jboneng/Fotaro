@@ -171,6 +171,7 @@ pub struct UiState {
     pub auto_write_xmp: bool,
     pub filter: crate::filter::FilterBar,
     pub import: crate::import::ImportPrefs,
+    pub export: crate::export::ExportPrefs,
 }
 
 impl Default for UiState {
@@ -195,6 +196,7 @@ impl Default for UiState {
             auto_write_xmp: false,
             filter: crate::filter::FilterBar::default(),
             import: crate::import::ImportPrefs::default(),
+            export: crate::export::ExportPrefs::default(),
         }
     }
 }
@@ -306,6 +308,13 @@ pub enum Command {
     StartImport,
     CloseImport,
     CancelImport,
+    /// File ▸ Export… for the selected photos.
+    OpenExport,
+    /// File ▸ Export with Previous: no dialog.
+    ExportWithPrevious,
+    StartExport,
+    CloseExport,
+    CancelExport,
     DeleteVirtualCopies(Vec<i64>),
     /// Photos dropped on the Quick Collection.
     QuickCollectionAdd(Vec<i64>),
@@ -405,6 +414,8 @@ pub struct Session {
     pub facets: Option<(FacetKey, Vec<Vec<catalog::Facet>>)>,
     /// The Import dialog, while open.
     pub import: Option<crate::import::ImportDialog>,
+    /// The Export dialog, while open.
+    pub export: Option<crate::ui::export::ExportDialog>,
     /// Photo pixel sizes (as stored), read on demand for views showing several photos.
     dims: HashMap<i64, Option<egui::Vec2>>,
     pub source: Source,
@@ -453,6 +464,7 @@ impl Session {
             collections_gen: None,
             facets: None,
             import: None,
+            export: None,
             dims: HashMap::new(),
             source: Source::AllPhotographs,
             sort,
@@ -837,6 +849,32 @@ impl Session {
                     }
                     Err(e) => messages.push(format!("Import failed: {e}")),
                 },
+                Event::ExportDone { result, reveal } => match result {
+                    Ok(r) => {
+                        let n = r.exported.len();
+                        let mut msg = format!("Exported {n} file{}", if n == 1 { "" } else { "s" });
+                        if r.skipped > 0 {
+                            msg += &format!(", skipped {} (already there)", r.skipped);
+                        }
+                        if let Some((path, e)) = r.failed.first() {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            msg += &format!(", {} failed ({name}: {e})", r.failed.len());
+                        }
+                        if r.cancelled {
+                            msg += " (cancelled)";
+                        }
+                        messages.push(msg);
+                        if let Some(path) = reveal {
+                            crate::platform::reveal(&path);
+                        }
+                        if !r.added.is_empty()
+                            && let Err(e) = self.refresh_tree().and_then(|()| self.reload_photos())
+                        {
+                            messages.push(format!("Catalog error: {e:#}"));
+                        }
+                    }
+                    Err(e) => messages.push(format!("Export failed: {e}")),
+                },
                 Event::XmpDone { read, quiet, done, skipped, failed } => {
                     if read {
                         // Ratings, labels, rotation, keywords... may all have changed.
@@ -1217,6 +1255,8 @@ impl PhotoLibraryApp {
             Action::SelectAll => self.with_session(|s| s.selected = s.photos.iter().map(|p| p.id).collect()),
             Action::SelectNone => self.with_session(|s| s.selected.clear()),
             Action::Import => self.execute(ctx, Command::OpenImport(None)),
+            Action::Export => self.execute(ctx, Command::OpenExport),
+            Action::ExportWithPrevious => self.execute(ctx, Command::ExportWithPrevious),
             Action::ShowShortcuts => self.show_shortcuts ^= true,
             Action::SaveMetadata => self.save_metadata(),
             Action::QuickCollection => {
@@ -1996,6 +2036,74 @@ impl PhotoLibraryApp {
                 if let Some(s) = &self.session {
                     s.jobs.cancel_import();
                     self.notify("Stopping the import after the current photo");
+                }
+            }
+            Command::OpenExport => {
+                let view = self.view;
+                let Some(s) = &mut self.session else {
+                    self.notify("Open or create a catalog first");
+                    return;
+                };
+                let photo_ids = s.targets(view);
+                if photo_ids.is_empty() {
+                    self.notify("Select the photos to export");
+                    return;
+                }
+                let sample = s.catalog.photo(photo_ids[0]).ok().flatten().map(|p| {
+                    let stem = p.path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                    let ext = p.path.extension().unwrap_or_default().to_string_lossy().into_owned();
+                    (stem, ext, p.capture_time.unwrap_or(0))
+                });
+                // LrC's default destination is the Pictures folder.
+                if self.ui.export.folder.as_os_str().is_empty()
+                    && let Some(pictures) =
+                        directories::UserDirs::new().and_then(|d| d.picture_dir().map(Path::to_path_buf))
+                {
+                    self.ui.export.folder = pictures;
+                }
+                s.export = Some(crate::ui::export::ExportDialog { photo_ids, sample });
+            }
+            Command::ExportWithPrevious => {
+                let view = self.view;
+                let Some(s) = &mut self.session else { return };
+                let photo_ids = s.targets(view);
+                if photo_ids.is_empty() {
+                    self.notify("Select the photos to export");
+                    return;
+                }
+                if let Some(problem) = self.ui.export.problem() {
+                    // Nothing usable from before: show the dialog instead.
+                    self.notify(problem);
+                    self.execute(ctx, Command::OpenExport);
+                    return;
+                }
+                let n = photo_ids.len();
+                s.jobs.submit_normal(Job::Export { photo_ids, prefs: Box::new(self.ui.export.clone()) });
+                self.notify(format!(
+                    "Exporting {n} photo{} ({})",
+                    if n == 1 { "" } else { "s" },
+                    self.ui.export.summary()
+                ));
+            }
+            Command::StartExport => {
+                let Some(s) = &mut self.session else { return };
+                let Some(d) = s.export.take() else { return };
+                let n = d.photo_ids.len();
+                s.jobs.submit_normal(Job::Export {
+                    photo_ids: d.photo_ids,
+                    prefs: Box::new(self.ui.export.clone()),
+                });
+                self.notify(format!("Exporting {n} photo{}", if n == 1 { "" } else { "s" }));
+            }
+            Command::CloseExport => {
+                if let Some(s) = &mut self.session {
+                    s.export = None;
+                }
+            }
+            Command::CancelExport => {
+                if let Some(s) = &self.session {
+                    s.jobs.cancel_export();
+                    self.notify("Stopping the export after the photos being written");
                 }
             }
             Command::DeleteVirtualCopies(ids) => {

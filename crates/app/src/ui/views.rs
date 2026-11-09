@@ -391,6 +391,17 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
         ui.separator();
         let _ =
             ui.add_enabled(false, egui::Button::new("Edit In")).on_disabled_hover_text("Arrives in Phase 7");
+        ui.separator();
+        ui.menu_button("Export", |ui| {
+            for (name, action) in
+                [("Export…", Action::Export), ("Export with Previous", Action::ExportWithPrevious)]
+            {
+                if ui.button(name).clicked() {
+                    app.run(Command::Action(action));
+                    ui.close();
+                }
+            }
+        });
     });
 }
 

@@ -2020,6 +2020,7 @@ dependencies = [
  "catalog",
  "chrono",
  "fast_image_resize",
+ "flate2",
  "image",
  "jpeg-encoder",
  "kamadak-exif",
@@ -2027,6 +2028,9 @@ dependencies = [
  "libraw",
  "log",
  "memmap2",
+ "png",
+ "rayon",
+ "serde",
  "tempfile",
 ]
 

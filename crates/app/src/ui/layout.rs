@@ -77,6 +77,8 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.separator();
             if has_catalog {
                 menu_action(ui, app, "Import Photos…", Action::Import);
+                menu_action(ui, app, "Export…", Action::Export);
+                menu_action(ui, app, "Export with Previous", Action::ExportWithPrevious);
             }
             ui.separator();
             menu_cmd(ui, app, "Exit", true, Command::Quit);
@@ -269,6 +271,25 @@ fn top_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     );
                     if ui.small_button("✕").on_hover_text("Stop the import").clicked() {
                         app.run(Command::CancelImport);
+                    }
+                });
+                ui.add(
+                    egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                        .desired_width(220.0)
+                        .desired_height(6.0),
+                );
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        } else if let Some((done, total)) = progress.export {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Exporting {done} of {total} photos"))
+                            .size(11.0)
+                            .color(theme::TEXT),
+                    );
+                    if ui.small_button("✕").on_hover_text("Stop the export").clicked() {
+                        app.run(Command::CancelExport);
                     }
                 });
                 ui.add(
@@ -549,6 +570,7 @@ fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
 
     dialogs(app, ctx);
     super::import::window(app, ctx);
+    super::export::window(app, ctx);
 
     if let Some(err) = app.error.clone() {
         let mut open = true;

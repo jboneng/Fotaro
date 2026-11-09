@@ -93,6 +93,8 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | Shortcut | Action | Status |
 |---|---|---|
 | `Ctrl+Shift+I` | Import photos (Copy, Move or Add) | ✅ |
+| `Ctrl+Shift+E` | Export the selected photos | ✅ |
+| `Ctrl+Alt+Shift+E` | Export with previous settings | ✅ |
 | `Ctrl+[` | Rotate left (counterclockwise) | ✅ |
 | `Ctrl+]` | Rotate right (clockwise) | ✅ |
 | `B` | Add to / remove from Quick Collection | ✅ |

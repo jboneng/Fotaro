@@ -170,6 +170,11 @@ fn gather(conn: &Connection, photo_id: i64) -> Result<Gathered> {
     })
 }
 
+/// A photo's catalog metadata as XMP fields (orientation left out).
+pub(crate) fn gather_data(conn: &Connection, photo_id: i64) -> Result<XmpData> {
+    Ok(gather(conn, photo_id)?.data)
+}
+
 /// Make the catalog match a sidecar (LrC "Read Metadata from File"). Properties the
 /// sidecar doesn't have are cleared, except the pick flag, which only this app writes.
 pub(crate) fn apply_xmp(conn: &Connection, photo_id: i64, d: &XmpData, file_turns: u8) -> Result<()> {

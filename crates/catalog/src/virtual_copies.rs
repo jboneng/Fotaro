@@ -44,41 +44,28 @@ impl Catalog {
 
         // Stack it right after the photo it was made from (in the master's stack if it has
         // one), and open the stack so the new copy is visible.
-        let place = |id: i64| -> rusqlite::Result<(Option<i64>, Option<i64>)> {
-            tx.query_row("SELECT stack_id, stack_pos FROM photos WHERE id = ?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+        let place = |id: i64| -> rusqlite::Result<Option<i64>> {
+            tx.query_row("SELECT stack_id FROM photos WHERE id = ?1", [id], |r| r.get(0))
         };
-        let (stack, master_pos) = place(master)?;
-        let (source_stack, source_pos) = place(photo_id)?;
-        let pos = if source_stack.is_some() && source_stack == stack { source_pos } else { master_pos };
-        let stack = match stack {
-            Some(s) => {
-                let after = pos.unwrap_or(0);
-                tx.execute(
-                    "UPDATE photos SET stack_pos = stack_pos + 1 WHERE stack_id = ?1 AND stack_pos > ?2",
-                    params![s, after],
-                )?;
-                tx.execute(
-                    "UPDATE photos SET stack_id = ?1, stack_pos = ?2 WHERE id = ?3",
-                    params![s, after + 1, copy],
-                )?;
-                s
-            }
-            None => {
-                tx.execute("INSERT INTO stacks (collapsed) VALUES (0)", [])?;
-                let s = tx.last_insert_rowid();
-                tx.execute(
-                    "UPDATE photos SET stack_id = ?1, stack_pos = 0 WHERE id = ?2",
-                    params![s, master],
-                )?;
-                tx.execute("UPDATE photos SET stack_id = ?1, stack_pos = 1 WHERE id = ?2", params![s, copy])?;
-                s
-            }
-        };
-        tx.execute("UPDATE stacks SET collapsed = 0 WHERE id = ?1", [stack])?;
+        let after =
+            if place(photo_id)?.is_some() && place(photo_id)? == place(master)? { photo_id } else { master };
+        stack_after(&tx, after, copy)?;
         tx.commit()?;
         Ok(copy)
+    }
+
+    /// Put `new` in a stack right below `original` (creating the stack if needed) and
+    /// open it, like LrC's export / Edit In "Stack with original".
+    pub fn stack_below(&mut self, original: i64, new: i64) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("UPDATE photos SET stack_id = NULL, stack_pos = NULL WHERE id = ?1", [new])?;
+        stack_after(&tx, original, new)?;
+        tx.execute(
+            "DELETE FROM stacks WHERE id NOT IN (SELECT stack_id FROM photos WHERE stack_id IS NOT NULL)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Delete virtual copies (masters in `photo_ids` are ignored). Returns how many
@@ -103,7 +90,41 @@ impl Catalog {
         tx.commit()?;
         Ok(n)
     }
+}
 
+/// Stack `new` (not in a stack) right after `after`, creating a stack if `after` has
+/// none, and open the stack.
+fn stack_after(tx: &rusqlite::Transaction, after: i64, new: i64) -> Result<()> {
+    let (stack, pos): (Option<i64>, Option<i64>) =
+        tx.query_row("SELECT stack_id, stack_pos FROM photos WHERE id = ?1", [after], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+    let stack = match stack {
+        Some(s) => {
+            let after = pos.unwrap_or(0);
+            tx.execute(
+                "UPDATE photos SET stack_pos = stack_pos + 1 WHERE stack_id = ?1 AND stack_pos > ?2",
+                params![s, after],
+            )?;
+            tx.execute(
+                "UPDATE photos SET stack_id = ?1, stack_pos = ?2 WHERE id = ?3",
+                params![s, after + 1, new],
+            )?;
+            s
+        }
+        None => {
+            tx.execute("INSERT INTO stacks (collapsed) VALUES (0)", [])?;
+            let s = tx.last_insert_rowid();
+            tx.execute("UPDATE photos SET stack_id = ?1, stack_pos = 0 WHERE id = ?2", params![s, after])?;
+            tx.execute("UPDATE photos SET stack_id = ?1, stack_pos = 1 WHERE id = ?2", params![s, new])?;
+            s
+        }
+    };
+    tx.execute("UPDATE stacks SET collapsed = 0 WHERE id = ?1", [stack])?;
+    Ok(())
+}
+
+impl Catalog {
     /// Is this photo a virtual copy?
     pub fn is_virtual_copy(&self, photo_id: i64) -> Result<bool> {
         Ok(self

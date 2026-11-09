@@ -250,3 +250,27 @@ building; revisit with 1:1 previews in Phase 2.
 - [x] 1:1 quality: request the GPU's real texture limit (32768 px here instead of egui's 8192),
       so very large scans show at full resolution.
 - [ ] Later: Compare zoom unlinking (LrC's lock), Survey drag-reordering, renaming virtual copies.
+
+## Progress (Phase 8)
+- [x] Export dialog (File ▸ Export…, Ctrl+Shift+E, photo context menu) laid out like LrC's:
+      Export Location (specific folder or the original's folder, subfolder, Add to This Catalog,
+      Add to Stack, Existing Files: new name / overwrite / skip), File Naming (the import rename
+      templates, with an example), File Settings, Image Sizing, Metadata, Post-Processing.
+      Settings are remembered; Export with Previous (Ctrl+Alt+Shift+E) skips the dialog.
+- [x] Formats: JPEG (quality), TIFF 8-bit (none or ZIP with predictor, strips compressed in
+      parallel), PNG, all sRGB with an embedded ICC profile; Original copies the file byte for
+      byte plus an XMP sidecar holding the catalog metadata (and rotation).
+- [x] Pixels: full-size decode (RAW: full-size embedded JPEG or LibRaw render), catalog rotation
+      applied, Lanczos3 resize to Width & Height / Dimensions / Long Edge / Short Edge /
+      Megapixels / Percentage, Don't Enlarge, resolution (ppi) written to the file.
+- [x] Metadata: Copyright Only / Copyright & Contact Info Only / All Except Camera Info / All
+      Metadata. EXIF (camera, lens, exposure, capture time, artist, copyright, caption) and XMP
+      (title, caption, keywords with hierarchy, rating, label) in JPEG APP1, TIFF tags and PNG chunks.
+- [x] Runs as a background job, a few photos at a time on low-priority threads, with progress
+      and ✕ in the identity plate; writes through `.part` files so nothing half-written is left.
+      Exports added to the catalog are never paired as RAW+JPEG with their original.
+- [x] Real files (release build): a 24 MP NEF renders in 0.1 s; JPEG 0.2 s, TIFF-ZIP 0.6 s,
+      PNG 0.2 s.
+- [ ] Later: export presets (user-named), 16-bit TIFF, colour spaces other than sRGB, output
+      sharpening, watermarks, "Limit File Size To", GPS / Remove Location Info (needs GPS
+      import first), Export as Catalog.

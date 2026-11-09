@@ -60,11 +60,14 @@ pub struct SyncOptions<'a> {
     pub recursive: bool,
     /// Import time for new photos (seconds since 1970); now if `None`.
     pub imported_at: Option<i64>,
+    /// Let a new JPEG join the raw file of the same name (RAW+JPEG). Off for exports
+    /// and edited files, which are photos of their own.
+    pub pair_raw_jpeg: bool,
 }
 
 impl Default for SyncOptions<'_> {
     fn default() -> Self {
-        SyncOptions { reader: None, only: None, recursive: true, imported_at: None }
+        SyncOptions { reader: None, only: None, recursive: true, imported_at: None, pair_raw_jpeg: true }
     }
 }
 
@@ -215,7 +218,7 @@ impl Catalog {
 
         // New JPEGs next to a raw file of the same name become part of that raw photo
         // (unless the catalog treats them separately); handle them after the raws.
-        let pair_jpegs = !separate_raw_jpeg;
+        let pair_jpegs = !separate_raw_jpeg && opts.pair_raw_jpeg;
         let is_pair_candidate = |c: &FileChange| {
             pair_jpegs && c.existing_id.is_none() && c.kind == FileKind::Image && is_jpeg(&c.path)
         };

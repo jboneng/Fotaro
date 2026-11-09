@@ -449,7 +449,7 @@ impl Catalog {
 
     /// Make sure every folder from `top` down to `leaf` is in the catalog, linked as a
     /// tree (and `top` under its parent if that is in the catalog).
-    fn ensure_folder_path(&mut self, top: &Path, leaf: &Path) -> Result<()> {
+    pub(crate) fn ensure_folder_path(&mut self, top: &Path, leaf: &Path) -> Result<()> {
         let mut chain: Vec<&Path> = leaf.ancestors().take_while(|p| p.starts_with(top)).collect();
         chain.reverse();
         let tx = self.conn.transaction()?;
@@ -512,8 +512,13 @@ impl Catalog {
         for dir in &dirs {
             // Copy/Move: build the tree from the destination down (2026 > 2026-11-08).
             self.ensure_folder_path(top.as_deref().filter(|t| dir.starts_with(t)).unwrap_or(dir), dir)?;
-            let opts =
-                SyncOptions { reader, only: Some(&only), recursive: false, imported_at: Some(imported_at) };
+            let opts = SyncOptions {
+                reader,
+                only: Some(&only),
+                recursive: false,
+                imported_at: Some(imported_at),
+                ..Default::default()
+            };
             self.sync_folder_opts(dir, opts)?;
         }
         report.folders = dirs;

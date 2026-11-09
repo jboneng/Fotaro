@@ -93,6 +93,11 @@ pub enum Job {
         chosen: Vec<catalog::Candidate>,
         settings: catalog::ImportSettings,
     },
+    /// File ▸ Export: render and write these photos.
+    Export {
+        photo_ids: Vec<i64>,
+        prefs: Box<crate::export::ExportPrefs>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -112,7 +117,8 @@ impl Job {
             | Job::WriteXmp { .. }
             | Job::ReadXmp { .. }
             | Job::ImportScan { .. }
-            | Job::Import { .. } => None,
+            | Job::Import { .. }
+            | Job::Export { .. } => None,
             Job::ImportThumb { key, .. } => Some(JobKey::ImportThumb(*key)),
             Job::Load { photo, size } => Some(JobKey::Load(photo.id, *size)),
             Job::BuildPreviews { photo } => Some(JobKey::Build(photo.id)),
@@ -185,6 +191,11 @@ pub enum Event {
     ImportDone {
         result: Result<catalog::ImportReport, String>,
     },
+    ExportDone {
+        result: Result<crate::export::ExportReport, String>,
+        /// Post-processing: the folder to show in Explorer / Finder.
+        reveal: Option<PathBuf>,
+    },
     /// Sidecars were written (`read: false`) or read for these photos.
     XmpDone {
         read: bool,
@@ -232,6 +243,9 @@ pub struct Progress {
     /// (done, total) while an import runs.
     import: Mutex<Option<(usize, usize)>>,
     import_cancel: AtomicBool,
+    /// (done, total) while an export runs.
+    export: Mutex<Option<(usize, usize)>>,
+    export_cancel: AtomicBool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -239,6 +253,7 @@ pub struct ProgressSnapshot {
     pub syncing: Option<String>,
     pub previews: Option<(usize, usize)>,
     pub import: Option<(usize, usize)>,
+    pub export: Option<(usize, usize)>,
 }
 
 struct Shared {
@@ -315,6 +330,11 @@ impl JobSystem {
         self.shared.progress.import_cancel.store(true, Ordering::Relaxed);
     }
 
+    /// Stop the running export after the photos being written.
+    pub fn cancel_export(&self) {
+        self.shared.progress.export_cancel.store(true, Ordering::Relaxed);
+    }
+
     pub fn submit_import_thumb(&self, job: Job) {
         self.submit(job, Lane::Visible);
     }
@@ -327,6 +347,7 @@ impl JobSystem {
             syncing: p.syncing.lock().unwrap().clone(),
             previews: (total > 0 && done < total).then_some((done, total)),
             import: *p.import.lock().unwrap(),
+            export: *p.export.lock().unwrap(),
         }
     }
 }
@@ -573,6 +594,43 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
             }
             let _ = shared.events.send(Event::ImportDone { result: result.map_err(|e| format!("{e:#}")) });
         }
+        Job::Export { photo_ids, prefs } => {
+            let p = &shared.progress;
+            p.export_cancel.store(false, Ordering::Relaxed);
+            *p.export.lock().unwrap() = Some((0, photo_ids.len()));
+            let started = std::time::Instant::now();
+            let reader = |path: &std::path::Path, kind: FileKind| {
+                imaging::read_metadata(path, source_kind(kind)).ok().map(to_catalog_metadata)
+            };
+            let progress = |done: usize, total: usize| {
+                *p.export.lock().unwrap() = Some((done, total));
+                shared.ctx.request_repaint();
+            };
+            let result =
+                crate::export::run(cat, &photo_ids, &prefs, Some(&reader), &progress, &p.export_cancel);
+            *p.export.lock().unwrap() = None;
+            let mut reveal = None;
+            if let Ok(report) = &result {
+                log::info!(
+                    "exported {} photos ({} skipped, {} failed) in {:.1?}",
+                    report.exported.len(),
+                    report.skipped,
+                    report.failed.len(),
+                    started.elapsed()
+                );
+                for id in &report.added {
+                    if let Ok(Some(row)) = cat.photo(*id) {
+                        submit(shared, Job::BuildPreviews { photo: PhotoRef::from(&row) }, Lane::Background);
+                    }
+                }
+                if prefs.reveal {
+                    reveal = report.exported.first().cloned();
+                }
+            }
+            let _ = shared
+                .events
+                .send(Event::ExportDone { result: result.map_err(|e| format!("{e:#}")), reveal });
+        }
         Job::PurgeOrphanPreviews => {
             let started = std::time::Instant::now();
             // Previews written after this moment are kept whatever the snapshot says.
@@ -720,6 +778,45 @@ mod tests {
         assert_eq!(photos.len(), 1);
         assert!(photos[0].path.starts_with(dunce::canonicalize(&dest).unwrap()), "{:?}", photos[0].path);
         assert!(card.join("IMG_1.png").exists(), "Copy keeps the original");
+    }
+
+    /// File ▸ Export end to end: export into the original's folder, add to the catalog
+    /// and stack, through the job system.
+    #[test]
+    fn export_runs_through_the_job_system() {
+        let tmp = tempfile::tempdir().unwrap();
+        let photos = tmp.path().join("p");
+        std::fs::create_dir(&photos).unwrap();
+        image::RgbImage::from_pixel(64, 48, image::Rgb([20, 100, 50])).save(photos.join("a.png")).unwrap();
+        let dir = tmp.path().join("c.plcat");
+        let id = {
+            let mut cat = Catalog::create(&dir).unwrap();
+            cat.sync_folder(&photos).unwrap();
+            cat.photos(catalog::Source::AllPhotographs).unwrap()[0].id
+        };
+        let (jobs, events) =
+            JobSystem::start(egui::Context::default(), dir.clone(), PreviewCache::new(dir.join("previews")));
+        let prefs = crate::export::ExportPrefs {
+            export_to: crate::export::ExportTo::SameFolder,
+            add_to_catalog: true,
+            add_to_stack: true,
+            reveal: false,
+            ..Default::default()
+        };
+        jobs.submit_normal(Job::Export { photo_ids: vec![id], prefs: Box::new(prefs) });
+        let done = loop {
+            match events.recv_timeout(std::time::Duration::from_secs(30)).expect("job event") {
+                Event::ExportDone { result, reveal } => break (result, reveal),
+                _ => continue,
+            }
+        };
+        let (Ok(report), None) = done else { panic!("export failed: {done:?}") };
+        assert_eq!((report.exported.len(), report.added.len()), (1, 1));
+        assert!(jobs.progress().export.is_none(), "progress is cleared when done");
+        let cat = Catalog::open(&dir).unwrap();
+        let all = cat.photos(catalog::Source::AllPhotographs).unwrap();
+        assert_eq!(all.iter().map(|p| p.file_name.as_str()).collect::<Vec<_>>(), ["a.png", "a.jpg"]);
+        assert_eq!(all[0].stack.map(|s| s.size), Some(2));
     }
 
     #[test]

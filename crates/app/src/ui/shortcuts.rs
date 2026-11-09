@@ -59,6 +59,8 @@ pub enum Action {
     Stack,
     Unstack,
     Import,
+    Export,
+    ExportWithPrevious,
     EditIn,
     Keywording,
     ShowShortcuts,
@@ -102,6 +104,9 @@ const fn shift(key: Key) -> Binding {
 }
 const fn ctrl_shift(key: Key) -> Binding {
     Binding { key, ctrl: true, shift: true, alt: false }
+}
+const fn ctrl_alt_shift(key: Key) -> Binding {
+    Binding { key, ctrl: true, shift: true, alt: true }
 }
 
 pub struct Shortcut {
@@ -239,6 +244,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl(K::D), A::SelectNone, SELECT, "Select none"),
     // Organizing
     s(ctrl_shift(K::I), A::Import, ORG, "Import photos (Copy, Move or Add)"),
+    s(ctrl_shift(K::E), A::Export, ORG, "Export the selected photos"),
+    s(ctrl_alt_shift(K::E), A::ExportWithPrevious, ORG, "Export with previous settings"),
     s(ctrl(K::OpenBracket), A::RotateLeft, ORG, "Rotate left (counterclockwise)"),
     s(ctrl(K::CloseBracket), A::RotateRight, ORG, "Rotate right (clockwise)"),
     s(k(K::B), A::QuickCollection, ORG, "Add to / remove from Quick Collection"),

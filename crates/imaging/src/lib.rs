@@ -7,6 +7,7 @@
 
 mod color;
 mod decode;
+pub mod export;
 mod metadata;
 mod preview;
 

@@ -2,6 +2,7 @@
 
 mod catalog;
 mod collections;
+pub mod export;
 mod folders;
 pub mod import;
 mod keywords;
@@ -16,6 +17,7 @@ pub use catalog::{
     CATALOG_EXTENSION, Catalog, Flag, Folder, PhotoMetadata, PhotoRow, SortKey, SortOrder, Source, StackInfo,
 };
 pub use collections::{Collection, CollectionKind};
+pub use export::{ExistingFiles, MetadataLevel, export_path, write_sidecar, xmp_packet};
 pub use folders::{Relocated, validate_folder_name};
 pub use import::{
     Candidate, DateFolders, ImportMode, ImportReport, ImportSettings, RENAME_PRESETS, RENAME_TOKENS,
@@ -25,6 +27,7 @@ pub use query::{Criterion, Facet, MetaColumn, NumOp, SmartRules, TextField, Text
 pub use scan::{FileKind, Photo, file_kind, is_photo, scan};
 pub use schema::LATEST_VERSION as SCHEMA_VERSION;
 pub use sync::{MetadataReader, SyncOptions, SyncReport};
+pub use xmp::{XmpData, sidecar_path};
 pub use xmp_sync::{Iptc, IptcField, OrientationReader};
 
 #[cfg(test)]
