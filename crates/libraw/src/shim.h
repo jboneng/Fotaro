@@ -23,6 +23,11 @@ typedef struct pl_info {
     int32_t thumb_format;
     int32_t thumb_width;
     int32_t thumb_height;
+    int32_t has_gps;   // 1 if latitude/longitude are set
+    int32_t has_alt;   // 1 if altitude is set
+    double gps_lat;    // decimal degrees, south negative
+    double gps_lon;    // decimal degrees, west negative
+    double gps_alt;    // metres, below sea level negative
 } pl_info;
 
 typedef struct pl_image {
@@ -43,6 +48,9 @@ int pl_open_buffer(void *raw, const void *buffer, size_t size);
 void pl_get_info(void *raw, pl_info *out);
 int pl_thumbnail(void *raw, pl_image *out);
 int pl_render(void *raw, int half_size, pl_image *out);
+// 16 bits per channel, linear, ProPhoto primaries (LibRaw's "ProPhoto D65"), for
+// exports that keep the raw data's full precision and gamut.
+int pl_render16_linear_prophoto(void *raw, int half_size, pl_image *out);
 void pl_image_free(pl_image *img);
 const char *pl_strerror(int code);
 const char *pl_version(void);

@@ -465,6 +465,9 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 "Camera",
                 [m.make.clone(), m.model.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "),
             ));
+            if let Some(gps) = format_gps(&m) {
+                rows.push(text("GPS", gps));
+            }
         }
         MetadataPreset::Exif => {
             rows.push(text("File Size", platform::human_bytes(photo.size_bytes)));
@@ -490,6 +493,12 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             rows.push(text("Make", m.make.clone().unwrap_or_default()));
             rows.push(text("Model", m.model.clone().unwrap_or_default()));
             rows.push(text("Lens", m.lens.clone().unwrap_or_default()));
+            if let Some(gps) = format_gps(&m) {
+                rows.push(text("GPS", gps));
+            }
+            if let Some(alt) = m.gps_alt.filter(|_| m.gps_lat.is_some()) {
+                rows.push(text("Altitude", format!("{alt:.0} m")));
+            }
         }
         MetadataPreset::Iptc => rows.extend(IptcField::ALL.map(Row::Edit)),
     }
@@ -536,9 +545,32 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
+/// "59°54'50" N 10°45'8" E", as LrC writes positions.
+fn format_gps(m: &catalog::PhotoMetadata) -> Option<String> {
+    let (lat, lon) = (m.gps_lat?, m.gps_lon?);
+    let dms = |v: f64, pos: char, neg: char| {
+        let a = v.abs();
+        let total = (a * 3600.0).round() as u64;
+        let (d, m, s) = (total / 3600, total % 3600 / 60, total % 60);
+        format!("{d}°{m}'{s}\" {}", if v < 0.0 { neg } else { pos })
+    };
+    Some(format!("{} {}", dms(lat, 'N', 'S'), dms(lon, 'E', 'W')))
+}
+
 /// "6032 x 4032" as displayed: swapped when the photo is rotated a quarter turn.
 pub(super) fn dimensions(m: &catalog::PhotoMetadata, rotation: u8) -> Option<String> {
     let (w, h) = (m.width?, m.height?);
     let (w, h) = if rotation % 2 == 1 { (h, w) } else { (w, h) };
     Some(format!("{w} x {h}"))
+}
+
+#[cfg(test)]
+mod gps_tests {
+    #[test]
+    fn positions_read_like_lightroom() {
+        let m =
+            catalog::PhotoMetadata { gps_lat: Some(59.9139), gps_lon: Some(-10.7522), ..Default::default() };
+        assert_eq!(super::format_gps(&m).as_deref(), Some("59°54'50\" N 10°45'8\" W"));
+        assert_eq!(super::format_gps(&catalog::PhotoMetadata::default()), None);
+    }
 }

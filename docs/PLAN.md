@@ -271,6 +271,26 @@ building; revisit with 1:1 previews in Phase 2.
       Exports added to the catalog are never paired as RAW+JPEG with their original.
 - [x] Real files (release build): a 24 MP NEF renders in 0.1 s; JPEG 0.2 s, TIFF-ZIP 0.6 s,
       PNG 0.2 s.
-- [ ] Later: export presets (user-named), 16-bit TIFF, colour spaces other than sRGB, output
-      sharpening, watermarks, "Limit File Size To", GPS / Remove Location Info (needs GPS
-      import first), Export as Catalog.
+- [x] Presets: a preset column in the dialog with built-in presets (Full-Sized JPEGs, For Web,
+      For Email, 16-bit TIFF for Editing, Print) that set file, size, sharpening and metadata but
+      keep location and naming, and user presets (Add, Remove, right-click Update with Current
+      Settings / Delete) holding every setting. File ▸ Export with Preset and the context menu
+      export without the dialog. Presets are app-wide, like LrC's.
+- [x] 16 bits per channel for TIFF and PNG. 16-bit scans and TIFFs keep their precision; RAWs
+      export their full-size camera preview (what the Library shows), and only RAWs without one
+      are rendered by LibRaw at 16 bits (linear ProPhoto, converted to the output space).
+- [x] Colour spaces: sRGB, Display P3, Adobe RGB (1998), ProPhoto RGB, with the matching ICC
+      profile embedded (and EXIF ColorSpace). Sources are converted from their own profile,
+      in parallel (lcms2).
+- [x] Output Sharpening: Screen / Matte Paper / Glossy Paper, Low / Standard / High: an unsharp
+      mask on luminance after resizing; paper radii grow with the ppi.
+- [x] Watermarking: Simple Copyright Watermark (each photo's copyright), Text or Graphic
+      (PNG/JPEG with transparency); opacity, size, inset, 9 anchors, white/black, shadow.
+- [x] JPEG Limit File Size To: the best quality that fits, by bisection.
+- [x] GPS: read at import (LibRaw for RAWs, EXIF otherwise), stored in the catalog (schema v5),
+      shown in the Metadata panel; older catalogs are read in the background. Exports carry it
+      in EXIF unless Remove Location Info is ticked or the level leaves it out.
+- [x] Real files: a 16-bit scan TIFF (4932×3309) exports as 16-bit ProPhoto TIFF in ~3 s; a
+      silverfast DNG renders at 16 bits in ~1 s.
+- [ ] Later: Export as Catalog, PSD/DNG/JPEG XL formats, Remove Person Info (no people yet),
+      a watermark editor with a live preview.

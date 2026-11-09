@@ -1,5 +1,5 @@
 //! Export one file with each format, timing render and encode:
-//! `cargo run --release -p imaging --example export -- <photo> <out-dir> [long-edge]`
+//! `cargo run --release -p imaging --example export -- <photo> <out-dir> [long-edge|-] [16]`
 use std::path::Path;
 use std::time::Instant;
 
@@ -13,8 +13,17 @@ fn main() -> anyhow::Result<()> {
     let raw = matches!(ext.as_str(), "nef" | "dng" | "cr2" | "cr3" | "arw" | "raf");
     let kind = if raw { imaging::SourceKind::Raw } else { imaging::SourceKind::Image };
     let mut opts = ImageOptions { resize: edge.is_some(), edge: edge.unwrap_or(0), ..Default::default() };
+    // A 4th argument "16": 16-bit ProPhoto TIFF / PNG (RAWs rendered from the raw data).
+    // "16srgb": the same in sRGB.
+    if let Some(a) = args.get(4).filter(|a| a.starts_with("16")) {
+        opts.sixteen_bit = true;
+        if a == "16" {
+            opts.color_space = imaging::export::ColorSpace::ProPhotoRgb;
+        }
+        opts.format = FileFormat::Tiff;
+    }
     let t = Instant::now();
-    let (img, meta) = render(src, kind, 0, &opts)?;
+    let (img, meta) = render(src, kind, 0, &opts, None)?;
     println!("render {}x{} in {:.0?}", img.width(), img.height(), t.elapsed());
     let embedded =
         EmbeddedMetadata { camera: Some(meta), copyright: Some("test".into()), ..Default::default() };

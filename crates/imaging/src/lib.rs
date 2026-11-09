@@ -13,5 +13,5 @@ mod preview;
 
 pub use decode::{SourceKind, decode, decode_full, fit_image};
 pub use image::RgbImage;
-pub use metadata::{Metadata, read_metadata};
+pub use metadata::{Gps, Metadata, read_metadata};
 pub use preview::{BuiltPreviews, PreviewCache, PreviewSize, PurgeReport, fingerprint};

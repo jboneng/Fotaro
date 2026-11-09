@@ -16,8 +16,14 @@ use image::{DynamicImage, RgbImage};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::decode::{SourceKind, decode_full};
-use crate::metadata::Metadata;
+use crate::decode::{SourceKind, decode_for_export};
+use crate::metadata::{Gps, Metadata};
+
+mod effects;
+mod space;
+
+pub use effects::{Anchor, SharpenAmount, SharpenFor, Watermark, WatermarkStyle};
+pub use space::ColorSpace;
 
 /// LrC's File Settings ▸ Image Format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -110,7 +116,21 @@ pub struct ImageOptions {
     pub dont_enlarge: bool,
     /// Resolution written to the file (pixels per inch); it doesn't change the pixels.
     pub ppi: u32,
+    pub color_space: ColorSpace,
+    /// TIFF and PNG: 16 bits per channel instead of 8.
+    pub sixteen_bit: bool,
+    /// JPEG: Limit File Size To `limit_kb` K (the quality setting is ignored).
+    pub limit_size: bool,
+    pub limit_kb: u32,
+    /// Output Sharpening.
+    pub sharpen: bool,
+    pub sharpen_for: SharpenFor,
+    pub sharpen_amount: SharpenAmount,
+    pub watermark: Watermark,
 }
+
+/// Bit depths TIFF and PNG can be written with.
+pub const BIT_DEPTH_FORMATS: [FileFormat; 2] = [FileFormat::Tiff, FileFormat::Png];
 
 impl Default for ImageOptions {
     fn default() -> Self {
@@ -127,11 +147,24 @@ impl Default for ImageOptions {
             percent: 50,
             dont_enlarge: true,
             ppi: 240,
+            color_space: ColorSpace::Srgb,
+            sixteen_bit: false,
+            limit_size: false,
+            limit_kb: 500,
+            sharpen: false,
+            sharpen_for: SharpenFor::Screen,
+            sharpen_amount: SharpenAmount::Standard,
+            watermark: Watermark::default(),
         }
     }
 }
 
 impl ImageOptions {
+    /// 16 bits per channel actually used (only TIFF and PNG have it).
+    pub fn sixteen(&self) -> bool {
+        self.sixteen_bit && BIT_DEPTH_FORMATS.contains(&self.format)
+    }
+
     /// The output size for a `w` × `h` image.
     pub fn target_size(&self, w: u32, h: u32) -> (u32, u32) {
         if !self.resize || w == 0 || h == 0 {
@@ -172,36 +205,50 @@ pub struct EmbeddedMetadata {
     pub description: Option<String>,
     /// A complete XMP packet (`<x:xmpmeta>…`).
     pub xmp: Option<String>,
+    /// Where the photo was taken (left out for "Remove Location Info").
+    pub gps: Option<Gps>,
 }
 
-/// Decode `path` at full size, apply `turns` clockwise quarter turns (the catalog
-/// rotation) and resize per `opts`. Returns the pixels and the file's metadata.
-pub fn render(path: &Path, kind: SourceKind, turns: u8, opts: &ImageOptions) -> Result<(RgbImage, Metadata)> {
-    let (img, meta) = decode_full(path, kind)?;
+/// Decode `path` at full size and turn it into the export's pixels: converted to the
+/// output colour space, turned upright by `turns` clockwise quarter turns (the catalog
+/// rotation), resized, sharpened and watermarked per `opts`. `copyright` is the photo's
+/// copyright, for the simple copyright watermark. Returns 8-bit RGB, or 16-bit when
+/// [`ImageOptions::sixteen`], and the file's metadata.
+pub fn render(
+    path: &Path,
+    kind: SourceKind,
+    turns: u8,
+    opts: &ImageOptions,
+    copyright: Option<&str>,
+) -> Result<(DynamicImage, Metadata)> {
+    let sixteen = opts.sixteen();
+    let (img, source, meta) = decode_for_export(path, kind, sixteen)?;
+    let img = space::to_target(img, source, opts.color_space, sixteen);
     let img = match turns % 4 {
-        1 => image::imageops::rotate90(&img),
-        2 => image::imageops::rotate180(&img),
-        3 => image::imageops::rotate270(&img),
+        1 => img.rotate90(),
+        2 => img.rotate180(),
+        3 => img.rotate270(),
         _ => img,
     };
     let (w, h) = opts.target_size(img.width(), img.height());
-    Ok((resize(img, w, h)?, meta))
+    let mut img = resize(img, w, h)?;
+    if opts.sharpen {
+        let (sigma, amount) = effects::sharpen_params(opts.sharpen_for, opts.sharpen_amount, opts.ppi);
+        effects::sharpen(&mut img, sigma, amount);
+    }
+    opts.watermark.apply(&mut img, copyright, opts.color_space)?;
+    Ok((img, meta))
 }
 
-fn resize(img: RgbImage, w: u32, h: u32) -> Result<RgbImage> {
-    if (w, h) == img.dimensions() {
+fn resize(img: DynamicImage, w: u32, h: u32) -> Result<DynamicImage> {
+    if (w, h) == (img.width(), img.height()) {
         return Ok(img);
     }
-    let src = DynamicImage::ImageRgb8(img);
-    let mut dst = DynamicImage::new_rgb8(w, h);
+    let mut dst = DynamicImage::new(w, h, img.color());
     // Lanczos3 is a touch crisper than the previews' CatmullRom; exports are final output.
     let opts = fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3));
-    fir::Resizer::new().resize(&src, &mut dst, &opts).context("resizing")?;
-    Ok(dst.into_rgb8())
-}
-
-fn srgb_icc() -> Vec<u8> {
-    lcms2::Profile::new_srgb().icc().unwrap_or_default()
+    fir::Resizer::new().resize(&img, &mut dst, &opts).context("resizing")?;
+    Ok(dst)
 }
 
 fn ascii(tag: Tag, s: &str) -> Field {
@@ -233,8 +280,10 @@ fn exif_time(naive_local: i64) -> Option<String> {
 }
 
 /// The EXIF/TIFF fields to write (everything goes in the primary image's IFDs).
-fn exif_fields(meta: &EmbeddedMetadata, ppi: u32) -> Vec<Field> {
+fn exif_fields(meta: &EmbeddedMetadata, opts: &ImageOptions) -> Vec<Field> {
+    let ppi = opts.ppi;
     let mut f = vec![
+        short(Tag::ColorSpace, opts.color_space.exif_code()),
         short(Tag::Orientation, 1),
         rational(Tag::XResolution, f64::from(ppi.max(1)), 1),
         rational(Tag::YResolution, f64::from(ppi.max(1)), 1),
@@ -282,6 +331,38 @@ fn exif_fields(meta: &EmbeddedMetadata, ppi: u32) -> Vec<Field> {
             f.push(ascii(Tag::DateTime, &t));
         }
     }
+    if let Some(g) = &meta.gps {
+        f.extend(gps_fields(g));
+    }
+    f
+}
+
+/// Degrees as EXIF's degrees / minutes / seconds rationals.
+fn dms(v: f64) -> Vec<Rational> {
+    let v = v.abs();
+    let deg = v.trunc();
+    let min = ((v - deg) * 60.0).trunc();
+    let sec = ((v - deg) * 60.0 - min) * 60.0;
+    vec![
+        Rational { num: deg as u32, denom: 1 },
+        Rational { num: min as u32, denom: 1 },
+        Rational { num: (sec * 10_000.0).round() as u32, denom: 10_000 },
+    ]
+}
+
+fn gps_fields(g: &Gps) -> Vec<Field> {
+    let field = |tag, value| Field { tag, ifd_num: In::PRIMARY, value };
+    let mut f = vec![
+        field(Tag::GPSVersionID, Value::Byte(vec![2, 3, 0, 0])),
+        ascii(Tag::GPSLatitudeRef, if g.latitude < 0.0 { "S" } else { "N" }),
+        field(Tag::GPSLatitude, Value::Rational(dms(g.latitude))),
+        ascii(Tag::GPSLongitudeRef, if g.longitude < 0.0 { "W" } else { "E" }),
+        field(Tag::GPSLongitude, Value::Rational(dms(g.longitude))),
+    ];
+    if let Some(alt) = g.altitude.filter(|a| a.is_finite()) {
+        f.push(field(Tag::GPSAltitudeRef, Value::Byte(vec![u8::from(alt < 0.0)])));
+        f.push(rational(Tag::GPSAltitude, alt.abs(), 100));
+    }
     f
 }
 
@@ -303,59 +384,131 @@ fn encode_jpeg(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> 
     let (w, h) = img.dimensions();
     let (w16, h16) = (u16::try_from(w), u16::try_from(h));
     let (Ok(w16), Ok(h16)) = (w16, h16) else { anyhow::bail!("{w}×{h} is too large for JPEG") };
-    let mut out = Vec::new();
-    let mut enc = jpeg_encoder::Encoder::new(&mut out, opts.jpeg_quality.clamp(1, 100));
     let mut exif = b"Exif\0\0".to_vec();
-    exif.extend(exif_block(&exif_fields(meta, opts.ppi))?);
-    if exif.len() <= APP1_MAX {
-        enc.add_app_segment(1, exif).context("adding EXIF")?;
+    exif.extend(exif_block(&exif_fields(meta, opts))?);
+    let icc = opts.color_space.icc();
+    let at_quality = |quality: u8| -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut enc = jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100));
+        if exif.len() <= APP1_MAX {
+            enc.add_app_segment(1, exif.clone()).context("adding EXIF")?;
+        }
+        if let Some(xmp) = &meta.xmp {
+            let mut seg = XMP_NS.to_vec();
+            seg.extend_from_slice(xmp.as_bytes());
+            if seg.len() <= APP1_MAX {
+                enc.add_app_segment(1, seg).context("adding XMP")?;
+            } else {
+                log::warn!("XMP packet too large for JPEG ({} bytes); left out", seg.len());
+            }
+        }
+        enc.add_icc_profile(&icc).context("adding ICC profile")?;
+        enc.encode(img.as_raw(), w16, h16, jpeg_encoder::ColorType::Rgb).context("encoding JPEG")?;
+        Ok(out)
+    };
+    if !opts.limit_size {
+        return at_quality(opts.jpeg_quality);
     }
-    if let Some(xmp) = &meta.xmp {
-        let mut seg = XMP_NS.to_vec();
-        seg.extend_from_slice(xmp.as_bytes());
-        if seg.len() <= APP1_MAX {
-            enc.add_app_segment(1, seg).context("adding XMP")?;
+    // Limit File Size: the highest quality that fits, by bisection (about 7 encodes).
+    let limit = opts.limit_kb.max(1) as usize * 1024;
+    let (mut lo, mut hi, mut best) = (1u8, 100u8, None);
+    while lo <= hi {
+        let q = lo + (hi - lo) / 2;
+        let bytes = at_quality(q)?;
+        if bytes.len() <= limit {
+            best = Some(bytes);
+            lo = q + 1;
+        } else if q == 1 {
+            break;
         } else {
-            log::warn!("XMP packet too large for JPEG ({} bytes); left out", seg.len());
+            hi = q - 1;
         }
     }
-    enc.add_icc_profile(&srgb_icc()).context("adding ICC profile")?;
-    enc.encode(img.as_raw(), w16, h16, jpeg_encoder::ColorType::Rgb).context("encoding JPEG")?;
-    Ok(out)
+    best.with_context(|| {
+        format!(
+            "can't fit {w}×{h} pixels in {} K; choose a smaller image size or a larger limit",
+            opts.limit_kb
+        )
+    })
 }
 
-/// A baseline 8-bit RGB TIFF, written with the EXIF writer so camera tags land in a
-/// proper Exif IFD. ZIP uses Deflate with horizontal differencing (Predictor 2).
-fn encode_tiff(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> Result<Vec<u8>> {
-    let (w, h) = img.dimensions();
+#[derive(Clone, Copy)]
+enum TiffSamples<'a> {
+    Eight(&'a [u8]),
+    Sixteen(&'a [u16]),
+}
+
+/// Pixel rows as bytes in the file's byte order, with TIFF horizontal differencing
+/// (Predictor 2) when `predict` (differences are taken per sample, 8 or 16 bit).
+fn tiff_strip(samples: TiffSamples<'_>, row: usize, predict: bool) -> Vec<u8> {
+    fn differences<T: Copy + std::ops::Sub<Output = T>>(
+        v: &mut [T],
+        row: usize,
+        wrapping_sub: fn(T, T) -> T,
+    ) {
+        for line in v.chunks_mut(row) {
+            for i in (3..line.len()).rev() {
+                line[i] = wrapping_sub(line[i], line[i - 3]);
+            }
+        }
+    }
+    match samples {
+        TiffSamples::Eight(s) => {
+            let mut out = s.to_vec();
+            if predict {
+                differences(&mut out, row, u8::wrapping_sub);
+            }
+            out
+        }
+        TiffSamples::Sixteen(s) => {
+            let mut v = s.to_vec();
+            if predict {
+                differences(&mut v, row, u16::wrapping_sub);
+            }
+            // Little-endian, matching the "II" header the writer emits.
+            v.iter().flat_map(|s| s.to_le_bytes()).collect()
+        }
+    }
+}
+
+/// A baseline RGB TIFF (8 or 16 bit), written with the EXIF writer so camera tags land
+/// in a proper Exif IFD. ZIP uses Deflate with horizontal differencing (Predictor 2).
+fn encode_tiff(img: &DynamicImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> Result<Vec<u8>> {
+    let (w, h) = (img.width(), img.height());
     let row = w as usize * 3;
+    let bits: u16 = if matches!(img, DynamicImage::ImageRgb16(_)) { 16 } else { 8 };
+    let row_bytes = row * usize::from(bits / 8);
     // ~256 KB strips.
-    let rows_per_strip = ((256 * 1024) / row.max(1)).clamp(1, h as usize);
-    let strips: Vec<Vec<u8>> = img
-        .as_raw()
-        .par_chunks(row * rows_per_strip)
-        .map(|strip| {
-            if !opts.tiff_zip {
-                return Ok(strip.to_vec());
-            }
-            let mut diff = strip.to_vec();
-            for line in diff.chunks_mut(row) {
-                for i in (3..line.len()).rev() {
-                    line[i] = line[i].wrapping_sub(line[i - 3]);
-                }
-            }
-            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
-            z.write_all(&diff)?;
-            z.finish()
-        })
-        .collect::<std::io::Result<_>>()?;
+    let rows_per_strip = ((256 * 1024) / row_bytes.max(1)).clamp(1, h.max(1) as usize);
+    let compress = |samples: TiffSamples<'_>| -> std::io::Result<Vec<u8>> {
+        let bytes = tiff_strip(samples, row, opts.tiff_zip);
+        if !opts.tiff_zip {
+            return Ok(bytes);
+        }
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+        z.write_all(&bytes)?;
+        z.finish()
+    };
+    let strips: Vec<Vec<u8>> = match img {
+        DynamicImage::ImageRgb16(b) => b
+            .as_raw()
+            .par_chunks(row * rows_per_strip)
+            .map(|s| compress(TiffSamples::Sixteen(s)))
+            .collect::<std::io::Result<_>>()?,
+        DynamicImage::ImageRgb8(b) => b
+            .as_raw()
+            .par_chunks(row * rows_per_strip)
+            .map(|s| compress(TiffSamples::Eight(s)))
+            .collect::<std::io::Result<_>>()?,
+        _ => anyhow::bail!("unexpected pixel format for TIFF"),
+    };
     let strip_refs: Vec<&[u8]> = strips.iter().map(Vec::as_slice).collect();
 
     let tiff = |n: u16, value: Value| Field { tag: Tag(exif::Context::Tiff, n), ifd_num: In::PRIMARY, value };
     let mut fields = vec![
         Field { tag: Tag::ImageWidth, ifd_num: In::PRIMARY, value: Value::Long(vec![w]) },
         Field { tag: Tag::ImageLength, ifd_num: In::PRIMARY, value: Value::Long(vec![h]) },
-        Field { tag: Tag::BitsPerSample, ifd_num: In::PRIMARY, value: Value::Short(vec![8, 8, 8]) },
+        Field { tag: Tag::BitsPerSample, ifd_num: In::PRIMARY, value: Value::Short(vec![bits; 3]) },
         short(Tag::Compression, if opts.tiff_zip { 8 } else { 1 }),
         short(Tag::PhotometricInterpretation, 2),
         short(Tag::SamplesPerPixel, 3),
@@ -365,7 +518,7 @@ fn encode_tiff(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> 
             value: Value::Long(vec![rows_per_strip as u32]),
         },
         short(Tag::PlanarConfiguration, 1),
-        tiff(34675, Value::Undefined(srgb_icc(), 0)), // ICC profile
+        tiff(34675, Value::Undefined(opts.color_space.icc(), 0)), // ICC profile
     ];
     if opts.tiff_zip {
         fields.push(tiff(317, Value::Short(vec![2]))); // Predictor: horizontal differencing
@@ -373,7 +526,7 @@ fn encode_tiff(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> 
     if let Some(xmp) = &meta.xmp {
         fields.push(tiff(700, Value::Byte(xmp.as_bytes().to_vec())));
     }
-    fields.extend(exif_fields(meta, opts.ppi));
+    fields.extend(exif_fields(meta, opts));
 
     let mut writer = ExifWriter::new();
     for f in &fields {
@@ -385,13 +538,24 @@ fn encode_tiff(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> 
     Ok(buf.into_inner())
 }
 
-fn encode_png(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> Result<Vec<u8>> {
-    let (w, h) = img.dimensions();
+fn encode_png(img: &DynamicImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> Result<Vec<u8>> {
+    let (w, h) = (img.width(), img.height());
     let mut info = png::Info::with_size(w, h);
     info.color_type = png::ColorType::Rgb;
-    info.bit_depth = png::BitDepth::Eight;
-    info.icc_profile = Some(srgb_icc().into());
-    info.exif_metadata = Some(exif_block(&exif_fields(meta, opts.ppi))?.into());
+    let data: std::borrow::Cow<'_, [u8]> = match img {
+        DynamicImage::ImageRgb8(b) => {
+            info.bit_depth = png::BitDepth::Eight;
+            b.as_raw().into()
+        }
+        DynamicImage::ImageRgb16(b) => {
+            info.bit_depth = png::BitDepth::Sixteen;
+            // PNG samples are big-endian.
+            b.as_raw().iter().flat_map(|s| s.to_be_bytes()).collect::<Vec<u8>>().into()
+        }
+        _ => anyhow::bail!("unexpected pixel format for PNG"),
+    };
+    info.icc_profile = Some(opts.color_space.icc().into());
+    info.exif_metadata = Some(exif_block(&exif_fields(meta, opts))?.into());
     let ppm = (f64::from(opts.ppi.max(1)) / 0.0254).round() as u32;
     info.pixel_dims = Some(png::PixelDimensions { xppu: ppm, yppu: ppm, unit: png::Unit::Meter });
     let mut out = Vec::new();
@@ -403,16 +567,19 @@ fn encode_png(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> R
             enc.add_itxt_chunk("XML:com.adobe.xmp".to_owned(), xmp.clone()).context("adding XMP")?;
         }
         let mut writer = enc.write_header().context("PNG header")?;
-        writer.write_image_data(img.as_raw()).context("encoding PNG")?;
+        writer.write_image_data(&data).context("encoding PNG")?;
         writer.finish().context("encoding PNG")?;
     }
     Ok(out)
 }
 
-/// Encode `img` per `opts` (not `Original`).
-pub fn encode(img: &RgbImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> Result<Vec<u8>> {
+/// Encode `img` (from [`render`]) per `opts` (not `Original`).
+pub fn encode(img: &DynamicImage, opts: &ImageOptions, meta: &EmbeddedMetadata) -> Result<Vec<u8>> {
     match opts.format {
-        FileFormat::Jpeg => encode_jpeg(img, opts, meta),
+        FileFormat::Jpeg => match img {
+            DynamicImage::ImageRgb8(rgb) => encode_jpeg(rgb, opts, meta),
+            other => encode_jpeg(&other.to_rgb8(), opts, meta),
+        },
         FileFormat::Tiff => encode_tiff(img, opts, meta),
         FileFormat::Png => encode_png(img, opts, meta),
         FileFormat::Original => anyhow::bail!("Original is copied, not encoded"),

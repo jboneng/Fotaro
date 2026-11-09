@@ -36,6 +36,11 @@ mod ffi {
         pub thumb_format: i32,
         pub thumb_width: i32,
         pub thumb_height: i32,
+        pub has_gps: i32,
+        pub has_alt: i32,
+        pub gps_lat: f64,
+        pub gps_lon: f64,
+        pub gps_alt: f64,
     }
 
     #[repr(C)]
@@ -57,6 +62,7 @@ mod ffi {
         pub fn pl_get_info(raw: *mut c_void, out: *mut Info);
         pub fn pl_thumbnail(raw: *mut c_void, out: *mut Image) -> c_int;
         pub fn pl_render(raw: *mut c_void, half_size: c_int, out: *mut Image) -> c_int;
+        pub fn pl_render16_linear_prophoto(raw: *mut c_void, half_size: c_int, out: *mut Image) -> c_int;
         pub fn pl_image_free(img: *mut Image);
         pub fn pl_strerror(code: c_int) -> *const c_char;
         pub fn pl_version() -> *const c_char;
@@ -153,6 +159,18 @@ pub struct RawInfo {
     pub orientation: Orientation,
     pub thumb_width: u32,
     pub thumb_height: u32,
+    pub gps: Option<Gps>,
+}
+
+/// Where the photo was taken (EXIF GPS).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gps {
+    /// Decimal degrees, south negative.
+    pub latitude: f64,
+    /// Decimal degrees, west negative.
+    pub longitude: f64,
+    /// Metres above sea level.
+    pub altitude: Option<f64>,
 }
 
 /// An embedded preview as stored by the camera.
@@ -219,6 +237,11 @@ impl RawFile {
             orientation: Orientation::from_flip(i.flip),
             thumb_width: i.thumb_width.max(0) as u32,
             thumb_height: i.thumb_height.max(0) as u32,
+            gps: (i.has_gps != 0).then_some(Gps {
+                latitude: i.gps_lat,
+                longitude: i.gps_lon,
+                altitude: (i.has_alt != 0).then_some(i.gps_alt),
+            }),
         }
     }
 
@@ -236,6 +259,14 @@ impl RawFile {
     /// `half_size` skips demosaicing and halves each dimension (much faster).
     pub fn render(&mut self, half_size: bool) -> Result<Bitmap> {
         let img = self.call_image(|raw, out| unsafe { ffi::pl_render(raw, half_size.into(), out) })?;
+        Ok(img.bitmap())
+    }
+
+    /// Fully decode to 16 bits per channel, linear, ProPhoto primaries (white D65, as
+    /// LibRaw outputs it), as-shot white balance. For high-quality exports.
+    pub fn render16_linear_prophoto(&mut self, half_size: bool) -> Result<Bitmap> {
+        let img = self
+            .call_image(|raw, out| unsafe { ffi::pl_render16_linear_prophoto(raw, half_size.into(), out) })?;
         Ok(img.bitmap())
     }
 

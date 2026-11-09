@@ -102,7 +102,14 @@ pub struct PhotoMetadata {
     pub height: Option<u32>,
     /// The file's own orientation in clockwise quarter turns (EXIF / RAW flip), if known.
     pub orientation: Option<u8>,
+    /// GPS position: decimal degrees (south and west negative), metres above sea level.
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
+    pub gps_alt: Option<f64>,
 }
+
+/// Latitude, longitude (decimal degrees, south and west negative) and altitude (metres).
+pub type GpsPosition = (f64, f64, Option<f64>);
 
 /// Where the grid's photos come from (the LrC "source").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -594,7 +601,8 @@ impl Catalog {
             .conn
             .query_row(
                 "SELECT e.camera_make, e.camera_model, e.lens, e.iso, e.shutter, e.aperture,
-                        e.focal_len, p.capture_time, e.width, e.height, e.orientation
+                        e.focal_len, p.capture_time, e.width, e.height, e.orientation,
+                        e.gps_lat, e.gps_lon, e.gps_alt
                    FROM exif e JOIN photos p ON p.id = e.photo_id WHERE e.photo_id = ?1",
                 [photo_id],
                 |r| {
@@ -610,6 +618,9 @@ impl Catalog {
                         width: r.get(8)?,
                         height: r.get(9)?,
                         orientation: r.get(10)?,
+                        gps_lat: r.get(11)?,
+                        gps_lon: r.get(12)?,
+                        gps_alt: r.get(13)?,
                     })
                 },
             )
@@ -619,6 +630,46 @@ impl Catalog {
     /// Store metadata read from the file; also sets the photo's capture time.
     pub fn set_metadata(&self, photo_id: i64, m: &PhotoMetadata) -> Result<()> {
         write_metadata(&self.conn, photo_id, m)
+    }
+
+    /// Photos whose GPS position was never read from their file (catalogs made before
+    /// GPS support): (photo id, path, kind), at most `limit`. Missing files and
+    /// virtual copies (they follow their master) are left out.
+    pub fn gps_unread(&self, limit: usize) -> Result<Vec<(i64, PathBuf, FileKind)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, fo.path, f.name, f.kind FROM exif e
+               JOIN photos p   ON p.id = e.photo_id
+               JOIN files f    ON f.id = p.master_file_id
+               JOIN folders fo ON fo.id = f.folder_id
+              WHERE e.gps_read = 0 AND p.virtual_of IS NULL AND f.missing = 0
+              LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            let (dir, name, kind): (String, String, String) = (r.get(1)?, r.get(2)?, r.get(3)?);
+            Ok((r.get(0)?, Path::new(&dir).join(name), FileKind::parse(&kind).unwrap_or(FileKind::Image)))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Store a GPS position read from the file (`None`: it has none) for a photo and its
+    /// virtual copies, in one transaction for many photos.
+    pub fn set_gps(&mut self, positions: &[(i64, Option<GpsPosition>)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE exif SET gps_lat = ?2, gps_lon = ?3, gps_alt = ?4, gps_read = 1
+                  WHERE photo_id IN (SELECT id FROM photos WHERE id = ?1 OR virtual_of = ?1)",
+            )?;
+            for (id, pos) in positions {
+                let (lat, lon, alt) = match pos {
+                    Some((lat, lon, alt)) => (Some(*lat), Some(*lon), *alt),
+                    None => (None, None, None),
+                };
+                stmt.execute(params![id, lat, lon, alt])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
     pub fn set_rating(&self, photo_id: i64, rating: u8) -> Result<()> {
         anyhow::ensure!(rating <= 5, "rating must be 0-5, got {rating}");
@@ -673,8 +724,8 @@ pub(crate) fn write_metadata(conn: &Connection, photo_id: i64, m: &PhotoMetadata
     conn.execute(
         "INSERT OR REPLACE INTO exif
              (photo_id, camera_make, camera_model, lens, iso, shutter, aperture,
-              focal_len, width, height, orientation)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              focal_len, width, height, orientation, gps_lat, gps_lon, gps_alt, gps_read)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1)",
         params![
             photo_id,
             m.make,
@@ -686,7 +737,10 @@ pub(crate) fn write_metadata(conn: &Connection, photo_id: i64, m: &PhotoMetadata
             m.focal_len,
             m.width,
             m.height,
-            m.orientation
+            m.orientation,
+            m.gps_lat,
+            m.gps_lon,
+            m.gps_alt
         ],
     )?;
     conn.execute("UPDATE photos SET capture_time = ?1 WHERE id = ?2", params![m.capture_time, photo_id])?;
@@ -812,5 +866,47 @@ mod tests {
         drop(cat);
         let err = Catalog::open(tmp.path()).err().unwrap().to_string();
         assert!(err.contains("newer"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod gps_tests {
+    use super::*;
+
+    #[test]
+    fn gps_is_stored_and_old_catalogs_are_backfilled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("p");
+        std::fs::create_dir(&dir).unwrap();
+        for n in ["a.jpg", "b.jpg"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let mut cat = Catalog::create(tmp.path().join("c.plcat")).unwrap();
+        cat.sync_folder(&dir).unwrap();
+        let ids: Vec<i64> = cat.photos(crate::Source::AllPhotographs).unwrap().iter().map(|p| p.id).collect();
+        let (a, b) = (ids[0], ids[1]);
+        let m = PhotoMetadata {
+            gps_lat: Some(59.9),
+            gps_lon: Some(-10.7),
+            gps_alt: Some(12.0),
+            ..Default::default()
+        };
+        cat.set_metadata(a, &m).unwrap();
+        cat.set_metadata(b, &PhotoMetadata::default()).unwrap();
+        let back = cat.metadata(a).unwrap().unwrap();
+        assert_eq!((back.gps_lat, back.gps_lon, back.gps_alt), (Some(59.9), Some(-10.7), Some(12.0)));
+        assert!(cat.gps_unread(10).unwrap().is_empty(), "freshly read metadata includes GPS");
+
+        // A catalog from before GPS support: nothing read yet.
+        let copy = cat.create_virtual_copy(b).unwrap();
+        cat.conn.execute("UPDATE exif SET gps_read = 0, gps_lat = NULL, gps_lon = NULL", []).unwrap();
+        let unread = cat.gps_unread(10).unwrap();
+        assert_eq!(unread.iter().map(|u| u.0).collect::<Vec<_>>(), vec![a, b], "virtual copies follow");
+        assert_eq!(unread[1].1, dir.join("b.jpg"));
+        cat.set_gps(&[(a, None), (b, Some((1.5, 2.5, None)))]).unwrap();
+        assert!(cat.gps_unread(10).unwrap().is_empty());
+        let c = cat.metadata(copy).unwrap().unwrap();
+        assert_eq!((c.gps_lat, c.gps_lon, c.gps_alt), (Some(1.5), Some(2.5), None));
+        assert_eq!(cat.metadata(a).unwrap().unwrap().gps_lat, None);
     }
 }

@@ -40,6 +40,11 @@ impl MetadataLevel {
         self == Self::All
     }
 
+    /// The GPS position (LrC keeps it unless Remove Location Info is ticked).
+    pub fn location(self) -> bool {
+        matches!(self, Self::AllExceptCameraInfo | Self::All)
+    }
+
     /// Keep only what this level exports. Fields left out become `None` (not written).
     /// The pick flag is this app's own and never leaves the catalog.
     pub fn filter(self, d: &XmpData) -> XmpData {

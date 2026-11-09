@@ -31,7 +31,10 @@ pub struct Metadata {
     /// The file's own orientation in clockwise quarter turns (EXIF / RAW flip).
     /// Mirrored EXIF orientations are not represented.
     pub orientation: Option<u8>,
+    pub gps: Option<Gps>,
 }
+
+pub use libraw::Gps;
 
 fn non_empty(s: &str) -> Option<String> {
     let s = s.trim().trim_matches('\0').trim();
@@ -67,6 +70,7 @@ pub(crate) fn from_raw_info(info: &libraw::RawInfo) -> Metadata {
             libraw::Orientation::Rotate180 => 2,
             libraw::Orientation::Rotate90Ccw => 3,
         }),
+        gps: info.gps,
     }
 }
 
@@ -139,5 +143,40 @@ pub(crate) fn read_exif(path: &Path) -> Result<Metadata> {
             Some(8) => 3,
             _ => 0,
         }),
+        gps: read_gps(&exif),
+    })
+}
+
+/// EXIF GPS position (degrees/minutes/seconds rationals plus N/S, E/W references).
+fn read_gps(exif: &exif::Exif) -> Option<Gps> {
+    let field = |tag| exif.get_field(tag, In::PRIMARY);
+    let degrees = |tag| match field(tag).map(|f| &f.value) {
+        Some(Value::Rational(v)) if !v.is_empty() => {
+            let part = |i: usize| v.get(i).map_or(0.0, |r| if r.denom == 0 { 0.0 } else { r.to_f64() });
+            Some(part(0) + part(1) / 60.0 + part(2) / 3600.0)
+        }
+        _ => None,
+    };
+    let reference = |tag| match field(tag).map(|f| &f.value) {
+        Some(Value::Ascii(parts)) => parts.first().and_then(|b| b.first()).map(|c| c.to_ascii_uppercase()),
+        _ => None,
+    };
+    let lat = degrees(Tag::GPSLatitude)?;
+    let lon = degrees(Tag::GPSLongitude)?;
+    let (lat_ref, lon_ref) = (reference(Tag::GPSLatitudeRef)?, reference(Tag::GPSLongitudeRef)?);
+    if !(lat.is_finite() && lon.is_finite()) || lat > 90.0 || lon > 180.0 || (lat == 0.0 && lon == 0.0) {
+        return None;
+    }
+    let altitude = match field(Tag::GPSAltitude).map(|f| &f.value) {
+        Some(Value::Rational(v)) => v.first().filter(|r| r.denom != 0).map(|r| {
+            let below = field(Tag::GPSAltitudeRef).and_then(|f| f.value.get_uint(0)) == Some(1);
+            if below { -r.to_f64() } else { r.to_f64() }
+        }),
+        _ => None,
+    };
+    Some(Gps {
+        latitude: if lat_ref == b'S' { -lat } else { lat },
+        longitude: if lon_ref == b'W' { -lon } else { lon },
+        altitude,
     })
 }

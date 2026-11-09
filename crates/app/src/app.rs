@@ -172,6 +172,8 @@ pub struct UiState {
     pub filter: crate::filter::FilterBar,
     pub import: crate::import::ImportPrefs,
     pub export: crate::export::ExportPrefs,
+    /// The user's export presets (app-wide, like LrC's).
+    pub export_presets: Vec<crate::export::ExportPreset>,
 }
 
 impl Default for UiState {
@@ -197,6 +199,7 @@ impl Default for UiState {
             filter: crate::filter::FilterBar::default(),
             import: crate::import::ImportPrefs::default(),
             export: crate::export::ExportPrefs::default(),
+            export_presets: Vec::new(),
         }
     }
 }
@@ -312,6 +315,8 @@ pub enum Command {
     OpenExport,
     /// File ▸ Export with Previous: no dialog.
     ExportWithPrevious,
+    /// File ▸ Export with Preset: no dialog (the preset becomes "previous").
+    ExportWithPreset(crate::export::PresetId),
     StartExport,
     CloseExport,
     CancelExport,
@@ -491,6 +496,7 @@ impl Session {
         s.refresh_keywords()?;
         s.collections_fresh();
         s.jobs.submit_normal(Job::PurgeOrphanPreviews);
+        s.jobs.submit_background(Job::ReadGps);
         Ok(s)
     }
 
@@ -2061,7 +2067,7 @@ impl PhotoLibraryApp {
                 {
                     self.ui.export.folder = pictures;
                 }
-                s.export = Some(crate::ui::export::ExportDialog { photo_ids, sample });
+                s.export = Some(crate::ui::export::ExportDialog::new(photo_ids, sample));
             }
             Command::ExportWithPrevious => {
                 let view = self.view;
@@ -2084,6 +2090,15 @@ impl PhotoLibraryApp {
                     if n == 1 { "" } else { "s" },
                     self.ui.export.summary()
                 ));
+            }
+            Command::ExportWithPreset(id) => {
+                match crate::export::preset_prefs(&self.ui.export, &self.ui.export_presets, &id) {
+                    Some(prefs) => {
+                        self.ui.export = prefs;
+                        self.execute(ctx, Command::ExportWithPrevious);
+                    }
+                    None => self.notify("That export preset no longer exists"),
+                }
             }
             Command::StartExport => {
                 let Some(s) = &mut self.session else { return };

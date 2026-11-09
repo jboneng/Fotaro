@@ -79,6 +79,7 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 menu_action(ui, app, "Import Photos…", Action::Import);
                 menu_action(ui, app, "Export…", Action::Export);
                 menu_action(ui, app, "Export with Previous", Action::ExportWithPrevious);
+                ui.menu_button("Export with Preset", |ui| super::export::preset_menu(ui, app));
             }
             ui.separator();
             menu_cmd(ui, app, "Exit", true, Command::Quit);

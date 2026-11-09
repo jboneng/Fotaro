@@ -68,6 +68,9 @@ pub enum Job {
     /// Delete previews that no catalog photo will ask for again (crash leftovers, old
     /// versions, photos removed by older app versions). Run once per catalog open.
     PurgeOrphanPreviews,
+    /// Read GPS positions that older versions of the app never read, a batch at a time
+    /// (each batch queues the next on the background lane).
+    ReadGps,
     /// LrC "Save Metadata to File(s)": write XMP sidecars.
     WriteXmp {
         photo_ids: Vec<i64>,
@@ -114,6 +117,7 @@ impl Job {
             | Job::CheckFolders { .. }
             | Job::PurgePreviews { .. }
             | Job::PurgeOrphanPreviews
+            | Job::ReadGps
             | Job::WriteXmp { .. }
             | Job::ReadXmp { .. }
             | Job::ImportScan { .. }
@@ -314,6 +318,10 @@ impl JobSystem {
         self.submit(job, Lane::Normal);
     }
 
+    pub fn submit_background(&self, job: Job) {
+        self.submit(job, Lane::Background);
+    }
+
     /// Build previews in the background (Library ▸ Previews ▸ Build Standard-Sized Previews).
     pub fn build_previews(&self, photos: impl IntoIterator<Item = PhotoRef>) {
         for photo in photos {
@@ -453,6 +461,9 @@ fn to_catalog_metadata(m: imaging::Metadata) -> PhotoMetadata {
         width: m.width,
         height: m.height,
         orientation: m.orientation,
+        gps_lat: m.gps.map(|g| g.latitude),
+        gps_lon: m.gps.map(|g| g.longitude),
+        gps_alt: m.gps.and_then(|g| g.altitude),
     }
 }
 
@@ -631,6 +642,7 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                 .events
                 .send(Event::ExportDone { result: result.map_err(|e| format!("{e:#}")), reveal });
         }
+        Job::ReadGps => read_gps_batch(shared, cat),
         Job::PurgeOrphanPreviews => {
             let started = std::time::Instant::now();
             // Previews written after this moment are kept whatever the snapshot says.
@@ -698,6 +710,48 @@ fn sync_and_queue(shared: &Shared, cat: &mut Catalog, root: &std::path::Path) ->
 }
 
 /// Write (or read) XMP sidecars for `photo_ids` and report back to the UI.
+/// One batch of [`Job::ReadGps`]: read the files' GPS, store it, queue the next batch.
+fn read_gps_batch(shared: &Shared, cat: &mut Catalog) {
+    const BATCH: usize = 200;
+    let todo = match cat.gps_unread(BATCH) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("reading GPS: {e:#}");
+            return;
+        }
+    };
+    if todo.is_empty() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let mut positions = Vec::with_capacity(todo.len());
+    for (id, path, kind) in &todo {
+        if shared.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        // Unreadable files count as "no GPS", so they aren't tried again and again.
+        let gps = imaging::read_metadata(path, source_kind(*kind)).ok().and_then(|m| m.gps);
+        positions.push((*id, gps.map(|g| (g.latitude, g.longitude, g.altitude))));
+    }
+    if let Err(e) = cat.set_gps(&positions) {
+        log::warn!("storing GPS: {e:#}");
+        return;
+    }
+    let found: Vec<i64> = positions.iter().filter(|(_, p)| p.is_some()).map(|(id, _)| *id).collect();
+    log::info!(
+        "read GPS of {} photos ({} with a position) in {:.0?}",
+        todo.len(),
+        found.len(),
+        started.elapsed()
+    );
+    for photo_id in found {
+        let _ = shared.events.send(Event::MetadataUpdated { photo_id });
+    }
+    if todo.len() == BATCH {
+        submit(shared, Job::ReadGps, Lane::Background);
+    }
+}
+
 fn run_xmp(shared: &Shared, cat: &mut Catalog, photo_ids: Vec<i64>, read: bool, quiet: bool) {
     let started = std::time::Instant::now();
     // Older catalogs don't know files' own orientation; read it on demand.

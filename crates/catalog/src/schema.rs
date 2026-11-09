@@ -159,6 +159,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX photos_master_file ON photos(master_file_id);
     CREATE INDEX photos_virtual_of ON photos(virtual_of);
     "#,
+    // v5: GPS altitude, and whether GPS was read from the file (older versions never
+    // read it; photos with `gps_read = 0` are read again in the background).
+    r#"
+    ALTER TABLE exif ADD COLUMN gps_alt  REAL;
+    ALTER TABLE exif ADD COLUMN gps_read INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;

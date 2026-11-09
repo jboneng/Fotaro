@@ -119,3 +119,82 @@ fn cancel_stops_before_the_next_photo() {
     assert!(prefs.problem().is_none());
     assert!(ExportPrefs::default().problem().is_some(), "needs a folder");
 }
+
+#[test]
+fn presets_apply_and_names_stay_unique() {
+    let current = ExportPrefs { folder: PathBuf::from("out"), rename_on: true, ..Default::default() };
+    let email = BUILTIN_PRESETS.iter().position(|(n, _)| *n == "For Email").unwrap();
+    let p = preset_prefs(&current, &[], &PresetId::Builtin(email)).unwrap();
+    assert_eq!((p.folder.clone(), p.rename_on), (PathBuf::from("out"), true), "location and naming kept");
+    assert!(p.image.resize && p.image.sharpen && p.remove_location);
+    assert_eq!(p.metadata, MetadataLevel::CopyrightAndContact);
+    for i in 0..BUILTIN_PRESETS.len() {
+        assert!(preset_prefs(&current, &[], &PresetId::Builtin(i)).unwrap().problem().is_none());
+    }
+
+    let user = vec![ExportPreset { name: "Web".into(), prefs: p.clone() }];
+    assert_eq!(preset_prefs(&current, &user, &PresetId::User("Web".into())), Some(p));
+    assert_eq!(preset_prefs(&current, &user, &PresetId::User("Gone".into())), None);
+    assert_eq!(unique_preset_name(&user, " web "), "web 2");
+    assert_eq!(unique_preset_name(&user, "Print"), "Print");
+    assert_eq!(unique_preset_name(&user, "  "), "Untitled Preset");
+}
+
+#[test]
+fn gps_travels_unless_location_is_removed() {
+    let mut f = fixture();
+    // A JPEG with a GPS position, as a phone would write it.
+    let src = f.photos.join("phone.jpg");
+    let meta = imaging::export::EmbeddedMetadata {
+        gps: Some(imaging::Gps { latitude: 59.9, longitude: 10.75, altitude: None }),
+        ..Default::default()
+    };
+    let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(40, 30, image::Rgb([9, 99, 199])));
+    std::fs::write(&src, imaging::export::encode(&img, &ImageOptions::default(), &meta).unwrap()).unwrap();
+    f.cat.sync_folder(&f.photos).unwrap();
+    let id = f.cat.photo_ids_for_paths(std::slice::from_ref(&src)).unwrap()[0];
+
+    let gps_of = |p: &Path| imaging::read_metadata(p, imaging::SourceKind::Image).unwrap().gps;
+    let mut prefs = ExportPrefs { folder: f.root.join("out"), ..Default::default() };
+    let r = export(&mut f.cat, &[id], &prefs);
+    assert!(gps_of(&r.exported[0]).is_some_and(|g| (g.latitude - 59.9).abs() < 1e-6));
+
+    prefs.remove_location = true;
+    let r = export(&mut f.cat, &[id], &prefs);
+    assert_eq!(gps_of(&r.exported[0]), None, "Remove Location Info");
+
+    prefs.remove_location = false;
+    prefs.metadata = MetadataLevel::CopyrightOnly;
+    let r = export(&mut f.cat, &[id], &prefs);
+    assert_eq!(gps_of(&r.exported[0]), None, "not part of Copyright Only");
+}
+
+#[test]
+fn copyright_watermark_and_sixteen_bit_tiff_through_the_whole_export() {
+    let mut f = fixture();
+    let all = ids(&f.cat);
+    let a = all[0]; // a.png, 300 × 200 red
+    f.cat.set_iptc(&[a], catalog::IptcField::Copyright, "© Jo").unwrap();
+    let mut prefs = ExportPrefs {
+        folder: f.root.join("out"),
+        metadata: MetadataLevel::CopyrightOnly,
+        ..Default::default()
+    };
+    prefs.image.format = FileFormat::Png;
+    prefs.image.watermark.enabled = true;
+    prefs.image.watermark.opacity = 100;
+    let r = export(&mut f.cat, &all, &prefs);
+    assert_eq!(r.failed, vec![]);
+    let marked = image::open(&r.exported[0]).unwrap().into_rgb8();
+    let whiteish = |img: &image::RgbImage| img.pixels().filter(|p| p.0[1] > 200).count();
+    assert!(whiteish(&marked) > 20, "copyright drawn even though only copyright metadata is exported");
+    let plain = image::open(&r.exported[1]).unwrap().into_rgb8();
+    assert_eq!(whiteish(&plain), 0, "b.tif has no copyright, so no watermark");
+
+    prefs.image.watermark.enabled = false;
+    prefs.image.format = FileFormat::Tiff;
+    prefs.image.sixteen_bit = true;
+    let r = export(&mut f.cat, &all[..1], &prefs);
+    let img = image::open(&r.exported[0]).unwrap();
+    assert_eq!(img.color(), image::ColorType::Rgb16, "8-bit sources still make valid 16-bit files");
+}

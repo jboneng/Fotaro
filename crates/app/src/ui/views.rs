@@ -401,6 +401,7 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
                     ui.close();
                 }
             }
+            ui.menu_button("Export with Preset", |ui| super::export::preset_menu(ui, app));
         });
     });
 }

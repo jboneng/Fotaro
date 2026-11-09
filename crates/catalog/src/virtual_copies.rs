@@ -31,9 +31,9 @@ impl Catalog {
         let copy = tx.last_insert_rowid();
         tx.execute(
             "INSERT INTO exif (photo_id, camera_make, camera_model, lens, iso, shutter, aperture, focal_len,
-                               width, height, gps_lat, gps_lon, orientation)
+                               width, height, gps_lat, gps_lon, gps_alt, gps_read, orientation)
              SELECT ?2, camera_make, camera_model, lens, iso, shutter, aperture, focal_len,
-                    width, height, gps_lat, gps_lon, orientation
+                    width, height, gps_lat, gps_lon, gps_alt, gps_read, orientation
                FROM exif WHERE photo_id = ?1",
             params![master, copy],
         )?;

@@ -19,7 +19,7 @@ fn main() {
             }
         };
         let i = raw.info();
-        println!("   open {:?}", t.elapsed());
+        println!("   open {:?}  gps {:?}", t.elapsed(), i.gps);
         println!(
             "   {} {} | {} | ISO {} 1/{:.0}s f/{:.1} {}mm | {}x{} {:?} | ts {:?}",
             i.make,

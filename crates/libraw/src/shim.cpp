@@ -88,6 +88,22 @@ void pl_get_info(void *raw, pl_info *out) {
     out->thumb_format = static_cast<int32_t>(d.thumbnail.tformat);
     out->thumb_width = d.thumbnail.twidth;
     out->thumb_height = d.thumbnail.theight;
+
+    const libraw_gps_info_t &g = d.other.parsed_gps;
+    auto degrees = [](const float v[3]) {
+        return static_cast<double>(v[0]) + v[1] / 60.0 + v[2] / 3600.0;
+    };
+    double lat = degrees(g.latitude), lon = degrees(g.longitude);
+    bool refs = (g.latref == 'N' || g.latref == 'S') && (g.longref == 'E' || g.longref == 'W');
+    if (g.gpsparsed && refs && (lat != 0.0 || lon != 0.0) && lat <= 90.0 && lon <= 180.0) {
+        out->has_gps = 1;
+        out->gps_lat = g.latref == 'S' ? -lat : lat;
+        out->gps_lon = g.longref == 'W' ? -lon : lon;
+        if (g.altitude != 0.0f) {
+            out->has_alt = 1;
+            out->gps_alt = g.altref == 1 ? -g.altitude : g.altitude;
+        }
+    }
 }
 
 int pl_thumbnail(void *raw, pl_image *out) {
@@ -104,13 +120,20 @@ int pl_thumbnail(void *raw, pl_image *out) {
     });
 }
 
-int pl_render(void *raw, int half_size, pl_image *out) {
+static int render(void *raw, int half_size, bool sixteen_linear_prophoto, pl_image *out) {
     std::memset(out, 0, sizeof(*out));
     PL_GUARD({
         LibRaw *lr = static_cast<LibRaw *>(raw);
         libraw_output_params_t &p = lr->imgdata.params;
-        p.output_bps = 8;
-        p.output_color = 1;   // sRGB
+        if (sixteen_linear_prophoto) {
+            p.output_bps = 16;
+            p.output_color = 4;  // ProPhoto
+            p.gamm[0] = 1.0;     // linear
+            p.gamm[1] = 1.0;
+        } else {
+            p.output_bps = 8;
+            p.output_color = 1;  // sRGB
+        }
         p.use_camera_wb = 1;  // as-shot white balance
         p.half_size = half_size ? 1 : 0;
         int rc = lr->unpack();
@@ -123,6 +146,12 @@ int pl_render(void *raw, int half_size, pl_image *out) {
         fill_image(img, out);
         return LIBRAW_SUCCESS;
     });
+}
+
+int pl_render(void *raw, int half_size, pl_image *out) { return render(raw, half_size, false, out); }
+
+int pl_render16_linear_prophoto(void *raw, int half_size, pl_image *out) {
+    return render(raw, half_size, true, out);
 }
 
 void pl_image_free(pl_image *img) {

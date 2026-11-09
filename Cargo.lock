@@ -2016,9 +2016,12 @@ dependencies = [
 name = "imaging"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
+ "bytemuck",
  "catalog",
  "chrono",
+ "epaint_default_fonts",
  "fast_image_resize",
  "flate2",
  "image",

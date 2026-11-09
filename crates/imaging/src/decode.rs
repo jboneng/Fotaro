@@ -97,24 +97,30 @@ fn decode_raw(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
 /// Decode a RAW file from its embedded preview when that is big enough, else with a
 /// LibRaw render (half size unless more than half the sensor is wanted).
 /// `full_size` asks for the whole image (1:1 previews).
-fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImage, Metadata)> {
-    let mut raw = libraw::RawFile::open(path)?;
-    let info = raw.info();
-    let meta = metadata::from_raw_info(&info);
-    let wanted = if full_size {
-        // 90% of the sensor's long side: embedded JPEGs are often a few pixels smaller.
-        info.width.max(info.height) * 9 / 10
-    } else {
-        (max_px as f32 * MIN_EMBEDDED_FRACTION) as u32
-    };
+/// The long side an embedded preview needs to count as full size: 90% of the
+/// sensor's (embedded JPEGs are often a few pixels smaller).
+fn full_size_preview(info: &libraw::RawInfo) -> u32 {
+    info.width.max(info.height) * 9 / 10
+}
 
-    // Fast path: the camera's embedded preview (what LrC calls "embedded previews").
-    let embedded = match raw.thumbnail() {
+/// The camera's embedded preview (what LrC calls "embedded previews"), if its long side
+/// is at least `wanted` pixels. Not yet oriented.
+fn embedded_preview(raw: &mut libraw::RawFile, wanted: u32) -> Option<DynamicImage> {
+    match raw.thumbnail() {
         Ok(libraw::Thumbnail::Jpeg(bytes)) => image::load_from_memory(&bytes).ok(),
         Ok(libraw::Thumbnail::Bitmap(b)) => bitmap_to_image(b).ok(),
         Ok(libraw::Thumbnail::JpegXl(_)) | Err(_) => None,
     }
-    .filter(|img| img.width().max(img.height()) >= wanted);
+    .filter(|img| img.width().max(img.height()) >= wanted)
+}
+
+fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImage, Metadata)> {
+    let mut raw = libraw::RawFile::open(path)?;
+    let info = raw.info();
+    let meta = metadata::from_raw_info(&info);
+    let wanted =
+        if full_size { full_size_preview(&info) } else { (max_px as f32 * MIN_EMBEDDED_FRACTION) as u32 };
+    let embedded = embedded_preview(&mut raw, wanted);
 
     let img = match embedded {
         Some(img) => img,
@@ -130,7 +136,9 @@ fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImag
     Ok((img.into_rgb8(), meta))
 }
 
-fn decode_image(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
+/// Decode a non-RAW image at full size and native bit depth, oriented, with its ICC
+/// profile (if any).
+fn open_image(path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> {
     // Memory-map instead of `ImageReader::open`: TIFF decoding seeks a lot, and every seek
     // discards a BufReader's buffer (a 184 MB 16-bit TIFF decoded in 2 s that way vs 1 s).
     let file = std::fs::File::open(path)?;
@@ -144,6 +152,73 @@ fn decode_image(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut img = DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
+    Ok((img, icc))
+}
+
+/// The colour space of decoded pixels, for export colour management.
+pub(crate) enum SourceSpace {
+    Srgb,
+    /// An embedded ICC profile (RGB or gray).
+    Icc(Vec<u8>),
+    /// LibRaw's 16-bit linear ProPhoto render.
+    LinearProPhoto,
+}
+
+/// Decode for export: full size, oriented, in the source's own colour space.
+/// RAW files give what the app shows at 1:1, their full-size camera preview, so an
+/// export looks like the Library; only RAWs without one are rendered, at 16 bits when
+/// `sixteen`. Other `sixteen` sources keep their 16 bits.
+pub(crate) fn decode_for_export(
+    path: &Path,
+    kind: SourceKind,
+    sixteen: bool,
+) -> Result<(DynamicImage, SourceSpace, Metadata)> {
+    let (img, space, meta) = match kind {
+        SourceKind::Raw if sixteen => (|| {
+            let mut raw = libraw::RawFile::open(path)?;
+            let info = raw.info();
+            if let Some(img) = embedded_preview(&mut raw, full_size_preview(&info)) {
+                let img = DynamicImage::ImageRgb8(orient_raw(img, info.orientation).into_rgb8());
+                return Ok((img, SourceSpace::Srgb, metadata::from_raw_info(&info)));
+            }
+            let b = raw.render16_linear_prophoto(false)?;
+            anyhow::ensure!(b.bits == 16 && b.colors == 3, "unexpected {}x{}-bit render", b.colors, b.bits);
+            let samples: Vec<u16> =
+                b.data.as_chunks::<2>().0.iter().map(|c| u16::from_ne_bytes(*c)).collect();
+            let img = image::ImageBuffer::<image::Rgb<u16>, _>::from_raw(b.width, b.height, samples)
+                .context("RAW render has an inconsistent size")?;
+            let img = orient_raw(DynamicImage::ImageRgb16(img), info.orientation);
+            Ok((img, SourceSpace::LinearProPhoto, metadata::from_raw_info(&info)))
+        })(),
+        SourceKind::Raw => decode_raw_with(path, u32::MAX, true)
+            .map(|(img, meta)| (DynamicImage::ImageRgb8(img), SourceSpace::Srgb, meta)),
+        SourceKind::Image => open_image(path).map(|(img, icc)| {
+            let mut meta = metadata::read_exif(path).unwrap_or_default();
+            (meta.width, meta.height) = (Some(img.width()), Some(img.height()));
+            let img = match img {
+                // Keep the precision of 16-bit (and float) sources only when asked.
+                DynamicImage::ImageLuma8(_) | DynamicImage::ImageRgb8(_) => img,
+                DynamicImage::ImageLuma16(_) | DynamicImage::ImageLumaA16(_) if sixteen => {
+                    DynamicImage::ImageLuma16(img.to_luma16())
+                }
+                DynamicImage::ImageLumaA8(_) => DynamicImage::ImageLuma8(img.to_luma8()),
+                DynamicImage::ImageLuma16(_) | DynamicImage::ImageLumaA16(_) => {
+                    DynamicImage::ImageLuma8(img.to_luma8())
+                }
+                _ if sixteen && img.color().bytes_per_pixel() / img.color().channel_count() > 1 => {
+                    DynamicImage::ImageRgb16(img.to_rgb16())
+                }
+                _ => DynamicImage::ImageRgb8(img.to_rgb8()),
+            };
+            (img, icc.map_or(SourceSpace::Srgb, SourceSpace::Icc), meta)
+        }),
+    }
+    .with_context(|| format!("decoding {} for export", path.display()))?;
+    Ok((img, space, metadata::with_file_time_fallback(meta, path)))
+}
+
+fn decode_image(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
+    let (img, icc) = open_image(path)?;
     let (full_w, full_h) = (img.width(), img.height());
 
     // Resize while still at full bit depth (16-bit scans), then convert to 8-bit sRGB.

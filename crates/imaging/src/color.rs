@@ -3,7 +3,7 @@
 use image::{GrayImage, RgbImage};
 use lcms2::{ColorSpaceSignature, InfoType, Intent, Locale, PixelFormat, Profile, Transform};
 
-fn is_srgb(profile: &Profile) -> bool {
+pub(crate) fn is_srgb(profile: &Profile) -> bool {
     profile
         .info(InfoType::Description, Locale::none())
         .is_some_and(|d| d.to_ascii_lowercase().contains("srgb"))
