@@ -21,6 +21,18 @@ pub enum View {
     #[default]
     Grid,
     Loupe,
+    /// Two photos side by side (C): the Select and a Candidate.
+    Compare,
+    /// All selected photos at once (N).
+    Survey,
+}
+
+/// Compare view's two photos. The active one (that rating and flagging apply to) is
+/// `Session::active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Compare {
+    pub select: i64,
+    pub candidate: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,30 +100,46 @@ pub struct Zoom {
     pub zoomed: bool,
     /// The image point (0..1, in displayed orientation) shown at the center of the Loupe.
     pub center: egui::Vec2,
-    /// Zoom so this image point (0..1) lands under this screen position (set by clicks
-    /// and Z with the pointer over the photo; resolved when the Loupe is next drawn).
-    pub anchor: Option<(egui::Vec2, egui::Pos2)>,
-    /// Where the photo was drawn last frame, and which part of it (0..1) was visible:
-    /// for the Navigator rectangle and for anchoring Z at the pointer.
+    /// Zoom so this image point (0..1) lands this far from the view's center (set by
+    /// clicks and Z with the pointer over the photo; resolved when next drawn). Relative
+    /// to the center so both Compare panes zoom to the same spot.
+    pub anchor: Option<(egui::Vec2, egui::Vec2)>,
+    /// Where the photo was drawn last frame (and in what view), and which part of it
+    /// (0..1) was visible: for the Navigator rectangle and for anchoring Z at the pointer.
     pub image_rect: Option<egui::Rect>,
+    pub view_rect: Option<egui::Rect>,
     pub visible: Option<egui::Rect>,
 }
 
 impl Default for Zoom {
     fn default() -> Self {
-        Zoom { zoomed: false, center: egui::vec2(0.5, 0.5), anchor: None, image_rect: None, visible: None }
+        Zoom {
+            zoomed: false,
+            center: egui::vec2(0.5, 0.5),
+            anchor: None,
+            image_rect: None,
+            view_rect: None,
+            visible: None,
+        }
     }
 }
 
 impl Zoom {
     /// Zoom in so the image point under `pointer` stays put (if the pointer is over the photo).
     pub fn zoom_in_at(&mut self, pointer: Option<egui::Pos2>) {
+        if let (Some(p), Some(r), Some(v)) = (pointer, self.image_rect, self.view_rect) {
+            self.zoom_in_at_in(p, r, v);
+        } else {
+            self.zoomed = true;
+        }
+    }
+
+    /// Zoom in at `pointer` over a photo drawn at `image` inside `view`.
+    pub fn zoom_in_at_in(&mut self, pointer: egui::Pos2, image: egui::Rect, view: egui::Rect) {
         self.zoomed = true;
-        if let (Some(p), Some(r)) = (pointer, self.image_rect)
-            && r.contains(p)
-        {
-            let q = (p - r.min) / r.size();
-            self.anchor = Some((q, p));
+        if image.contains(pointer) {
+            let q = (pointer - image.min) / image.size();
+            self.anchor = Some((q, pointer - view.center()));
         }
     }
 }
@@ -278,6 +306,7 @@ pub enum Command {
     StartImport,
     CloseImport,
     CancelImport,
+    DeleteVirtualCopies(Vec<i64>),
     /// Photos dropped on the Quick Collection.
     QuickCollectionAdd(Vec<i64>),
     Reveal(PathBuf),
@@ -376,6 +405,8 @@ pub struct Session {
     pub facets: Option<(FacetKey, Vec<Vec<catalog::Facet>>)>,
     /// The Import dialog, while open.
     pub import: Option<crate::import::ImportDialog>,
+    /// Photo pixel sizes (as stored), read on demand for views showing several photos.
+    dims: HashMap<i64, Option<egui::Vec2>>,
     pub source: Source,
     pub sort: catalog::SortOrder,
     pub photos: Vec<PhotoRow>,
@@ -422,6 +453,7 @@ impl Session {
             collections_gen: None,
             facets: None,
             import: None,
+            dims: HashMap::new(),
             source: Source::AllPhotographs,
             sort,
             photos: Vec::new(),
@@ -635,6 +667,21 @@ impl Session {
         &self.facets.as_ref().expect("just set").1
     }
 
+    /// A photo's stored pixel size (file orientation applied), cached.
+    pub fn photo_dims(&mut self, id: i64) -> Option<egui::Vec2> {
+        if let Some(d) = self.dims.get(&id) {
+            return *d;
+        }
+        let d = self
+            .catalog
+            .metadata(id)
+            .ok()
+            .flatten()
+            .and_then(|m| Some(egui::vec2(m.width? as f32, m.height? as f32)));
+        self.dims.insert(id, d);
+        d
+    }
+
     pub fn refresh_keywords(&mut self) -> Result<()> {
         self.keywords = self.catalog.keywords()?;
         let known: HashSet<i64> = self.keywords.iter().map(|k| k.id).collect();
@@ -815,6 +862,7 @@ impl Session {
                     }
                 }
                 Event::MetadataUpdated { photo_id } => {
+                    self.dims.remove(&photo_id);
                     if self.active == Some(photo_id) {
                         self.metadata = None;
                     }
@@ -847,6 +895,7 @@ pub struct PhotoLibraryApp {
     pub lights: Lights,
     pub fullscreen: bool,
     pub zoom: Zoom,
+    pub compare: Option<Compare>,
     /// Ctrl+K: put the cursor in the Keywording panel's entry field next frame.
     pub focus_keywording: bool,
     /// Ctrl+F: put the cursor in the Text filter next frame.
@@ -880,6 +929,7 @@ impl PhotoLibraryApp {
             lights: Lights::On,
             fullscreen: false,
             zoom: Zoom::default(),
+            compare: None,
             focus_keywording: false,
             focus_find: false,
             show_shortcuts: false,
@@ -962,11 +1012,11 @@ impl PhotoLibraryApp {
             }
         }
         s.update_rows(&ids, update);
-        if advance {
-            s.move_active(1);
-        }
         let n = ids.len();
         self.metadata_changed(&ids);
+        if advance {
+            self.step(1);
+        }
         self.notify(describe(n));
     }
 
@@ -975,6 +1025,13 @@ impl PhotoLibraryApp {
             && let Status::Planned(phase) = sc.status
         {
             self.notify(format!("{} arrives in {phase}", sc.description));
+            return;
+        }
+        // In Compare and Survey the arrow keys move within the view.
+        if matches!(self.view, View::Compare | View::Survey)
+            && matches!(action, Action::Next | Action::Previous | Action::Up | Action::Down)
+        {
+            self.view_step(action);
             return;
         }
         let for_n = |n: usize| if n > 1 { format!(" for {n} Photos") } else { String::new() };
@@ -1218,7 +1275,17 @@ impl PhotoLibraryApp {
                 let view = self.view;
                 let Some(s) = &mut self.session else { return };
                 let Source::Collection { id } = s.source else {
-                    self.notify("Delete removes photos from a collection; removing photos from the catalog arrives later");
+                    // Outside collections, Delete removes virtual copies (after asking).
+                    let copies: Vec<i64> = s
+                        .targets(view)
+                        .into_iter()
+                        .filter(|id| s.index_of.get(id).is_some_and(|&i| s.photos[i].virtual_copy.is_some()))
+                        .collect();
+                    if copies.is_empty() {
+                        self.notify("Delete removes virtual copies, or photos from a collection; removing photos from the catalog arrives later");
+                    } else {
+                        self.dialog = Some(Dialog::ConfirmDeleteVirtualCopies { ids: copies });
+                    }
                     return;
                 };
                 if s.collections.iter().any(|c| c.id == id && c.kind != catalog::CollectionKind::Collection) {
@@ -1246,7 +1313,15 @@ impl PhotoLibraryApp {
                 }
             }
             // Planned actions are handled above via their Status.
-            Action::CompareView | Action::SurveyView | Action::EditIn => {}
+            Action::CompareView => self.enter_compare(),
+            Action::SurveyView => {
+                if self.session.as_ref().is_some_and(|s| !s.selected.is_empty()) {
+                    self.compare = None;
+                    self.view = View::Survey;
+                }
+            }
+            Action::CreateVirtualCopy => self.create_virtual_copies(),
+            Action::EditIn => {}
         }
     }
 
@@ -1272,6 +1347,123 @@ impl PhotoLibraryApp {
         let dir = if quarter_turns == 1 { "Right" } else { "Left" };
         let n = ids.len();
         self.notify(if n > 1 { format!("Rotate {dir} for {n} Photos") } else { format!("Rotate {dir}") });
+    }
+
+    /// Next photo after a rating/flag with Auto Advance: within Compare (the Candidate)
+    /// and Survey (the selected photos), elsewhere the next photo in the grid.
+    fn step(&mut self, delta: isize) {
+        match self.view {
+            View::Compare | View::Survey => {
+                self.view_step(if delta > 0 { Action::Next } else { Action::Previous })
+            }
+            _ => self.with_session(|s| s.move_active(delta)),
+        }
+    }
+
+    /// LrC Compare (C): the active photo is the Select; the Candidate is another
+    /// selected photo, or else the next one.
+    fn enter_compare(&mut self) {
+        let Some(s) = &mut self.session else { return };
+        let Some(select) = s.active else { return };
+        let ordered: Vec<i64> = s.photos.iter().map(|p| p.id).collect();
+        let i = s.index_of[&select];
+        let candidate = ordered
+            .iter()
+            .copied()
+            .find(|id| *id != select && s.selected.contains(id))
+            .or_else(|| ordered.get(i + 1).copied())
+            .or_else(|| i.checked_sub(1).and_then(|j| ordered.get(j).copied()));
+        let Some(candidate) = candidate else {
+            self.notify("Compare needs at least two photos");
+            return;
+        };
+        self.compare = Some(Compare { select, candidate });
+        self.view = View::Compare;
+    }
+
+    /// Arrow keys in Compare (←/→ Candidate, ↑ Make Select, ↓ Swap) and Survey (move
+    /// between the selected photos).
+    fn view_step(&mut self, action: Action) {
+        let Some(s) = &mut self.session else { return };
+        let forward = matches!(action, Action::Next | Action::Down);
+        match self.view {
+            View::Compare => {
+                let Some(mut c) = self.compare else { return };
+                // The neighbour of `from` in the grid, skipping `skip`.
+                let neighbour = |from: i64, skip: i64, forward: bool| -> Option<i64> {
+                    let i = *s.index_of.get(&from)? as isize;
+                    let step = if forward { 1 } else { -1 };
+                    let mut j = i + step;
+                    while let Some(p) = usize::try_from(j).ok().and_then(|j| s.photos.get(j)) {
+                        if p.id != skip {
+                            return Some(p.id);
+                        }
+                        j += step;
+                    }
+                    None
+                };
+                match action {
+                    Action::Next | Action::Previous => {
+                        if let Some(n) = neighbour(c.candidate, c.select, forward) {
+                            c.candidate = n;
+                        }
+                        s.active = Some(c.candidate);
+                    }
+                    Action::Up => {
+                        // Make Select: the Candidate wins; the next photo is the new Candidate.
+                        c.select = c.candidate;
+                        if let Some(n) = neighbour(c.select, c.select, true)
+                            .or_else(|| neighbour(c.select, c.select, false))
+                        {
+                            c.candidate = n;
+                        }
+                        s.active = Some(c.select);
+                    }
+                    _ => std::mem::swap(&mut c.select, &mut c.candidate),
+                }
+                self.compare = Some(c);
+                s.scroll_to_active = true;
+            }
+            View::Survey => {
+                let ids: Vec<i64> =
+                    s.photos.iter().map(|p| p.id).filter(|id| s.selected.contains(id)).collect();
+                let Some(i) = s.active.and_then(|a| ids.iter().position(|id| *id == a)) else { return };
+                let j = if forward { (i + 1).min(ids.len() - 1) } else { i.saturating_sub(1) };
+                s.active = Some(ids[j]);
+            }
+            _ => {}
+        }
+    }
+
+    /// LrC Photo ▸ Create Virtual Copy (Ctrl+'), for each target photo.
+    fn create_virtual_copies(&mut self) {
+        let view = self.view;
+        let Some(s) = &mut self.session else { return };
+        let ids = s.targets(view);
+        let mut made = Vec::new();
+        for id in ids {
+            match s.catalog.create_virtual_copy(id) {
+                Ok(copy) => made.push(copy),
+                Err(e) => {
+                    self.error = Some(format!("{e:#}"));
+                    return;
+                }
+            }
+        }
+        if let Err(e) = s.refresh_tree().and_then(|()| s.reload_photos()) {
+            self.error = Some(format!("{e:#}"));
+        }
+        // Like LrC, the new copy becomes the active photo.
+        if let Some(&last) = made.last() {
+            s.click(last, egui::Modifiers::NONE);
+            s.scroll_to_active = true;
+        }
+        let n = made.len();
+        self.notify(if n == 1 {
+            "Created virtual copy".to_string()
+        } else {
+            format!("Created {n} virtual copies")
+        });
     }
 
     /// LrC Photo ▸ Stacking: group (Ctrl+G), unstack (Ctrl+Shift+G), collapse/expand
@@ -1806,6 +1998,20 @@ impl PhotoLibraryApp {
                     self.notify("Stopping the import after the current photo");
                 }
             }
+            Command::DeleteVirtualCopies(ids) => {
+                let Some(s) = &mut self.session else { return };
+                match s
+                    .catalog
+                    .delete_virtual_copies(&ids)
+                    .and_then(|n| s.refresh_tree().and_then(|()| s.reload_photos()).map(|()| n))
+                {
+                    Ok(n) => {
+                        s.jobs.submit_normal(Job::PurgePreviews { photo_ids: ids });
+                        self.notify(format!("Deleted {n} virtual cop{}", if n == 1 { "y" } else { "ies" }));
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
             Command::QuickCollectionAdd(ids) => {
                 let Some(s) = &mut self.session else { return };
                 let result = s.catalog.add_to_quick_collection(&ids).and_then(|()| {
@@ -1851,6 +2057,8 @@ impl eframe::App for PhotoLibraryApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.perf.record(frame.info().cpu_usage);
         let ctx = ui.ctx().clone();
+        static TEXTURE_LIMIT: std::sync::Once = std::sync::Once::new();
+        TEXTURE_LIMIT.call_once(|| log::info!("GPU texture limit: {} px", ctx.input(|i| i.max_texture_side)));
         if let Some(s) = &mut self.session {
             s.thumbs.begin_frame();
             s.previews.begin_frame();
@@ -1986,6 +2194,9 @@ pub enum Dialog {
         photos: usize,
     },
     ConfirmReadMetadata {
+        ids: Vec<i64>,
+    },
+    ConfirmDeleteVirtualCopies {
         ids: Vec<i64>,
     },
     NewCollection {

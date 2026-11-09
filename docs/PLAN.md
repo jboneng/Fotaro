@@ -236,3 +236,17 @@ building; revisit with 1:1 previews in Phase 2.
       when done. Closes only with Cancel / Esc. `--import <folder>` opens it from the command line.
 - [ ] Later: eject card after import, import presets, video files, "Make a Second Copy To",
       building standard/1:1 previews as an import option, date-range/thumbnail size in the grid.
+
+## Progress (Phase 6)
+- [x] Compare (C): Select | Candidate panes sharing one zoom (Z / click / Navigator) and position;
+      the active pane (white frame) gets ratings, flags and labels; click the other pane to
+      activate it; ←/→ step the Candidate, ↑ Make Select, ↓ Swap; filmstrip picks the Candidate.
+- [x] Survey (N): all selected photos laid out as large as possible; click to activate, ✕ to
+      drop from the survey, arrows move between them; Auto Advance stays inside the view.
+- [x] Virtual copies (Ctrl+', Photo menu, context menu): schema v4 rebuilds `photos` (one file may
+      back several photos) with foreign keys off and a foreign-key check, keeping all ids; copies
+      take keywords, label, IPTC and rotation, start unrated, stack after their source (open),
+      share the master's previews, never write XMP, and Delete removes them after confirmation.
+- [x] 1:1 quality: request the GPU's real texture limit (32768 px here instead of egui's 8192),
+      so very large scans show at full resolution.
+- [ ] Later: Compare zoom unlinking (LrC's lock), Survey drag-reordering, renaming virtual copies.

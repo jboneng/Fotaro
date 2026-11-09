@@ -253,7 +253,11 @@ impl Catalog {
     }
 
     /// LrC "Save Metadata to File": update (or create) the photo's XMP sidecar.
-    pub fn write_xmp(&mut self, photo_id: i64, orientation_of: OrientationReader) -> Result<PathBuf> {
+    /// Returns the sidecar's path, or `None` for virtual copies (only masters have one).
+    pub fn write_xmp(&mut self, photo_id: i64, orientation_of: OrientationReader) -> Result<Option<PathBuf>> {
+        if self.is_virtual_copy(photo_id)? {
+            return Ok(None);
+        }
         let mut g = gather(&self.conn, photo_id)?;
         let file_turns = self.file_turns(photo_id, &g, orientation_of);
         g.data.orientation = Some(code_from_turns(file_turns + g.user_turns));
@@ -265,12 +269,15 @@ impl Catalog {
             "UPDATE photos SET metadata_dirty = 0, xmp_mtime_ms = ?1 WHERE id = ?2",
             params![mtime, photo_id],
         )?;
-        Ok(xmp::sidecar_path(&g.path, raw))
+        Ok(Some(xmp::sidecar_path(&g.path, raw)))
     }
 
     /// LrC "Read Metadata from File": replace the photo's catalog metadata with its
     /// sidecar's. Returns false (and changes nothing) if it has no sidecar.
     pub fn read_xmp(&mut self, photo_id: i64, orientation_of: OrientationReader) -> Result<bool> {
+        if self.is_virtual_copy(photo_id)? {
+            return Ok(false);
+        }
         let g = gather(&self.conn, photo_id)?;
         let Some(sidecar) = xmp::read_sidecar(&g.path, g.kind == FileKind::Raw)? else {
             return Ok(false);
@@ -323,7 +330,7 @@ mod tests {
 
         // The camera rotated this file a quarter turn already: the sidecar gets the total.
         let file_rotated: OrientationReader = &|_, _| Some(3);
-        let sidecar = cat.write_xmp(id, file_rotated).unwrap();
+        let sidecar = cat.write_xmp(id, file_rotated).unwrap().unwrap();
         assert_eq!(sidecar, dir.join("IMG_1.xmp"));
         assert!(cat.dirty_photo_ids().unwrap().is_empty());
         let on_disk = xmp::read_sidecar(&dir.join("IMG_1.NEF"), true).unwrap().unwrap().data;

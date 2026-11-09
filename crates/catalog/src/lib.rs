@@ -9,6 +9,7 @@ pub mod query;
 pub mod scan;
 mod schema;
 mod sync;
+mod virtual_copies;
 mod xmp_sync;
 
 pub use catalog::{

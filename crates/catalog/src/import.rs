@@ -533,7 +533,7 @@ impl Catalog {
     pub fn photo_ids_for_paths(&self, paths: &[PathBuf]) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id FROM photos p JOIN files f ON f.id = p.master_file_id JOIN folders fo ON fo.id = f.folder_id
-              WHERE fo.path = ?1 AND f.name = ?2",
+              WHERE fo.path = ?1 AND f.name = ?2 AND p.virtual_of IS NULL",
         )?;
         let mut ids = Vec::new();
         for p in paths {

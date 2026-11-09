@@ -73,6 +73,7 @@ pub enum Action {
     NewCollection,
     /// Shift+arrows: extend the selection (by this many photos).
     ExtendSelection(isize),
+    CreateVirtualCopy,
 }
 
 /// Is the action wired up yet, or does it arrive in a later roadmap phase?
@@ -139,8 +140,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(k(K::E), A::LoupeView, VIEW, "Loupe view"),
     s(k(K::Space), A::ToggleLoupe, VIEW, "Toggle Grid / Loupe"),
     s(k(K::Enter), A::LoupeView, VIEW, "Open selected photo in Loupe"),
-    planned(k(K::C), A::CompareView, VIEW, "Compare view", "Phase 6"),
-    planned(k(K::N), A::SurveyView, VIEW, "Survey view", "Phase 6"),
+    s(k(K::C), A::CompareView, VIEW, "Compare view (Select and Candidate)"),
+    s(k(K::N), A::SurveyView, VIEW, "Survey view (all selected photos)"),
     s(k(K::F), A::FullScreenPreview, VIEW, "Full-screen preview"),
     s(k(K::Escape), A::Escape, VIEW, "Exit full screen / back to Grid"),
     s(k(K::L), A::CycleLightsOut, VIEW, "Cycle Lights Out (dim / off / normal)"),
@@ -243,6 +244,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(k(K::B), A::QuickCollection, ORG, "Add to / remove from Quick Collection"),
     s(ctrl(K::B), A::ShowQuickCollection, ORG, "Show Quick Collection"),
     s(ctrl_shift(K::B), A::ClearQuickCollection, ORG, "Clear Quick Collection"),
+    s(ctrl(K::Quote), A::CreateVirtualCopy, ORG, "Create virtual copy"),
     s(ctrl(K::N), A::NewCollection, ORG, "New collection (with the selected photos)"),
     s(ctrl(K::G), A::Stack, ORG, "Group into stack"),
     s(ctrl_shift(K::G), A::Unstack, ORG, "Unstack"),

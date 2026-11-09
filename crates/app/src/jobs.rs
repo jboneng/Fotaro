@@ -23,6 +23,8 @@ use imaging::{PreviewCache, PreviewSize, SourceKind};
 #[derive(Debug, Clone)]
 pub struct PhotoRef {
     pub id: i64,
+    /// Whose previews these are on disk: the master's for a virtual copy (same file).
+    pub cache_id: i64,
     pub path: PathBuf,
     pub kind: FileKind,
     pub fingerprint: u64,
@@ -32,6 +34,7 @@ impl From<&PhotoRow> for PhotoRef {
     fn from(p: &PhotoRow) -> Self {
         PhotoRef {
             id: p.id,
+            cache_id: p.master_id,
             path: p.path.clone(),
             kind: p.kind,
             fingerprint: imaging::fingerprint(p.size_bytes, p.mtime_ms),
@@ -124,7 +127,7 @@ pub type Histogram = [[u32; 256]; 3];
 /// scaled down only if it exceeds the GPU's maximum texture size.
 fn load_full(shared: &Shared, photo: &PhotoRef) -> Result<egui::ColorImage> {
     let started = std::time::Instant::now();
-    let path = shared.cache.full(photo.id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
+    let path = shared.cache.full(photo.cache_id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
     let mut img = image::open(&path)?;
     // Read now, not at startup: before the first frame egui reports a 2048 px default.
     let max_side = shared.ctx.input(|i| i.max_texture_side) as u32;
@@ -438,17 +441,18 @@ fn to_catalog_metadata(m: imaging::Metadata) -> PhotoMetadata {
 fn ensure_previews(shared: &Shared, cat: &Catalog, photo: &PhotoRef) -> Result<()> {
     {
         let mut building = shared.building.lock().unwrap();
-        while building.contains(&photo.id) {
+        while building.contains(&photo.cache_id) {
             building = shared.building_done.wait(building).unwrap();
         }
-        if shared.cache.has_all(photo.id, photo.fingerprint) {
+        if shared.cache.has_all(photo.cache_id, photo.fingerprint) {
             return Ok(());
         }
-        building.insert(photo.id);
+        building.insert(photo.cache_id);
     }
     let result = (|| {
         anyhow::ensure!(photo.path.exists(), "file is missing");
-        let built = shared.cache.build(photo.id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
+        let built =
+            shared.cache.build(photo.cache_id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
         // Sync normally stored metadata already; only fill it in if that failed, so
         // preview workers (many threads) rarely contend for the SQLite write lock.
         if cat.metadata(photo.id)?.is_none() {
@@ -457,7 +461,7 @@ fn ensure_previews(shared: &Shared, cat: &Catalog, photo: &PhotoRef) -> Result<(
         }
         Ok(())
     })();
-    shared.building.lock().unwrap().remove(&photo.id);
+    shared.building.lock().unwrap().remove(&photo.cache_id);
     shared.building_done.notify_all();
     result
 }
@@ -478,11 +482,11 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                 if size == PreviewSize::Full {
                     return load_full(shared, &photo).map(|image| (image, None));
                 }
-                let path = match shared.cache.get(photo.id, size, photo.fingerprint) {
+                let path = match shared.cache.get(photo.cache_id, size, photo.fingerprint) {
                     Some(p) => p,
                     None => {
                         ensure_previews(shared, cat, &photo)?;
-                        shared.cache.path(photo.id, size, photo.fingerprint)
+                        shared.cache.path(photo.cache_id, size, photo.fingerprint)
                     }
                 };
                 let rgba = image::open(&path)?.into_rgba8();
@@ -626,7 +630,7 @@ fn sync_and_queue(shared: &Shared, cat: &mut Catalog, root: &std::path::Path) ->
             .iter()
             .filter(|p| !p.missing)
             .map(PhotoRef::from)
-            .filter(|p| !shared.cache.has_all(p.id, p.fingerprint))
+            .filter(|p| !shared.cache.has_all(p.cache_id, p.fingerprint))
             .collect();
         for photo in todo {
             submit(shared, Job::BuildPreviews { photo }, Lane::Background);
@@ -646,7 +650,7 @@ fn run_xmp(shared: &Shared, cat: &mut Catalog, photo_ids: Vec<i64>, read: bool, 
         let result = if read {
             cat.read_xmp(id, orientation_of).map(|found| found.then_some(()))
         } else {
-            cat.write_xmp(id, orientation_of).map(|_| Some(()))
+            cat.write_xmp(id, orientation_of).map(|p| p.map(|_| ()))
         };
         match result {
             Ok(Some(())) => done.push(id),
@@ -672,7 +676,7 @@ mod tests {
     use super::*;
 
     fn photo(id: i64) -> PhotoRef {
-        PhotoRef { id, path: PathBuf::new(), kind: FileKind::Image, fingerprint: 0 }
+        PhotoRef { id, cache_id: id, path: PathBuf::new(), kind: FileKind::Image, fingerprint: 0 }
     }
 
     /// The Import button's path end to end: scan a "card", import through the job

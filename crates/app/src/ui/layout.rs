@@ -173,6 +173,7 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 }
             });
             ui.separator();
+            menu_action(ui, app, "Create Virtual Copy", Action::CreateVirtualCopy);
             menu_action(ui, app, "Add to Quick Collection", Action::QuickCollection);
             ui.menu_button("Stacking", |ui| {
                 menu_action(ui, app, "Group into Stack", Action::Stack);
@@ -212,8 +213,8 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         ui.menu_button("View", |ui| {
             menu_toggle(ui, app, "Grid", app.view == View::Grid, Action::GridView);
             menu_toggle(ui, app, "Loupe", app.view == View::Loupe, Action::LoupeView);
-            menu_action(ui, app, "Compare", Action::CompareView);
-            menu_action(ui, app, "Survey", Action::SurveyView);
+            menu_toggle(ui, app, "Compare", app.view == View::Compare, Action::CompareView);
+            menu_toggle(ui, app, "Survey", app.view == View::Survey, Action::SurveyView);
             ui.separator();
             menu_action(ui, app, "Toggle Zoom View", Action::ZoomToggle);
             menu_action(ui, app, "Zoom In", Action::ZoomIn);
@@ -426,6 +427,8 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         match app.view {
             View::Grid => timed("grid", || views::grid(app, ui)),
             View::Loupe => views::loupe(app, ui),
+            View::Compare => views::compare(app, ui),
+            View::Survey => views::survey(app, ui),
         }
         ui.max_rect()
     });
@@ -637,6 +640,7 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
         Dialog::RenameCollection { .. } => "Rename",
         Dialog::ConfirmDeleteCollection { .. } => "Delete",
         Dialog::EditSmartCollection { .. } => "Edit Smart Collection",
+        Dialog::ConfirmDeleteVirtualCopies { .. } => "Delete Virtual Copies",
     };
     egui::Window::new(title)
         .collapsible(false)
@@ -801,6 +805,25 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
                                 name: name.trim().to_owned(),
                                 rules: rules.clone(),
                             });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::ConfirmDeleteVirtualCopies { ids } => {
+                    let n = ids.len();
+                    ui.label(RichText::new(if n == 1 {
+                        "Delete the selected virtual copy?".to_string()
+                    } else {
+                        format!("Delete {n} virtual copies?")
+                    }).strong());
+                    ui.add_space(4.0);
+                    ui.label("Their ratings, keywords and collections go with them. The file stays: it belongs to the master photo.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            run = Some(Command::DeleteVirtualCopies(ids.clone()));
                         }
                         if ui.button("Cancel").clicked() {
                             close = true;

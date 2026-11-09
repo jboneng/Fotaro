@@ -204,6 +204,9 @@ fn paint_cell(
                 Stroke::new(1.0, Color32::from_black_alpha(120)),
                 egui::StrokeKind::Outside,
             );
+            if photo.virtual_copy.is_some() {
+                paint_virtual_copy_badge(&painter, r.left_bottom());
+            }
         }
         None => {
             let r = Rect::from_center_size(image_area.center(), image_area.size() * egui::vec2(0.8, 0.6));
@@ -273,6 +276,17 @@ fn paint_cell(
     if st.show_dirty && style != GridStyle::Minimal {
         paint_needs_saving(&painter, cell.right_bottom() - egui::vec2(12.0, 10.0 + footer.max(4.0) / 2.0));
     }
+}
+
+/// LrC's virtual copy badge: a page corner folded over at the photo's bottom left.
+fn paint_virtual_copy_badge(painter: &egui::Painter, corner: egui::Pos2) {
+    let s = 14.0;
+    let fold = vec![corner, corner + egui::vec2(0.0, -s), corner + egui::vec2(s, 0.0)];
+    painter.add(egui::Shape::convex_polygon(
+        fold,
+        Color32::from_gray(0xe0),
+        Stroke::new(1.0, Color32::from_black_alpha(140)),
+    ));
 }
 
 /// A small page with a down arrow: catalog metadata not yet saved to the sidecar.
@@ -346,6 +360,10 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
             && ui.button("Remove from Collection").clicked()
         {
             app.run(Command::Action(Action::RemoveFromCollection));
+            ui.close();
+        }
+        if ui.button("Create Virtual Copy").clicked() {
+            app.run(Command::Action(Action::CreateVirtualCopy));
             ui.close();
         }
         ui.menu_button("Stacking", |ui| {
@@ -589,53 +607,41 @@ pub fn clamp_center(center: Vec2, visible: Vec2) -> Vec2 {
     egui::vec2(axis(center.x, visible.x), axis(center.y, visible.y))
 }
 
-pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
-    let rect = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+/// Draw `photo` in `rect` with the shared zoom state (Loupe, and both Compare panes, so
+/// their zoom and position stay linked). `primary` panes record where they drew the
+/// photo for the Navigator and for Z; `zoom_on_click` panes toggle zoom when clicked.
+fn photo_pane(
+    app: &mut PhotoLibraryApp,
+    ui: &mut egui::Ui,
+    rect: Rect,
+    photo: &PhotoRow,
+    salt: &str,
+    primary: bool,
+    zoom_on_click: bool,
+) -> egui::Response {
+    let resp = ui.interact(rect, egui::Id::unique(("photo_pane", salt)), Sense::click_and_drag());
     let ppp = ui.ctx().pixels_per_point();
     let zoom_level = app.ui.zoom_level;
-    let Some(s) = &mut app.session else { return };
-    let Some(photo) = s.active_photo().cloned() else {
-        app.view = View::Grid;
-        return;
-    };
+    let Some(s) = &mut app.session else { return resp };
     let zoomed = app.zoom.zoomed && !photo.missing;
-
-    // Prefetch neighbours first: the visible lane is LIFO, so the current photo wins.
-    let neighbours: Vec<PhotoRow> = s
-        .active_index()
-        .map(|i| [i + 1, i.wrapping_sub(1)].iter().filter_map(|&j| s.photos.get(j).cloned()).collect())
-        .unwrap_or_default();
-    for p in neighbours.iter().filter(|p| !p.missing) {
-        s.request(p, PreviewSize::Standard);
-    }
 
     // Zoomed: the 1:1 preview, showing the standard one enlarged until it arrives.
     let full = if zoomed { s.full.get(photo.id) } else { None };
     if zoomed && full.is_none() {
-        s.request(&photo, PreviewSize::Full);
-    }
-    // While checking focus across a burst, the next photo's 1:1 is usually wanted too.
-    if zoomed
-        && full.is_some()
-        && let Some(next) = neighbours.first().filter(|p| !p.missing)
-    {
-        s.request(next, PreviewSize::Full);
+        s.request(photo, PreviewSize::Full);
     }
     let loading_full = zoomed && full.is_none();
-    let Some(tex) = full.or_else(|| fit_texture(s, &photo)) else {
-        centered_message(ui, rect, &photo);
-        app.zoom.image_rect = None;
-        return;
+    let Some(tex) = full.or_else(|| fit_texture(s, photo)) else {
+        centered_message(ui, rect, photo);
+        if primary {
+            app.zoom.image_rect = None;
+        }
+        return resp;
     };
 
     // Size of the photo in pixels as displayed (file orientation, then catalog rotation).
-    let native = s
-        .active_metadata()
-        .and_then(|m| Some(egui::vec2(m.width? as f32, m.height? as f32)))
-        .unwrap_or_else(|| tex.size_vec2());
+    let native = s.photo_dims(photo.id).unwrap_or_else(|| tex.size_vec2());
     let img_px = rotated_size(native, photo.rotation);
-
     let view = if zoomed { rect } else { rect.shrink(18.0) };
     let fit = (view.width() / img_px.x).min(view.height() / img_px.y);
     let fill = (view.width() / img_px.x).max(view.height() / img_px.y);
@@ -645,8 +651,8 @@ pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
     let z = &mut app.zoom;
     if zoomed {
-        if let Some((q, p)) = z.anchor.take() {
-            z.center = q + (view.center() - p) / size;
+        if let Some((q, offset)) = z.anchor.take() {
+            z.center = q - offset / size;
         }
         if resp.dragged() {
             z.center -= resp.drag_delta() / size;
@@ -664,14 +670,17 @@ pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     } else {
         Rect::from_center_size(view.center(), size)
     };
-    z.image_rect = Some(img_rect);
-    z.visible = zoomed.then(|| {
-        let v = view.intersect(img_rect);
-        Rect::from_min_max(
-            ((v.min - img_rect.min) / size).to_pos2(),
-            ((v.max - img_rect.min) / size).to_pos2(),
-        )
-    });
+    if primary {
+        z.image_rect = Some(img_rect);
+        z.view_rect = Some(view);
+        z.visible = zoomed.then(|| {
+            let v = view.intersect(img_rect);
+            Rect::from_min_max(
+                ((v.min - img_rect.min) / size).to_pos2(),
+                ((v.max - img_rect.min) / size).to_pos2(),
+            )
+        });
+    }
 
     let painter = ui.painter().with_clip_rect(rect);
     paint_image(&painter, &tex, img_rect, photo.rotation, Color32::WHITE);
@@ -686,22 +695,223 @@ pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 
     // LrC: a click toggles between Fit and the zoom level, at the clicked point.
-    if resp.clicked() && !photo.missing {
+    if zoom_on_click && resp.clicked() && !photo.missing {
         if zoomed {
-            app.zoom.zoomed = false;
-        } else {
-            app.zoom.zoom_in_at(resp.interact_pointer_pos());
+            z.zoomed = false;
+        } else if let Some(p) = resp.interact_pointer_pos() {
+            z.zoom_in_at_in(p, img_rect, view);
         }
     }
     if zoomed {
         let icon = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
         resp.clone().on_hover_cursor(icon);
-    } else if resp.hover_pos().is_some_and(|p| img_rect.contains(p)) && !photo.missing {
+    } else if zoom_on_click && resp.hover_pos().is_some_and(|p| img_rect.contains(p)) && !photo.missing {
         resp.clone().on_hover_cursor(egui::CursorIcon::ZoomIn);
     }
+    resp
+}
 
+pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let rect = ui.available_rect_before_wrap();
+    ui.allocate_rect(rect, Sense::hover());
+    let Some(s) = &mut app.session else { return };
+    let Some(photo) = s.active_photo().cloned() else {
+        app.view = View::Grid;
+        return;
+    };
+    // Prefetch neighbours first: the visible lane is LIFO, so the current photo wins.
+    let neighbours: Vec<PhotoRow> = s
+        .active_index()
+        .map(|i| [i + 1, i.wrapping_sub(1)].iter().filter_map(|&j| s.photos.get(j).cloned()).collect())
+        .unwrap_or_default();
+    for p in neighbours.iter().filter(|p| !p.missing) {
+        s.request(p, PreviewSize::Standard);
+    }
+    // While checking focus across a burst, the next photo's 1:1 is usually wanted too.
+    if app.zoom.zoomed
+        && s.full.get(photo.id).is_some()
+        && let Some(next) = neighbours.first().filter(|p| !p.missing)
+    {
+        s.request(next, PreviewSize::Full);
+    }
+    let resp = photo_pane(app, ui, rect, &photo, "loupe", true, true);
     info_overlay(app, ui, rect, &photo);
     photo_context_menu(&resp, app, &photo);
+}
+
+/// LrC's Compare view: the Select (left) and a Candidate (right), zoom and position
+/// linked. Rating and flagging go to the active pane (white frame); click the other
+/// pane to activate it. ←/→ step the Candidate, ↑ makes it the Select, ↓ swaps.
+pub fn compare(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let rect = ui.available_rect_before_wrap();
+    ui.allocate_rect(rect, Sense::hover());
+    let Some(s) = &mut app.session else { return };
+    let Some(mut pair) = app.compare else {
+        app.view = View::Grid;
+        return;
+    };
+    // The filmstrip (or anything else changing the active photo) picks a new Candidate.
+    if let Some(a) = s.active
+        && a != pair.select
+        && a != pair.candidate
+    {
+        pair.candidate = a;
+    }
+    let (Some(&si), Some(&ci)) = (s.index_of.get(&pair.select), s.index_of.get(&pair.candidate)) else {
+        app.compare = None;
+        app.view = View::Grid;
+        return;
+    };
+    app.compare = Some(pair);
+    let (select, candidate) = (s.photos[si].clone(), s.photos[ci].clone());
+    let active = s.active;
+
+    let gap = 6.0;
+    let half = (rect.width() - gap) / 2.0;
+    let panes = [
+        (Rect::from_min_size(rect.min, egui::vec2(half, rect.height())), select, "Select"),
+        (
+            Rect::from_min_size(rect.min + egui::vec2(half + gap, 0.0), egui::vec2(half, rect.height())),
+            candidate,
+            "Candidate",
+        ),
+    ];
+    for (r, photo, label) in panes {
+        let is_active = active == Some(photo.id);
+        let header = Rect::from_min_size(r.min, egui::vec2(r.width(), 24.0));
+        let body = Rect::from_min_max(egui::pos2(r.left(), header.bottom()), r.max);
+        let painter = ui.painter();
+        painter.rect_filled(header, 0.0, Color32::from_gray(if is_active { 0x50 } else { 0x38 }));
+        let name = match &photo.virtual_copy {
+            Some(copy) => format!("{}   {}  ({copy})", label, photo.file_name),
+            None => format!("{}   {}", label, photo.file_name),
+        };
+        painter.text(
+            header.left_center() + egui::vec2(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::proportional(12.0),
+            if is_active { theme::TEXT_STRONG } else { theme::TEXT },
+        );
+        paint_stars(painter, header.right_center() - egui::vec2(50.0, 0.0), photo.rating, 10.0, theme::STAR);
+        paint_flag(painter, header.right_center() - egui::vec2(96.0, 0.0), photo.flag, 11.0);
+        let resp = photo_pane(app, ui, body, &photo, label, is_active, is_active);
+        if is_active {
+            ui.painter().rect_stroke(
+                body,
+                0.0,
+                Stroke::new(1.5, theme::TEXT_STRONG),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if resp.clicked()
+            && !is_active
+            && let Some(s) = &mut app.session
+        {
+            s.active = Some(photo.id);
+        }
+        photo_context_menu(&resp, app, &photo);
+    }
+    if let Some(s) = &mut app.session {
+        // Both photos are the selection, as in LrC.
+        s.selected = [pair.select, pair.candidate].into_iter().collect();
+    }
+}
+
+/// Columns for laying out `n` photos of aspect `aspect` in `area` as large as possible.
+pub fn survey_columns(n: usize, area: Vec2, aspect: f32) -> usize {
+    (1..=n.max(1))
+        .max_by(|&a, &b| {
+            let size = |cols: usize| {
+                let rows = n.div_ceil(cols) as f32;
+                let (w, h) = (area.x / cols as f32, area.y / rows);
+                (w / aspect).min(h)
+            };
+            size(a).total_cmp(&size(b))
+        })
+        .unwrap_or(1)
+}
+
+/// LrC's Survey view: every selected photo, as large as fits. Click one to make it
+/// active (rating and flagging apply to it); ✕ takes a photo out of the survey.
+pub fn survey(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let rect = ui.available_rect_before_wrap();
+    ui.allocate_rect(rect, Sense::hover());
+    let Some(s) = &mut app.session else { return };
+    let photos: Vec<PhotoRow> = s.photos.iter().filter(|p| s.selected.contains(&p.id)).cloned().collect();
+    if photos.is_empty() {
+        app.view = View::Grid;
+        return;
+    }
+    if s.active.is_none_or(|a| !s.selected.contains(&a)) {
+        s.active = Some(photos[0].id);
+    }
+    let area = rect.shrink(10.0);
+    let cols = survey_columns(photos.len(), area.size(), 1.5);
+    let rows = photos.len().div_ceil(cols);
+    let cell = egui::vec2(area.width() / cols as f32, area.height() / rows as f32);
+    // Big cells use the standard previews; many small ones the thumbnails.
+    let use_previews = cell.x > 400.0 && photos.len() <= 8;
+    let mut drop = None;
+    let mut activate = None;
+    let mut menus = Vec::new();
+    for (i, photo) in photos.iter().enumerate() {
+        let (row, col) = (i / cols, i % cols);
+        let r = Rect::from_min_size(area.min + egui::vec2(col as f32 * cell.x, row as f32 * cell.y), cell)
+            .shrink(6.0);
+        let is_active = s.active == Some(photo.id);
+        let resp = ui.interact(r, egui::Id::unique(("survey", photo.id)), Sense::click());
+        let image_area = Rect::from_min_max(r.min, r.max - egui::vec2(0.0, 22.0)).shrink(4.0);
+        let tex = if use_previews { fit_texture(s, photo) } else { s.thumbs.get(photo.id) };
+        match tex {
+            Some(tex) => {
+                let ir = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), image_area);
+                paint_image(ui.painter(), &tex, ir, photo.rotation, Color32::WHITE);
+                if is_active {
+                    ui.painter().rect_stroke(
+                        ir.expand(3.0),
+                        0.0,
+                        Stroke::new(2.0, theme::TEXT_STRONG),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            }
+            None if !photo.missing => s.request(photo, PreviewSize::Thumb),
+            None => {}
+        }
+        let y = r.bottom() - 11.0;
+        paint_flag(ui.painter(), egui::pos2(r.left() + 6.0, y), photo.flag, 11.0);
+        paint_stars(ui.painter(), egui::pos2(r.center().x, y), photo.rating, 10.0, theme::STAR);
+        // ✕ on hover takes the photo out of the survey (deselects it), as in LrC.
+        let x = Rect::from_center_size(r.right_top() + egui::vec2(-12.0, 12.0), egui::vec2(18.0, 18.0));
+        let over_x = resp.hover_pos().is_some_and(|p| x.contains(p));
+        if resp.hovered() {
+            ui.painter().rect_filled(x, 3.0, Color32::from_black_alpha(if over_x { 220 } else { 140 }));
+            ui.painter().text(
+                x.center(),
+                Align2::CENTER_CENTER,
+                "✕",
+                FontId::proportional(12.0),
+                theme::TEXT_STRONG,
+            );
+        }
+        if resp.clicked() {
+            if over_x { drop = Some(photo.id) } else { activate = Some(photo.id) }
+        }
+        menus.push((resp, photo.clone()));
+    }
+    if let Some(id) = drop {
+        s.selected.remove(&id);
+        if s.active == Some(id) {
+            s.active = photos.iter().map(|p| p.id).find(|p| s.selected.contains(p));
+        }
+    }
+    if let Some(id) = activate {
+        s.active = Some(id);
+    }
+    for (resp, photo) in menus {
+        photo_context_menu(&resp, app, &photo);
+    }
 }
 
 pub fn fullscreen(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: Rect) {
@@ -809,22 +1019,21 @@ pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
 pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-        let views = [(View::Grid, "▦", "Grid (G)"), (View::Loupe, "▢", "Loupe (E)")];
-        for (v, icon, tip) in views {
+        let views = [
+            (View::Grid, "▦", 15.0, "Grid (G)", Action::GridView),
+            (View::Loupe, "▢", 15.0, "Loupe (E)", Action::LoupeView),
+            (View::Compare, "XY", 12.0, "Compare (C)", Action::CompareView),
+            (View::Survey, "▦▦", 12.0, "Survey (N)", Action::SurveyView),
+        ];
+        for (v, icon, size, tip, action) in views {
             if ui
-                .add(egui::Button::new(RichText::new(icon).size(15.0)).selected(app.view == v))
+                .add(egui::Button::new(RichText::new(icon).size(size)).selected(app.view == v))
                 .on_hover_text(tip)
                 .clicked()
             {
-                app.run(Command::Action(if v == View::Grid { Action::GridView } else { Action::LoupeView }));
+                app.run(Command::Action(action));
             }
         }
-        let _ = ui
-            .add_enabled(false, egui::Button::new(RichText::new("XY").size(12.0)))
-            .on_disabled_hover_text("Compare (C) arrives in Phase 6");
-        let _ = ui
-            .add_enabled(false, egui::Button::new(RichText::new("▦▦").size(12.0)))
-            .on_disabled_hover_text("Survey (N) arrives in Phase 6");
         ui.separator();
         ui.label(RichText::new("Sort:").color(theme::TEXT_WEAK));
         let mut sort = app.ui.sort;
@@ -928,6 +1137,16 @@ mod tests {
         assert_eq!(corner_uvs(4), corner_uvs(0));
         assert_eq!(rotated_size(egui::vec2(300.0, 200.0), 1), egui::vec2(200.0, 300.0));
         assert_eq!(rotated_size(egui::vec2(300.0, 200.0), 2), egui::vec2(300.0, 200.0));
+    }
+
+    #[test]
+    fn survey_layout_keeps_photos_large() {
+        let wide = egui::vec2(1500.0, 800.0);
+        assert_eq!(survey_columns(1, wide, 1.5), 1);
+        assert_eq!(survey_columns(2, wide, 1.5), 2, "side by side on a wide screen");
+        assert_eq!(survey_columns(4, wide, 1.5), 2, "2 x 2");
+        assert_eq!(survey_columns(2, egui::vec2(600.0, 1000.0), 1.5), 1, "stacked on a tall area");
+        assert_eq!(survey_columns(12, wide, 1.5), 4);
     }
 
     #[test]

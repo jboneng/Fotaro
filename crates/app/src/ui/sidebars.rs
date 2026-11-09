@@ -73,7 +73,7 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 /// LrC's Navigator: the active photo, the zoom level picker (FIT FILL 1:1 2:1 3:1), and
 /// while zoomed a rectangle showing the visible area; click or drag to move it.
 fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
-    let fit_selected = !(app.zoom.zoomed && app.view == View::Loupe);
+    let fit_selected = !(app.zoom.zoomed && matches!(app.view, View::Loupe | View::Compare));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -121,7 +121,7 @@ fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
     // The visible area, from the Loupe's last frame.
     if app.zoom.zoomed
-        && app.view == View::Loupe
+        && matches!(app.view, View::Loupe | View::Compare)
         && let Some(v) = app.zoom.visible
     {
         let r = Rect::from_min_max(
@@ -408,6 +408,9 @@ fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let mut rows: Vec<Row> = Vec::new();
     let text = |k: &'static str, v: String| Row::Text(k, v);
     rows.push(text("File Name", photo.file_name.clone()));
+    if let Some(copy) = &photo.virtual_copy {
+        rows.push(text("Copy Name", copy.clone()));
+    }
     if preset != MetadataPreset::Iptc {
         rows.push(text(
             "Folder",

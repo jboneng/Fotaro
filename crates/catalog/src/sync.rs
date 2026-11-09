@@ -232,7 +232,11 @@ impl Catalog {
                     )?;
                     report.updated += 1;
                     let photo: Option<i64> = tx
-                        .query_row("SELECT id FROM photos WHERE master_file_id = ?1", [file_id], |r| r.get(0))
+                        .query_row(
+                            "SELECT id FROM photos WHERE master_file_id = ?1 AND virtual_of IS NULL",
+                            [file_id],
+                            |r| r.get(0),
+                        )
                         .optional()?;
                     match photo {
                         Some(p) => p,

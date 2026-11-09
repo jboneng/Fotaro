@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 /// `MIGRATIONS[i]` upgrades the schema from version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     // v1: folders, files, photos, EXIF, keywords, collections.
     r#"
     CREATE TABLE folders (
@@ -121,6 +121,44 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // v4: virtual copies (LrC): several photos may share one file, each with its own
+    // metadata. Dropping the UNIQUE on master_file_id needs a table rebuild (run with
+    // foreign keys off, see `migrate`); ids are kept, so every reference stays valid.
+    r#"
+    CREATE TABLE photos_new (
+        id              INTEGER PRIMARY KEY,
+        master_file_id  INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        capture_time    INTEGER,
+        rating          INTEGER NOT NULL DEFAULT 0 CHECK (rating BETWEEN 0 AND 5),
+        flag            INTEGER NOT NULL DEFAULT 0 CHECK (flag IN (-1, 0, 1)),
+        color_label     TEXT,
+        orientation     INTEGER NOT NULL DEFAULT 1,
+        imported_at     INTEGER NOT NULL,
+        title           TEXT,
+        caption         TEXT,
+        creator         TEXT,
+        copyright       TEXT,
+        metadata_dirty  INTEGER NOT NULL DEFAULT 0,
+        xmp_mtime_ms    INTEGER,
+        stack_id        INTEGER REFERENCES stacks(id) ON DELETE SET NULL,
+        stack_pos       INTEGER,
+        virtual_of      INTEGER REFERENCES photos(id) ON DELETE CASCADE,
+        copy_name       TEXT
+    );
+    INSERT INTO photos_new (id, master_file_id, capture_time, rating, flag, color_label, orientation,
+                            imported_at, title, caption, creator, copyright, metadata_dirty,
+                            xmp_mtime_ms, stack_id, stack_pos)
+        SELECT id, master_file_id, capture_time, rating, flag, color_label, orientation,
+               imported_at, title, caption, creator, copyright, metadata_dirty,
+               xmp_mtime_ms, stack_id, stack_pos
+          FROM photos;
+    DROP TABLE photos;
+    ALTER TABLE photos_new RENAME TO photos;
+    CREATE INDEX photos_capture_time ON photos(capture_time);
+    CREATE INDEX photos_stack ON photos(stack_id);
+    CREATE INDEX photos_master_file ON photos(master_file_id);
+    CREATE INDEX photos_virtual_of ON photos(virtual_of);
+    "#,
 ];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -137,13 +175,32 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         "catalog schema v{current} is newer than this app supports (v{LATEST_VERSION}); \
          please update the app"
     );
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-        let next = i as u32 + 1;
-        let tx = conn.transaction()?;
-        tx.execute_batch(sql).with_context(|| format!("migrating catalog to v{next}"))?;
-        tx.pragma_update(None, "user_version", next)?;
-        tx.commit()?;
-        log::info!("catalog migrated to schema v{next}");
+    if current == LATEST_VERSION {
+        return Ok(());
     }
-    Ok(())
+    // Table rebuilds (v4) must not cascade deletes from the old table; SQLite's documented
+    // procedure: foreign keys off (outside any transaction), migrate, check, back on.
+    let fk_on: bool = conn.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| -> Result<()> {
+        for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+            let next = i as u32 + 1;
+            let tx = conn.transaction()?;
+            tx.execute_batch(sql).with_context(|| format!("migrating catalog to v{next}"))?;
+            let broken: i64 =
+                tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+            anyhow::ensure!(
+                broken == 0,
+                "migrating to v{next} broke {broken} references; nothing was changed"
+            );
+            tx.pragma_update(None, "user_version", next)?;
+            tx.commit()?;
+            log::info!("catalog migrated to schema v{next}");
+        }
+        Ok(())
+    })();
+    if fk_on {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+    }
+    result
 }

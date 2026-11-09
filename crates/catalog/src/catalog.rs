@@ -70,6 +70,10 @@ pub struct PhotoRow {
     pub in_quick_collection: bool,
     /// Extension of a JPEG paired with this raw file (shown as "NEF+JPG").
     pub paired_ext: Option<String>,
+    /// A virtual copy's name ("Copy 1"); `None` for master photos.
+    pub virtual_copy: Option<String>,
+    /// The master photo (itself, unless this is a virtual copy): copies share its previews.
+    pub master_id: i64,
 }
 
 /// A photo's place in a stack (LrC Photo ▸ Stacking).
@@ -196,7 +200,9 @@ const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, 
      (SELECT COUNT(*) FROM photos ps WHERE ps.stack_id = p.stack_id),
      (SELECT s.collapsed FROM stacks s WHERE s.id = p.stack_id),
      EXISTS (SELECT 1 FROM quick_collection q WHERE q.photo_id = p.id),
-     (SELECT upper(sc.ext) FROM files sc WHERE sc.sidecar_of = p.id LIMIT 1)";
+     (SELECT upper(sc.ext) FROM files sc WHERE sc.sidecar_of = p.id LIMIT 1),
+     CASE WHEN p.virtual_of IS NULL THEN NULL ELSE coalesce(p.copy_name, 'Copy') END,
+     coalesce(p.virtual_of, p.id)";
 
 /// `photos.orientation` holds the catalog rotation as an EXIF/XMP orientation code
 /// (1 = none, 6 = 90° CW, 3 = 180°, 8 = 90° CCW), the form XMP sidecars will use.
@@ -242,6 +248,8 @@ fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         },
         in_quick_collection: r.get(17)?,
         paired_ext: r.get(18)?,
+        virtual_copy: r.get(19)?,
+        master_id: r.get(20)?,
     })
 }
 
@@ -445,7 +453,7 @@ impl Catalog {
         let source = self.source_condition(source, &mut args)?;
         let filter = filter.to_sql(&mut args);
         let sql = format!(
-            "SELECT {PHOTO_COLUMNS} {PHOTOS_FROM} WHERE ({source}) AND ({filter}) ORDER BY {}",
+            "SELECT {PHOTO_COLUMNS} {PHOTOS_FROM} WHERE ({source}) AND ({filter}) ORDER BY {}, p.id",
             sort.key.order_by()
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;

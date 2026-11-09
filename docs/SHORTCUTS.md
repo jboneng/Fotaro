@@ -13,8 +13,8 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `E` | Loupe view | ✅ |
 | `Space` | Toggle Grid / Loupe | ✅ |
 | `Enter` | Open selected photo in Loupe | ✅ |
-| `C` | Compare view | planned (Phase 6) |
-| `N` | Survey view | planned (Phase 6) |
+| `C` | Compare view (Select and Candidate) | ✅ |
+| `N` | Survey view (all selected photos) | ✅ |
 | `F` | Full-screen preview | ✅ |
 | `Esc` | Exit full screen / back to Grid | ✅ |
 | `L` | Cycle Lights Out (dim / off / normal) | ✅ |
@@ -98,6 +98,7 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `B` | Add to / remove from Quick Collection | ✅ |
 | `Ctrl+B` | Show Quick Collection | ✅ |
 | `Ctrl+Shift+B` | Clear Quick Collection | ✅ |
+| `Ctrl+Quote` | Create virtual copy | ✅ |
 | `Ctrl+N` | New collection (with the selected photos) | ✅ |
 | `Ctrl+G` | Group into stack | ✅ |
 | `Ctrl+Shift+G` | Unstack | ✅ |
