@@ -319,3 +319,93 @@ building; revisit with 1:1 previews in Phase 2.
       silverfast DNG renders at 16 bits in ~1 s.
 - [ ] Later: Export as Catalog, PSD/DNG/JPEG XL formats, Remove Person Info (no people yet),
       a watermark editor with a live preview.
+
+## Design: Stacks, pictures and the version strip (next)
+
+LrC's stacks use one mechanism for different relationships (parts of one capture, versions
+of one picture, photos grouped by hand), and a collapsed stack hides photos unpredictably.
+This replaces them. Decided with the user:
+
+- Sidecar images (IR pass, its mask, the JPEG of a RAW+JPEG pair) are **members of the
+  stack**, not separate grid cells and not hidden parts.
+- A stack has an **active member**: it is what the grid shows and what is rated, exported…
+  The newest edit becomes active automatically.
+- Manual grouping stays.
+- Members are reached through a **version strip**, not by expanding the stack in the grid.
+- **Two levels**: a group (made by hand) holds pictures; a picture holds its members.
+- A filter matches a stack when **any member** matches.
+- Later (separate brainstorm): NegPy renders positive previews of negatives at import.
+
+### Model
+
+- **Picture**: one capture and everything made from it. Every photo belongs to exactly
+  one picture; a lone photo is a picture of one.
+- **Member roles** within a picture:
+
+  | Role | Examples | How it joins |
+  |---|---|---|
+  | Original | the scan, the camera RAW | the photo the picture is built around |
+  | Pass | `<name>_IR.tif(f)`, `<name>_IR_VALID.tif(f)` beside `<name>.tif(f)` (NegPy's rule, case-insensitive); the JPEG of a RAW+JPEG pair | by name, at import / sync / add |
+  | Edit | `<name>_NegPy.*`, `<name>_LuminarNeo-edit[_n].tif` | Edit In, or by name (edits made outside the app) |
+  | Copy | virtual copies | Create Virtual Copy |
+  | Export | exports added with "Add to Stack" | Export |
+
+  Edits, copies and exports record the member they were made **from** (for "compare with
+  original", whatever the order).
+- **Group**: pictures put together by hand (bursts, brackets, panorama frames). Optional:
+  most pictures are in no group.
+- **Unit**: what the grid shows as one cell — a group, or a picture in no group.
+- **Active**: each picture has an active member, each group an active picture. The unit's
+  cell shows the active member of the active picture.
+  - A new edit becomes the active member of its picture, and its picture the active one
+    of its group.
+  - Otherwise the original is active. The user changes it from the strip.
+
+### Behaviour
+
+- **Grid / filmstrip**: one cell per unit, always (no expanded stacks). Badge: member count
+  (and pictures, for a group); a marker when a filter matched a member that isn't shown.
+- **Filters and collections**: a unit is shown when any of its members matches / is in the
+  collection.
+- **Sorting**: by the active picture's original (keeps film rolls in frame order).
+- **Actions** (rating, flag, label, keywords, Edit In, export, compare) apply to the photo
+  shown: the active member in Grid, the member being viewed in Loupe.
+- **Version strip**: a row above the filmstrip whenever the current photo's unit has more
+  than one member. Members laid out by picture (dividers between pictures), each with its
+  role label (Original, IR, JPEG, NegPy, Luminar, Copy 1, Export); the active one marked.
+  - Click: view that member (Loupe shows it; the cover does not change).
+  - Double-click or Shift+S: make it active.
+  - Alt+← / Alt+→: previous / next member; arrows alone still move between units.
+  - "Compare with original": Compare view, original vs the viewed member.
+  - S: show / hide the strip.
+- **Grouping**: Ctrl+G groups the selected units (groups merge). Ctrl+Shift+G ungroups:
+  the pictures become units again; a picture's members stay together. "Detach from
+  Picture" makes a member a picture of its own (role Original).
+- **RAW+JPEG**: the JPEG becomes its own photo (role Pass) in the RAW's picture, with its
+  own metadata. Import's "treat JPEGs next to raws as separate photos" makes it a picture
+  of its own instead.
+
+### Catalog (schema v6)
+
+- `pictures (id, group_id → groups, group_pos, active_photo_id)`.
+- `groups (id, active_picture_id)`.
+- `photos`: `picture_id` (not null), `role`, `derived_from → photos`, `member_pos`.
+- Drop `stacks`, `photos.stack_id / stack_pos`, `files.sidecar_of` (pair JPEGs become photos).
+- Migration from v5, with tests on a v5 catalog containing pairs, virtual copies, stacks
+  and IR / NegPy / Luminar names:
+  - every photo gets its own picture;
+  - virtual copies join their master's picture (role Copy);
+  - pair JPEGs become Pass photos of the RAW's picture (keeping the photo's metadata);
+  - `_IR`, `_IR_VALID`, `_NegPy`, `_LuminarNeo-edit` files join their original's picture;
+  - existing stacks become groups (their top photo's picture active).
+
+### Steps
+
+1. Schema v6, migration and its tests.
+2. Catalog API: pictures, groups, roles, active members; the joining rules in sync,
+   import, add_files, Edit In, export and virtual copies; unit queries with any-member
+   filters and sorting (checked against the 10k-photo performance catalog).
+3. Grid and filmstrip: one cell per unit, badges; actions on the shown photo.
+4. Version strip: layout, viewing, make active, Alt+arrows, compare with original.
+5. Grouping commands and Detach from Picture; shortcuts, menus, `docs/SHORTCUTS.md`.
+6. Remove the old stack code; real-file check with scans + IR passes + NegPy edits.
