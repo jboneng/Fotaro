@@ -77,6 +77,7 @@ pub enum Action {
     ToggleFilters,
     Find,
     RemoveFromCollection,
+    DeleteRejected,
     NewCollection,
     /// Shift+arrows: extend the selection (by this many photos).
     ExtendSelection(isize),
@@ -274,6 +275,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(alt(K::ArrowLeft), A::PreviousMember, ORG, "Previous member of the stack"),
     s(alt(K::ArrowRight), A::NextMember, ORG, "Next member of the stack"),
     s(k(K::Delete), A::RemoveFromCollection, ORG, "Remove from collection (when viewing a collection)"),
+    s(ctrl(K::Backspace), A::DeleteRejected, ORG, "Delete rejected photos (remove them from the catalog)"),
     s(ctrl(K::L), A::ToggleFilters, VIEW, "Enable / disable Library filters"),
     s(ctrl(K::F), A::Find, VIEW, "Find (text filter)"),
     s(ctrl(K::K), A::Keywording, ORG, "Add keywords (Keywording panel)"),

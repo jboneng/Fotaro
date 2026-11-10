@@ -248,9 +248,23 @@ pub(crate) fn join(
           WHERE id = ?4",
         params![picture, role.as_str(), derived_from, photo],
     )?;
+    // Rating, flag and label belong to the stack: the newcomer takes them.
+    take_stack_marks(conn, photo, to)?;
     if make_active {
         set_active_in(conn, photo)?;
     }
+    Ok(())
+}
+
+/// Give `photo` the rating, flag and colour label of `from` (marked for the sidecar).
+fn take_stack_marks(conn: &Connection, photo: i64, from: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE photos SET (rating, flag, color_label, metadata_dirty) =
+                (SELECT rating, flag, color_label, 1 FROM photos WHERE id = ?1)
+          WHERE id = ?2 AND (rating, flag, coalesce(color_label, '')) IS NOT
+                (SELECT rating, flag, coalesce(color_label, '') FROM photos WHERE id = ?1)",
+        params![from, photo],
+    )?;
     Ok(())
 }
 
@@ -348,6 +362,17 @@ impl Catalog {
                 params![group, pos as i64, p],
             )?;
         }
+        // One stack, one rating, flag and label: the first photo's.
+        let first = photo_ids[0];
+        let members: Vec<i64> = tx
+            .prepare(
+                "SELECT p.id FROM photos p JOIN pictures pi ON pi.id = p.picture_id WHERE pi.group_id = ?1",
+            )?
+            .query_map([group], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for m in members {
+            take_stack_marks(&tx, m, first)?;
+        }
         tx.commit()?;
         Ok(group)
     }
@@ -393,6 +418,72 @@ impl Catalog {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Every photo in the stacks (units) of `photo_ids`, each once: what a rating, flag
+    /// or label set on a stack applies to.
+    pub fn unit_photo_ids(&self, photo_ids: &[i64]) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT m.id FROM photos p
+               JOIN pictures pi ON pi.id = p.picture_id
+               JOIN pictures mp ON mp.id = pi.id OR (pi.group_id IS NOT NULL AND mp.group_id = pi.group_id)
+               JOIN photos m    ON m.picture_id = mp.id
+              WHERE p.id = ?1",
+        )?;
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &id in photo_ids {
+            for m in stmt.query_map([id], |r| r.get::<_, i64>(0))? {
+                let m = m?;
+                if seen.insert(m) {
+                    out.push(m);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The rejected photos of `source` (whatever the filter), for Delete Rejected Photos.
+    pub fn rejected_in(&self, source: crate::Source) -> Result<Vec<i64>> {
+        let mut args = Vec::new();
+        let cond = self.source_condition(source, &mut args)?;
+        let sql = format!(
+            "SELECT p.id {} WHERE p.flag = -1 AND ({cond}) ORDER BY p.id",
+            crate::catalog::PHOTOS_FROM
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let ids = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Remove photos from the catalog; their files stay on disk. A photo goes with its
+    /// file's catalog entry (and so with its virtual copies), so a later sync or import
+    /// finds the file again; a virtual copy goes alone. Returns the ids of the photos
+    /// whose previews can go (copies share their master's).
+    pub fn remove_photos(&mut self, photo_ids: &[i64]) -> Result<Vec<i64>> {
+        let tx = self.conn.transaction()?;
+        let mut previews = Vec::new();
+        for &id in photo_ids {
+            let row: Option<(i64, bool)> = tx
+                .query_row(
+                    "SELECT master_file_id, virtual_of IS NOT NULL FROM photos WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match row {
+                None => {}
+                Some((_, true)) => {
+                    tx.execute("DELETE FROM photos WHERE id = ?1", [id])?;
+                }
+                Some((file, false)) => {
+                    tx.execute("DELETE FROM files WHERE id = ?1", [file])?;
+                    previews.push(id);
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(previews)
     }
 
     /// Every photo of the unit `photo_id` is in, picture by picture (the group's order),

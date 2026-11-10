@@ -109,6 +109,7 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `Alt+←` | Previous member of the stack | ✅ |
 | `Alt+→` | Next member of the stack | ✅ |
 | `Delete` | Remove from collection (when viewing a collection) | ✅ |
+| `Ctrl+Backspace` | Delete rejected photos (remove them from the catalog) | ✅ |
 
 ## View
 

@@ -332,6 +332,8 @@ pub enum Command {
     CloseExport,
     CancelExport,
     DeleteVirtualCopies(Vec<i64>),
+    /// Remove photos from the catalog (files stay on disk).
+    RemovePhotos(Vec<i64>),
     /// Photos dropped on the Quick Collection.
     QuickCollectionAdd(Vec<i64>),
     Reveal(PathBuf),
@@ -1173,10 +1175,18 @@ impl PhotoLibraryApp {
         advance: bool,
     ) {
         let Some(s) = &mut self.session else { return };
-        let ids = s.targets(self.view);
-        if ids.is_empty() {
+        let targets = s.targets(self.view);
+        if targets.is_empty() {
             return;
         }
+        // Rating, flag and label belong to the stack: every member of the targets' stacks.
+        let ids = match s.catalog.unit_photo_ids(&targets) {
+            Ok(ids) => ids,
+            Err(e) => {
+                self.error = Some(format!("{e:#}"));
+                return;
+            }
+        };
         for id in &ids {
             if let Err(e) = f(&s.catalog, *id) {
                 self.error = Some(format!("{e:#}"));
@@ -1184,7 +1194,7 @@ impl PhotoLibraryApp {
             }
         }
         s.update_rows(&ids, update);
-        let n = ids.len();
+        let n = targets.len();
         self.metadata_changed(&ids);
         if advance {
             self.step(1);
@@ -1450,6 +1460,20 @@ impl PhotoLibraryApp {
                 self.focus_find = true;
                 self.view = View::Grid;
             }
+            Action::DeleteRejected => {
+                let Some(s) = &self.session else { return };
+                match s.catalog.rejected_in(s.source) {
+                    Ok(ids) if ids.is_empty() => {
+                        let msg = format!("No rejected photos in {}", s.source_label());
+                        self.notify(msg);
+                    }
+                    Ok(ids) => {
+                        let source = s.source_label();
+                        self.dialog = Some(Dialog::ConfirmRemoveRejected { ids, source });
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
             Action::RemoveFromCollection => {
                 let view = self.view;
                 let Some(s) = &mut self.session else { return };
@@ -1461,7 +1485,7 @@ impl PhotoLibraryApp {
                         .filter(|id| s.index_of.get(id).is_some_and(|&i| s.photos[i].virtual_copy.is_some()))
                         .collect();
                     if copies.is_empty() {
-                        self.notify("Delete removes virtual copies, or photos from a collection; removing photos from the catalog arrives later");
+                        self.notify("Delete removes virtual copies, or photos from a collection; Photo ▸ Delete Rejected Photos removes rejected ones from the catalog");
                     } else {
                         self.dialog = Some(Dialog::ConfirmDeleteVirtualCopies { ids: copies });
                     }
@@ -2349,6 +2373,27 @@ impl PhotoLibraryApp {
                     self.notify("Stopping the export after the photos being written");
                 }
             }
+            Command::RemovePhotos(ids) => {
+                let Some(s) = &mut self.session else { return };
+                let result = s.catalog.remove_photos(&ids).and_then(|previews| {
+                    s.refresh_tree()?;
+                    s.reload_photos()?;
+                    s.collections_changed()?;
+                    Ok(previews)
+                });
+                match result {
+                    Ok(previews) => {
+                        s.jobs.submit_normal(Job::PurgePreviews { photo_ids: previews });
+                        s.meta_gen += 1;
+                        let n = ids.len();
+                        self.notify(format!(
+                            "Removed {n} photo{} from the catalog (the files are still on disk)",
+                            if n == 1 { "" } else { "s" }
+                        ));
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
             Command::DeleteVirtualCopies(ids) => {
                 let Some(s) = &mut self.session else { return };
                 match s
@@ -2562,6 +2607,10 @@ pub enum Dialog {
     },
     ConfirmDeleteVirtualCopies {
         ids: Vec<i64>,
+    },
+    ConfirmRemoveRejected {
+        ids: Vec<i64>,
+        source: String,
     },
     NewCollection {
         parent: Option<i64>,

@@ -971,6 +971,16 @@ pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             text.push_str(&format!("  /  {}", p.file_name));
         }
         ui.label(RichText::new(text).size(11.5).color(theme::TEXT));
+        // The version strip is hidden: a way back to it for a photo in a stack.
+        let members = s.active_photo().map_or(0, |p| p.unit.members);
+        if members > 1 && !app.ui.show_version_strip {
+            ui.add_space(8.0);
+            let b =
+                ui.small_button(format!("Stack: {members} ▴")).on_hover_text("Show the version strip (S)");
+            if b.clicked() {
+                app.ui.show_version_strip = true;
+            }
+        }
     });
 
     let height = (ui.available_height() - 4.0).max(30.0);
@@ -1279,6 +1289,9 @@ pub fn version_strip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
+            if ui.button("Hide").on_hover_text("Hide the version strip (S)").clicked() {
+                actions.push(Action::ToggleStack);
+            }
             if ui.button("Compare with Original").clicked() {
                 actions.push(Action::CompareWithOriginal);
             }

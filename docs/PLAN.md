@@ -429,5 +429,12 @@ This replaces them. Decided with the user:
       Original (Before / After, zoom linked).
 - [x] Photo ▸ Stacking: Group Pictures (Ctrl+G), Ungroup (Ctrl+Shift+G), Show for the Stack,
       Previous / Next Member, Compare with Original, Detach from Picture, Show Version Strip.
+- [x] Rating, flag and colour label belong to the stack: set on every member of the target
+      stacks (all pictures of a group); a newcomer (edit, pass, copy) takes the stack's; grouping
+      gives every picture the first one's. Keywords and IPTC stay per photo.
+- [x] Version strip: View ▸ Show Version Strip, Photo ▸ Stacking, S, a Hide button on the strip,
+      and "Stack: n ▴" in the filmstrip header while it is hidden.
+- [x] Photo ▸ Delete Rejected Photos… (Ctrl+Backspace): the current source's rejected photos
+      leave the catalog after asking; files stay on disk (and come back with a sync or import).
 - [ ] To check by hand: the version strip and Compare with Original in the app (automated
       keystrokes were stopped while the PC was in use).

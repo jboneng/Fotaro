@@ -1,7 +1,8 @@
 //! Virtual copies (LrC Photo ▸ Create Virtual Copy, Ctrl+'): more photos of the same
-//! file, each with its own rating, flag, keywords and collections. A copy starts with
-//! its master's keywords, label, IPTC fields and rotation, and is a member of its
-//! picture (role Copy). Only the master writes an XMP sidecar.
+//! file, each with its own keywords, IPTC fields and collections. A copy starts with its
+//! master's keywords, IPTC fields and rotation, and is a member of its picture (role
+//! Copy), sharing the stack's rating, flag and label. Only the master writes an XMP
+//! sidecar.
 
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
@@ -129,13 +130,17 @@ mod tests {
         assert_eq!(members[2].derived_from, Some(c1));
         let photos: Vec<_> = members.into_iter().map(|m| m.photo).collect();
         let copy = photos.iter().find(|p| p.id == c1).unwrap();
-        assert_eq!((copy.rating, copy.flag, copy.color_label.as_deref()), (0, Flag::Unflagged, Some("red")));
+        assert_eq!(
+            (copy.rating, copy.flag, copy.color_label.as_deref()),
+            (4, Flag::Picked, Some("red")),
+            "the stack's marks"
+        );
         assert_eq!(copy.path, photos[0].path, "same file");
         assert_eq!(cat.photo_keywords(c1).unwrap(), vec![vec!["Film".to_string()]]);
         assert_eq!(cat.iptc(c1).unwrap().title.as_deref(), Some("Hegra"));
         assert_eq!((copy.unit.members, copy.unit.role), (3, crate::Role::Copy));
 
-        // Own metadata from here on.
+        // Each photo still stores its own (the app sets a stack's marks on all of them).
         cat.set_rating(c1, 1).unwrap();
         assert_eq!(cat.photo(a).unwrap().unwrap().rating, 4);
 

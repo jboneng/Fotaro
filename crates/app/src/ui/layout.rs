@@ -200,6 +200,8 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let auto = app.ui.auto_advance;
             menu_toggle(ui, app, "Auto Advance", auto, Action::ToggleAutoAdvance);
             ui.separator();
+            menu_action(ui, app, "Delete Rejected Photos…", Action::DeleteRejected);
+            ui.separator();
             ui.menu_button("Edit In", |ui| super::edit_in::menu(ui, app));
         });
         ui.menu_button("Metadata", |ui| {
@@ -249,6 +251,8 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.menu_button("Panels", |ui| {
                 menu_toggle(ui, app, "Show Module Picker", app.ui.show_top, Action::ToggleTopPanel);
                 menu_toggle(ui, app, "Show Filmstrip", app.ui.show_filmstrip, Action::ToggleFilmstrip);
+                let strip = app.ui.show_version_strip;
+                menu_toggle(ui, app, "Show Version Strip", strip, Action::ToggleStack);
                 menu_toggle(ui, app, "Show Left Panels", app.ui.show_left, Action::ToggleLeftPanel);
                 menu_toggle(ui, app, "Show Right Panels", app.ui.show_right, Action::ToggleRightPanel);
                 ui.separator();
@@ -681,6 +685,7 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
         Dialog::ConfirmDeleteCollection { .. } => "Delete",
         Dialog::EditSmartCollection { .. } => "Edit Smart Collection",
         Dialog::ConfirmDeleteVirtualCopies { .. } => "Delete Virtual Copies",
+        Dialog::ConfirmRemoveRejected { .. } => "Delete Rejected Photos",
     };
     egui::Window::new(title)
         .collapsible(false)
@@ -845,6 +850,29 @@ fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
                                 name: name.trim().to_owned(),
                                 rules: rules.clone(),
                             });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::ConfirmRemoveRejected { ids, source } => {
+                    let n = ids.len();
+                    ui.label(
+                        RichText::new(format!(
+                            "Remove {n} rejected photo{} in {source} from the catalog?",
+                            if n == 1 { "" } else { "s" }
+                        ))
+                        .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        "Their ratings, keywords and collections go with them. The files stay on disk: \n                         Synchronize Folder or Import brings them back.",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Remove from Catalog").clicked() {
+                            run = Some(Command::RemovePhotos(ids.clone()));
                         }
                         if ui.button("Cancel").clicked() {
                             close = true;

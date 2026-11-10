@@ -385,7 +385,7 @@ impl Catalog {
     }
 
     /// SQL condition selecting a source's photos (parameters appended to `args`).
-    fn source_condition(&self, source: Source, args: &mut Vec<Value>) -> Result<String> {
+    pub(crate) fn source_condition(&self, source: Source, args: &mut Vec<Value>) -> Result<String> {
         let mut bind = |v: Value| {
             args.push(v);
             format!("?{}", args.len())

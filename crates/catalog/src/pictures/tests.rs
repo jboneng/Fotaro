@@ -291,3 +291,52 @@ fn migration_from_v5() {
     let groups: i64 = cat.conn.query_row("SELECT COUNT(*) FROM groups", [], |r| r.get(0)).unwrap();
     assert_eq!(groups, 1, "only the bracket is still a group");
 }
+
+#[test]
+fn marks_belong_to_the_stack() {
+    let mut fx = fixture(&["a.tif", "a_IR.tif", "b.tif", "c.tif"]);
+    let (a, ir, b, c) =
+        (id(&fx.cat, "a.tif"), id(&fx.cat, "a_IR.tif"), id(&fx.cat, "b.tif"), id(&fx.cat, "c.tif"));
+    let mut unit = fx.cat.unit_photo_ids(&[ir]).unwrap();
+    unit.sort();
+    assert_eq!(unit, [a, ir]);
+
+    // A newcomer takes the stack's rating, flag and label.
+    fx.cat.set_rating(b, 4).unwrap();
+    fx.cat.set_flag(b, crate::Flag::Picked).unwrap();
+    fx.cat.set_color_label(b, Some("red")).unwrap();
+    std::fs::write(fx.dir.join("b_NegPy.tif"), b"x").unwrap();
+    fx.cat.sync_folder(&fx.dir).unwrap();
+    let edit = fx.cat.photo(id(&fx.cat, "b_NegPy.tif")).unwrap().unwrap();
+    assert_eq!((edit.rating, edit.flag, edit.color_label.as_deref()), (4, crate::Flag::Picked, Some("red")));
+
+    // Grouping gives every picture the first one's marks; the unit spans the group.
+    fx.cat.group_photos(&[b, a]).unwrap();
+    let all = fx.cat.unit_photo_ids(&[a]).unwrap();
+    assert_eq!(all.len(), 4);
+    assert!(all.iter().all(|&m| fx.cat.photo(m).unwrap().unwrap().rating == 4));
+    assert_eq!(fx.cat.photo(c).unwrap().unwrap().rating, 0, "other stacks are left alone");
+}
+
+#[test]
+fn rejected_photos_leave_the_catalog_but_not_the_disk() {
+    let mut fx = fixture(&["a.tif", "a_IR.tif", "b.tif", "c.tif"]);
+    let (a, ir, b) = (id(&fx.cat, "a.tif"), id(&fx.cat, "a_IR.tif"), id(&fx.cat, "b.tif"));
+    let copy = fx.cat.create_virtual_copy(b).unwrap();
+    for p in [a, ir, copy] {
+        fx.cat.set_flag(p, crate::Flag::Rejected).unwrap();
+    }
+    let rejected = fx.cat.rejected_in(Source::AllPhotographs).unwrap();
+    assert_eq!(rejected, [a, ir, copy]);
+    let previews = fx.cat.remove_photos(&rejected).unwrap();
+    assert_eq!(previews, [a, ir], "the copy shares its master's previews");
+    let mut g = grid(&fx.cat);
+    g.sort();
+    assert_eq!(g, [("b.tif".to_owned(), 1), ("c.tif".to_owned(), 1)]);
+    assert!(fx.dir.join("a.tif").exists() && fx.dir.join("a_IR.tif").exists(), "files stay");
+
+    // The files can come back: a sync finds them again.
+    let r = fx.cat.sync_folder(&fx.dir).unwrap();
+    assert_eq!(r.added, 2);
+    assert!(grid(&fx.cat).contains(&("a.tif".into(), 2)), "joined again");
+}
