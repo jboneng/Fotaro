@@ -94,7 +94,8 @@ This is a top-level requirement, not polish. Every phase is judged against "woul
 - UX check: unit tests on the shortcut table (no duplicate bindings; every entry in `docs/SHORTCUTS.md` is bound). Manual walkthrough: the layout matches LrC's regions, and Tab, Shift+Tab, T, \ and Alt-click solo mode behave as they do in LrC.
 
 ## Open items to verify later
-- How NegPy is launched from the command line or by file association (needed for Phase 7).
+- ~~How NegPy is launched from the command line~~: `NegPy <files> --format … --output-dir … --filename …
+  [--quit-after-export]` (NegPy's launch support, in its source; releases after 0.68.0).
 - How Luminar Neo writes back its result (same folder as the original or a separate export path?).
 
 ## Progress (Phase 0)
@@ -250,6 +251,22 @@ building; revisit with 1:1 previews in Phase 2.
 - [x] 1:1 quality: request the GPU's real texture limit (32768 px here instead of egui's 8192),
       so very large scans show at full resolution.
 - [ ] Later: Compare zoom unlinking (LrC's lock), Survey drag-reordering, renaming virtual copies.
+
+## Progress (Phase 7: NegPy)
+- [x] Photo ▸ Edit In ▸ Edit in NegPy… (Ctrl+E, also in the photo context menu) opens the selected
+      originals in NegPy with an export recipe: TIFF / JPEG / PNG, 8 or 16 bits, colour space,
+      exported next to the original as `<name>_NegPy`. One launch per folder; later launches hand
+      their files to the running NegPy. A single photo closes NegPy after its export.
+- [x] NegPy is found without setup: a release newer than 0.68.0 (registry, Program Files,
+      /Applications, PATH), else a source checkout with launch support and a `.venv` in the usual
+      development folders (or `NEGPY_SOURCE`). Edit ▸ External Editing Settings… shows what was found
+      and lets you choose a folder or program instead.
+- [x] Results are found by name and by their change time (NegPy stamps exports with the original's
+      modified time), taken once two looks see the same version, added to the catalog with the
+      original's rating, label, IPTC and keywords, and stacked right below it. Exporting again from
+      NegPy updates the photo, its metadata and its previews. NegPy launch failures are reported.
+- [x] Checked end to end with NegPy from source: launch, recipe, both results added and stacked.
+- [ ] Later: Luminar.
 
 ## Progress (Phase 8)
 - [x] Export dialog (File ▸ Export…, Ctrl+Shift+E, photo context menu) laid out like LrC's:

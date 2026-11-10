@@ -24,7 +24,7 @@ use catalog::Flag;
 const TOAST_TIME: Duration = Duration::from_millis(1400);
 
 /// Shortcut label for an action, for display next to menu items.
-fn shortcut_for(action: Action) -> Option<String> {
+pub(super) fn shortcut_for(action: Action) -> Option<String> {
     SHORTCUTS.iter().find(|s| s.action == action).map(|s| s.binding.label())
 }
 
@@ -87,6 +87,8 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         ui.menu_button("Edit", |ui| {
             menu_action(ui, app, "Select All", Action::SelectAll);
             menu_action(ui, app, "Select None", Action::SelectNone);
+            ui.separator();
+            menu_cmd(ui, app, "External Editing Settings…", true, Command::OpenEditSettings);
         });
         ui.menu_button("Library", |ui| {
             let sync = folder_source.map_or(Command::Planned("", ""), Command::SyncFolder);
@@ -191,11 +193,7 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let auto = app.ui.auto_advance;
             menu_toggle(ui, app, "Auto Advance", auto, Action::ToggleAutoAdvance);
             ui.separator();
-            ui.menu_button("Edit In", |ui| {
-                menu_action(ui, app, "Edit in Default Editor…", Action::EditIn);
-                menu_cmd(ui, app, "Edit in NegPy…", false, Command::Planned("", ""));
-                menu_cmd(ui, app, "Edit in Luminar…", false, Command::Planned("", ""));
-            });
+            ui.menu_button("Edit In", |ui| super::edit_in::menu(ui, app));
         });
         ui.menu_button("Metadata", |ui| {
             menu_action(ui, app, "Add Keywords…", Action::Keywording);
@@ -572,6 +570,7 @@ fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
     dialogs(app, ctx);
     super::import::window(app, ctx);
     super::export::window(app, ctx);
+    super::edit_in::window(app, ctx);
 
     if let Some(err) = app.error.clone() {
         let mut open = true;

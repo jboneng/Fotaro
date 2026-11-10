@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use catalog::{Catalog, FileKind, PhotoMetadata, PhotoRow, SyncReport};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -101,6 +101,15 @@ pub enum Job {
         photo_ids: Vec<i64>,
         prefs: Box<crate::export::ExportPrefs>,
     },
+    /// Edit In: look for NegPy results next to the originals sent to it.
+    CheckEdits {
+        watches: Vec<crate::editors::EditWatch>,
+    },
+    /// Edit In: bring a result into the catalog, stacked below its original.
+    AddEdited {
+        original: i64,
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,7 +131,9 @@ impl Job {
             | Job::ReadXmp { .. }
             | Job::ImportScan { .. }
             | Job::Import { .. }
-            | Job::Export { .. } => None,
+            | Job::Export { .. }
+            | Job::CheckEdits { .. }
+            | Job::AddEdited { .. } => None,
             Job::ImportThumb { key, .. } => Some(JobKey::ImportThumb(*key)),
             Job::Load { photo, size } => Some(JobKey::Load(photo.id, *size)),
             Job::BuildPreviews { photo } => Some(JobKey::Build(photo.id)),
@@ -199,6 +210,15 @@ pub enum Event {
         result: Result<crate::export::ExportReport, String>,
         /// Post-processing: the folder to show in Explorer / Finder.
         reveal: Option<PathBuf>,
+    },
+    EditsChecked {
+        found: Vec<(i64, PathBuf, crate::editors::FileVersion)>,
+    },
+    /// A NegPy result is in the catalog: `Ok((photo id, new))`, `new` false when it was
+    /// already there and was exported again.
+    EditAdded {
+        path: PathBuf,
+        result: Result<(i64, bool), String>,
     },
     /// Sidecars were written (`read: false`) or read for these photos.
     XmpDone {
@@ -642,6 +662,16 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                 .events
                 .send(Event::ExportDone { result: result.map_err(|e| format!("{e:#}")), reveal });
         }
+        Job::CheckEdits { watches } => {
+            let found = crate::editors::scan(&watches);
+            let _ = shared.events.send(Event::EditsChecked { found });
+            shared.ctx.request_repaint();
+        }
+        Job::AddEdited { original, path } => {
+            let result = add_edited(shared, cat, original, &path).map_err(|e| format!("{e:#}"));
+            let _ = shared.events.send(Event::EditAdded { path, result });
+            shared.ctx.request_repaint();
+        }
         Job::ReadGps => read_gps_batch(shared, cat),
         Job::PurgeOrphanPreviews => {
             let started = std::time::Instant::now();
@@ -710,6 +740,46 @@ fn sync_and_queue(shared: &Shared, cat: &mut Catalog, root: &std::path::Path) ->
 }
 
 /// Write (or read) XMP sidecars for `photo_ids` and report back to the UI.
+/// [`Job::AddEdited`]: add (or update) a NegPy result. A new one gets its original's
+/// catalog metadata and goes right below it in a stack, as LrC's Edit In does.
+fn add_edited(
+    shared: &Shared,
+    cat: &mut Catalog,
+    original: i64,
+    path: &std::path::Path,
+) -> Result<(i64, bool)> {
+    let path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let known = cat.photo_ids_for_paths(std::slice::from_ref(&path))?.first().copied();
+    let reader = |p: &std::path::Path, kind: FileKind| {
+        imaging::read_metadata(p, source_kind(kind)).ok().map(to_catalog_metadata)
+    };
+    let id = cat.add_files(std::slice::from_ref(&path), Some(&reader))?.first().copied().flatten();
+    let id = id.with_context(|| format!("{} could not be added", path.display()))?;
+    let new = known.is_none();
+    if !new && let Some(row) = cat.photo(id)? {
+        // Sync goes by size and modified time, which a new version may share with the
+        // old one (see below); its dimensions may still have changed.
+        if let Some(m) = reader(&row.path, row.kind) {
+            cat.set_metadata(id, &m)?;
+        }
+    }
+    if new && cat.photo(original)?.is_some() {
+        cat.copy_metadata(original, id)?;
+        cat.stack_below(original, id)?;
+    }
+    if let Some(row) = cat.photo(id)? {
+        let photo = PhotoRef::from(&row);
+        if !new {
+            // NegPy gives every export of an original the same modified time, so a new
+            // version can have the same size and date as the old: drop the old previews.
+            shared.cache.remove(photo.cache_id);
+        }
+        submit(shared, Job::BuildPreviews { photo }, Lane::Visible);
+    }
+    log::info!("Edit In: {} {}", if new { "added" } else { "updated" }, path.display());
+    Ok((id, new))
+}
+
 /// One batch of [`Job::ReadGps`]: read the files' GPS, store it, queue the next batch.
 fn read_gps_batch(shared: &Shared, cat: &mut Catalog) {
     const BATCH: usize = 200;

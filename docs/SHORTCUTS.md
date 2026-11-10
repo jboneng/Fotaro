@@ -121,7 +121,7 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 |---|---|---|
 | `Ctrl+K` | Add keywords (Keywording panel) | ✅ |
 | `Ctrl+S` | Save metadata to files (XMP sidecars) | ✅ |
-| `Ctrl+E` | Edit in default external editor | planned (Phase 7) |
+| `Ctrl+E` | Edit in NegPy | ✅ |
 | `Ctrl+/` | Show keyboard shortcuts | ✅ |
 
 ## Auto Advance

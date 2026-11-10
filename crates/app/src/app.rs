@@ -174,6 +174,8 @@ pub struct UiState {
     pub export: crate::export::ExportPrefs,
     /// The user's export presets (app-wide, like LrC's).
     pub export_presets: Vec<crate::export::ExportPreset>,
+    /// External Editing settings (Edit In).
+    pub edit_in: crate::editors::EditInPrefs,
 }
 
 impl Default for UiState {
@@ -200,6 +202,7 @@ impl Default for UiState {
             import: crate::import::ImportPrefs::default(),
             export: crate::export::ExportPrefs::default(),
             export_presets: Vec::new(),
+            edit_in: crate::editors::EditInPrefs::default(),
         }
     }
 }
@@ -311,6 +314,10 @@ pub enum Command {
     StartImport,
     CloseImport,
     CancelImport,
+    /// Photo ▸ Edit In ▸ Edit in NegPy (Ctrl+E) for the selected photos.
+    EditInNegPy,
+    /// External Editing settings (NegPy location, file format).
+    OpenEditSettings,
     /// File ▸ Export… for the selected photos.
     OpenExport,
     /// File ▸ Export with Previous: no dialog.
@@ -421,6 +428,8 @@ pub struct Session {
     pub import: Option<crate::import::ImportDialog>,
     /// The Export dialog, while open.
     pub export: Option<crate::ui::export::ExportDialog>,
+    /// Photos sent to NegPy, and its results being looked for.
+    pub edits: crate::editors::EditTracker,
     /// Photo pixel sizes (as stored), read on demand for views showing several photos.
     dims: HashMap<i64, Option<egui::Vec2>>,
     pub source: Source,
@@ -470,6 +479,7 @@ impl Session {
             facets: None,
             import: None,
             export: None,
+            edits: Default::default(),
             dims: HashMap::new(),
             source: Source::AllPhotographs,
             sort,
@@ -881,6 +891,31 @@ impl Session {
                     }
                     Err(e) => messages.push(format!("Export failed: {e}")),
                 },
+                Event::EditsChecked { found } => {
+                    for (original, path) in self.edits.checked(found) {
+                        self.jobs.submit_normal(Job::AddEdited { original, path });
+                    }
+                }
+                Event::EditAdded { path, result } => {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    match result {
+                        Ok((id, new)) => {
+                            for cache in [&mut self.thumbs, &mut self.previews, &mut self.full] {
+                                cache.invalidate(id);
+                            }
+                            self.dims.remove(&id);
+                            self.histograms.remove(&id);
+                            self.metadata = None;
+                            self.meta_gen += 1;
+                            if let Err(e) = self.refresh_tree().and_then(|()| self.reload_photos()) {
+                                messages.push(format!("Catalog error: {e:#}"));
+                            }
+                            let verb = if new { "Added" } else { "Updated" };
+                            messages.push(format!("{verb} {name} from NegPy"));
+                        }
+                        Err(e) => messages.push(format!("Could not add {name} from NegPy: {e}")),
+                    }
+                }
                 Event::XmpDone { read, quiet, done, skipped, failed } => {
                     if read {
                         // Ratings, labels, rotation, keywords... may all have changed.
@@ -950,6 +985,10 @@ pub struct PhotoLibraryApp {
     /// The open modal dialog, if any.
     pub dialog: Option<Dialog>,
     pub commands: Vec<Command>,
+    /// NegPy as last detected (`None`: not looked for yet, or settings changed).
+    pub negpy: Option<Result<crate::editors::NegPy, String>>,
+    /// The External Editing settings window is open.
+    pub edit_settings: bool,
     /// Rects of panels drawn this frame (dimmed by Lights Out).
     pub panel_rects: Vec<egui::Rect>,
     /// Grid geometry from the last frame, for Up/Down and scroll-to-active.
@@ -981,6 +1020,8 @@ impl PhotoLibraryApp {
             error: None,
             dialog: None,
             commands: Vec::new(),
+            negpy: None,
+            edit_settings: false,
             panel_rects: Vec::new(),
             grid_cols: 1,
             grid_rows_visible: 1,
@@ -1367,7 +1408,7 @@ impl PhotoLibraryApp {
                 }
             }
             Action::CreateVirtualCopy => self.create_virtual_copies(),
-            Action::EditIn => {}
+            Action::EditIn => self.execute(ctx, Command::EditInNegPy),
         }
     }
 
@@ -2044,6 +2085,52 @@ impl PhotoLibraryApp {
                     self.notify("Stopping the import after the current photo");
                 }
             }
+            Command::EditInNegPy => {
+                if self.session.is_none() {
+                    self.notify("Open or create a catalog first");
+                    return;
+                }
+                // Look again each time: NegPy may have been installed or updated meanwhile.
+                self.negpy = Some(crate::editors::detect(self.ui.edit_in.negpy_location.as_deref()));
+                if let Some(Err(why)) = &self.negpy {
+                    let why = why.clone();
+                    self.notify(format!(
+                        "Can't edit in NegPy: {why}. Set its location in External Editing settings."
+                    ));
+                    self.edit_settings = true;
+                    return;
+                }
+                let view = self.view;
+                let Some(s) = &mut self.session else { return };
+                let ids = s.targets(view);
+                let rows: Vec<PhotoRow> =
+                    ids.iter().filter_map(|id| s.catalog.photo(*id).ok().flatten()).collect();
+                let originals: Vec<(i64, PathBuf)> = rows
+                    .iter()
+                    .filter(|r| !r.missing && r.path.is_file())
+                    .map(|r| (r.id, r.path.clone()))
+                    .collect();
+                if originals.is_empty() {
+                    self.notify(if rows.is_empty() {
+                        "Select the photos to edit"
+                    } else {
+                        "The selected photos' files are missing"
+                    });
+                    return;
+                }
+                let n = originals.len();
+                s.edits.enqueue(crate::editors::plan_launches(&originals));
+                let skipped = rows.len() - n;
+                let mut msg = format!("Opening {n} photo{} in NegPy", if n == 1 { "" } else { "s" });
+                if skipped > 0 {
+                    msg += &format!(" ({skipped} missing, skipped)");
+                }
+                self.notify(msg + "; its exports come back stacked with the originals");
+            }
+            Command::OpenEditSettings => {
+                self.negpy = None;
+                self.edit_settings = true;
+            }
             Command::OpenExport => {
                 let view = self.view;
                 let Some(s) = &mut self.session else {
@@ -2188,6 +2275,21 @@ impl eframe::App for PhotoLibraryApp {
             s.full.begin_frame();
             for msg in s.process_events(&ctx) {
                 self.toast = Some(Toast { text: msg, at: Instant::now() });
+            }
+            if !s.edits.is_idle() {
+                // NegPy launches waiting their turn, and results to look for.
+                if self.negpy.is_none() {
+                    self.negpy = Some(crate::editors::detect(self.ui.edit_in.negpy_location.as_deref()));
+                }
+                if let Some(Ok(negpy)) = &self.negpy {
+                    for msg in s.edits.tick(negpy, &self.ui.edit_in) {
+                        self.toast = Some(Toast { text: msg, at: Instant::now() });
+                    }
+                }
+                if let Some(watches) = s.edits.due_check() {
+                    s.jobs.submit_normal(Job::CheckEdits { watches });
+                }
+                ctx.request_repaint_after(Duration::from_secs(1));
             }
             // Apply Library Filter changes.
             let wanted = self.ui.filter.criterion();

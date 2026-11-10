@@ -68,6 +68,28 @@ impl Catalog {
         Ok(())
     }
 
+    /// Give `to` the catalog metadata of `from`: rating, label, title, caption, creator,
+    /// copyright and keywords (LrC's Edit In copies them to the edited file). Flags and
+    /// collections stay the photo's own.
+    pub fn copy_metadata(&mut self, from: i64, to: i64) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE photos SET (rating, color_label, title, caption, creator, copyright, metadata_dirty) =
+                    (SELECT rating, color_label, title, caption, creator, copyright, 1
+                       FROM photos WHERE id = ?1)
+              WHERE id = ?2 AND EXISTS (SELECT 1 FROM photos WHERE id = ?1)",
+            params![from, to],
+        )?;
+        anyhow::ensure!(changed == 1, "photo not found");
+        tx.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id)
+             SELECT ?2, keyword_id FROM photo_keywords WHERE photo_id = ?1",
+            params![from, to],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete virtual copies (masters in `photo_ids` are ignored). Returns how many
     /// were deleted. Their file stays: it belongs to the master.
     pub fn delete_virtual_copies(&mut self, photo_ids: &[i64]) -> Result<usize> {
@@ -191,6 +213,34 @@ mod tests {
         let removed = cat.remove_folder(folder).unwrap();
         assert!(removed.contains(&c3), "{removed:?}");
         assert!(cat.photos(Source::AllPhotographs).unwrap().is_empty());
+    }
+
+    #[test]
+    fn edited_files_get_the_originals_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("p");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("a.NEF"), b"x").unwrap();
+        std::fs::write(dir.join("a_NegPy.tif"), b"x").unwrap();
+        let mut cat = Catalog::create(tmp.path().join("c.plcat")).unwrap();
+        cat.sync_folder(&dir).unwrap();
+        let id = |cat: &Catalog, n: &str| {
+            cat.photos(Source::AllPhotographs).unwrap().into_iter().find(|p| p.file_name == n).unwrap()
+        };
+        let (a, e) = (id(&cat, "a.NEF").id, id(&cat, "a_NegPy.tif").id);
+        cat.set_rating(a, 3).unwrap();
+        cat.set_flag(a, Flag::Picked).unwrap();
+        cat.set_color_label(a, Some("green")).unwrap();
+        cat.set_iptc(&[a], crate::IptcField::Title, "Pier").unwrap();
+        let k = cat.create_keyword(None, "Film").unwrap();
+        cat.add_keyword(&[a], k).unwrap();
+        cat.copy_metadata(a, e).unwrap();
+        let edited = id(&cat, "a_NegPy.tif");
+        assert_eq!((edited.rating, edited.color_label.as_deref()), (3, Some("green")));
+        assert_eq!(edited.flag, Flag::Unflagged, "flags stay the photo's own");
+        assert_eq!(cat.xmp_data(e).unwrap().title.as_deref(), Some("Pier"));
+        assert_eq!(cat.photo_keywords(e).unwrap(), vec![vec!["Film".to_owned()]]);
+        assert!(cat.copy_metadata(a, 9999).is_err());
     }
 
     #[test]

@@ -82,6 +82,8 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Available,
+    // Every shortcut is available today; kept for features announced before they land.
+    #[allow(dead_code)]
     Planned(&'static str),
 }
 
@@ -120,6 +122,7 @@ pub struct Shortcut {
 const fn s(binding: Binding, action: Action, group: &'static str, description: &'static str) -> Shortcut {
     Shortcut { binding, action, group, description, status: Status::Available }
 }
+#[allow(dead_code)]
 const fn planned(
     binding: Binding,
     action: Action,
@@ -262,7 +265,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl(K::F), A::Find, VIEW, "Find (text filter)"),
     s(ctrl(K::K), A::Keywording, ORG, "Add keywords (Keywording panel)"),
     s(ctrl(K::S), A::SaveMetadata, ORG, "Save metadata to files (XMP sidecars)"),
-    planned(ctrl(K::E), A::EditIn, ORG, "Edit in default external editor", "Phase 7"),
+    s(ctrl(K::E), A::EditIn, ORG, "Edit in NegPy"),
     s(ctrl(K::Slash), A::ShowShortcuts, ORG, "Show keyboard shortcuts"),
 ];
 
