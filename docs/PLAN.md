@@ -274,6 +274,15 @@ building; revisit with 1:1 previews in Phase 2.
       Apply is reported. Ctrl+E opens the primary editor (External Editing settings), Ctrl+Alt+E the
       other.
 - [x] Checked: Luminar Neo 1.29 opens a NEF in its plug-in mode (Cancel / Apply) from these arguments.
+- [x] darktable (Photo ▸ Edit In ▸ Edit in darktable…): found in the registry / Program Files (with
+      darktable-cli). The originals open in one darktable window; when it closes, each photo whose
+      darktable sidecar (`photo.NEF.xmp`) changed is rendered with darktable-cli (16 or 8 bit TIFF,
+      sRGB / Adobe RGB / ProPhoto / Display P3) to `<name>_darktable.tif`, through a temporary file
+      (darktable-cli never overwrites; output paths need forward slashes). Unchanged photos and a
+      darktable that closes at once (already open) are reported. Settings: primary editor (Ctrl+E)
+      and secondary editor (Ctrl+Alt+E), as in LrC.
+- [x] Checked: darktable-cli 5.6.2 renders a NEF to 16-bit TIFF in each of the four colour spaces.
+- [ ] To check by hand: editing in the darktable window, closing it, the render coming back.
 - [ ] To check by hand: Apply in Luminar writes the result and it comes back stacked.
 
 ## Progress (Phase 8)

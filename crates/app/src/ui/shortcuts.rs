@@ -280,8 +280,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl(K::F), A::Find, VIEW, "Find (text filter)"),
     s(ctrl(K::K), A::Keywording, ORG, "Add keywords (Keywording panel)"),
     s(ctrl(K::S), A::SaveMetadata, ORG, "Save metadata to files (XMP sidecars)"),
-    s(ctrl(K::E), A::EditIn, ORG, "Edit in the primary external editor (NegPy or Luminar Neo)"),
-    s(ctrl_alt(K::E), A::EditInOther, ORG, "Edit in the other external editor"),
+    s(ctrl(K::E), A::EditIn, ORG, "Edit in the primary external editor"),
+    s(ctrl_alt(K::E), A::EditInOther, ORG, "Edit in the secondary external editor"),
     s(ctrl(K::Slash), A::ShowShortcuts, ORG, "Show keyboard shortcuts"),
 ];
 

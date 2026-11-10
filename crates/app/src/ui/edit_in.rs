@@ -7,7 +7,7 @@ use eframe::egui::{self, Align, Layout, RichText};
 
 use super::theme;
 use crate::app::{Command, PhotoLibraryApp};
-use crate::editors::{EditColorSpace, EditFormat, Editor, RESULT_SUFFIX, luminar};
+use crate::editors::{EditColorSpace, EditFormat, Editor, RESULT_SUFFIX, darktable, luminar};
 
 fn weak(text: impl Into<String>) -> RichText {
     RichText::new(text).color(theme::TEXT_WEAK)
@@ -53,6 +53,7 @@ fn location(
         let folder_hint = match editor {
             Editor::NegPy => "A NegPy source checkout, or the folder NegPy is installed in",
             Editor::Luminar => "The folder Luminar Neo is installed in",
+            Editor::Darktable => "The folder darktable is installed in (with darktable-cli)",
         };
         if ui.button("Choose Folder…").on_hover_text(folder_hint).clicked()
             && let Some(dir) = rfd::FileDialog::new().set_title(editor.label()).pick_folder()
@@ -92,7 +93,11 @@ pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
             for e in Editor::ALL {
                 ui.radio_value(&mut p.primary, e, e.label());
             }
-            ui.label(weak("(Ctrl+Alt+E the other)"));
+        });
+        row(ui, "Ctrl+Alt+E opens:", |ui| {
+            for e in Editor::ALL {
+                ui.radio_value(&mut p.secondary, e, e.label());
+            }
         });
         ui.add_space(6.0);
 
@@ -149,6 +154,35 @@ pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
                 luminar::RESULT_SUFFIX
             )));
         });
+        ui.add_space(6.0);
+
+        ui.label(RichText::new("darktable").strong().color(theme::TEXT_STRONG));
+        if location(ui, editors.get(&Editor::Darktable), Editor::Darktable, &mut p.darktable_location) {
+            changed.push(Editor::Darktable);
+        }
+        row(ui, "Bit Depth:", |ui| {
+            egui::ComboBox::from_id_salt("darktable_bits")
+                .selected_text(if p.darktable_sixteen_bit { "16 bits/component" } else { "8 bits/component" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut p.darktable_sixteen_bit, false, "8 bits/component");
+                    ui.selectable_value(&mut p.darktable_sixteen_bit, true, "16 bits/component");
+                });
+            ui.label(weak("Color Space:"));
+            egui::ComboBox::from_id_salt("darktable_color").selected_text(p.darktable_color_space.label()).show_ui(
+                ui,
+                |ui| {
+                    for c in EditColorSpace::ALL {
+                        ui.selectable_value(&mut p.darktable_color_space, c, c.label());
+                    }
+                },
+            );
+        });
+        row(ui, "", |ui| {
+            ui.label(weak(format!(
+                "darktable opens the originals; edit, then close darktable. Each photo you changed is \n                 rendered as \"<name>{}.tif\" (TIFF) next to the original.",
+                darktable::RESULT_SUFFIX
+            )));
+        });
         ui.add_space(4.0);
         row(ui, "", |ui| {
             ui.label(weak("Edits are added to the catalog with the original's metadata, stacked below it."));
@@ -177,11 +211,13 @@ pub fn menu(ui: &mut egui::Ui, app: &mut PhotoLibraryApp) {
     let primary = app.ui.edit_in.primary;
     for editor in Editor::ALL {
         let action = if editor == primary {
-            super::shortcuts::Action::EditIn
+            Some(super::shortcuts::Action::EditIn)
+        } else if editor == app.ui.edit_in.secondary {
+            Some(super::shortcuts::Action::EditInOther)
         } else {
-            super::shortcuts::Action::EditInOther
+            None
         };
-        let shortcut = super::layout::shortcut_for(action).unwrap_or_default();
+        let shortcut = action.and_then(super::layout::shortcut_for).unwrap_or_default();
         let button = egui::Button::new(format!("Edit in {}…", editor.label())).shortcut_text(shortcut);
         let r = ui.add_enabled(has_catalog, button);
         let r = match app.editors.get(&editor) {

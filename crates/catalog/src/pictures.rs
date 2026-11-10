@@ -128,6 +128,15 @@ fn classify(stem: &str, ext: &str) -> Option<(Role, Vec<String>, bool)> {
     if let Some((base, _)) = luminar {
         return Some((Role::Edit, vec![base.to_owned()], false));
     }
+    // darktable renders: `<name>_darktable`, `<name>_darktable_<n>`.
+    let darktable = lower.rsplit_once("_darktable").filter(|(base, rest)| {
+        !base.is_empty()
+            && (rest.is_empty()
+                || rest.strip_prefix('_').is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())))
+    });
+    if let Some((base, _)) = darktable {
+        return Some((Role::Edit, vec![base.to_owned()], false));
+    }
     None
 }
 

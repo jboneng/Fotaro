@@ -1164,6 +1164,7 @@ pub fn member_label(photo: &PhotoRow) -> String {
         catalog::Role::Pass => ext,
         catalog::Role::Edit if stem.contains("_negpy") => "NegPy".into(),
         catalog::Role::Edit if stem.contains("_luminarneo-edit") => "Luminar".into(),
+        catalog::Role::Edit if stem.contains("_darktable") => "darktable".into(),
         catalog::Role::Edit => "Edit".into(),
         catalog::Role::Copy => photo.virtual_copy.clone().unwrap_or_else(|| "Copy".into()),
         catalog::Role::Export => "Export".into(),

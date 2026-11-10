@@ -5,8 +5,10 @@
 //!   (`<original>_NegPy.tif` next to the original); found by name.
 //! - [`luminar`]: opened like its Lightroom plug-in does, with the exact result path
 //!   (`<original>_LuminarNeo-edit.tif`); one photo at a time.
+//! - [`darktable`]: opens the originals; when it closes, the photos whose sidecar changed
+//!   are rendered with darktable-cli to `<original>_darktable.tif`.
 //!
-//! Both editors are detected (an installed release, or for NegPy a source checkout),
+//! The editors are detected (an installed release, or for NegPy a source checkout),
 //! or taken from wherever the user points the External Editing settings.
 
 use std::collections::BTreeMap;
@@ -17,9 +19,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+pub mod darktable;
 pub mod luminar;
 pub mod negpy;
 
+pub use darktable::Darktable;
 pub use luminar::Luminar;
 pub use negpy::*;
 
@@ -29,23 +33,17 @@ pub enum Editor {
     #[default]
     NegPy,
     Luminar,
+    Darktable,
 }
 
 impl Editor {
-    pub const ALL: [Editor; 2] = [Self::NegPy, Self::Luminar];
+    pub const ALL: [Editor; 3] = [Self::NegPy, Self::Luminar, Self::Darktable];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::NegPy => "NegPy",
             Self::Luminar => "Luminar Neo",
-        }
-    }
-
-    /// The other one (LrC's "additional external editor").
-    pub fn other(self) -> Self {
-        match self {
-            Self::NegPy => Self::Luminar,
-            Self::Luminar => Self::NegPy,
+            Self::Darktable => "darktable",
         }
     }
 }
@@ -54,8 +52,10 @@ impl Editor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditInPrefs {
-    /// Ctrl+E opens this one; Ctrl+Alt+E the other.
+    /// Ctrl+E opens this one (LrC's primary external editor)…
     pub primary: Editor,
+    /// … and Ctrl+Alt+E this one (the additional editor).
+    pub secondary: Editor,
     /// A NegPy source checkout, an install folder or the program itself. `None`: detect.
     pub negpy_location: Option<PathBuf>,
     /// NegPy's export: format, bit depth, colour space, JPEG quality.
@@ -65,18 +65,27 @@ pub struct EditInPrefs {
     pub quality: u8,
     /// Luminar Neo's program or install folder. `None`: detect.
     pub luminar_location: Option<PathBuf>,
+    /// darktable's program or install folder. `None`: detect.
+    pub darktable_location: Option<PathBuf>,
+    /// darktable's renders: 16 bits per channel, and their colour space.
+    pub darktable_sixteen_bit: bool,
+    pub darktable_color_space: EditColorSpace,
 }
 
 impl Default for EditInPrefs {
     fn default() -> Self {
         EditInPrefs {
             primary: Editor::NegPy,
+            secondary: Editor::Luminar,
             negpy_location: None,
             format: EditFormat::Tiff,
             sixteen_bit: true,
             color_space: EditColorSpace::AdobeRgb,
             quality: 92,
             luminar_location: None,
+            darktable_location: None,
+            darktable_sixteen_bit: true,
+            darktable_color_space: EditColorSpace::AdobeRgb,
         }
     }
 }
@@ -86,6 +95,7 @@ impl Default for EditInPrefs {
 pub enum Found {
     NegPy(NegPy),
     Luminar(Luminar),
+    Darktable(Darktable),
 }
 
 impl Found {
@@ -93,6 +103,7 @@ impl Found {
         match self {
             Self::NegPy(n) => n.describe(),
             Self::Luminar(l) => l.describe(),
+            Self::Darktable(d) => d.describe(),
         }
     }
 
@@ -101,6 +112,7 @@ impl Found {
         match self {
             Self::NegPy(n) => n.launches(originals, prefs),
             Self::Luminar(l) => l.launches(originals),
+            Self::Darktable(d) => d.launches(originals, prefs),
         }
     }
 }
@@ -110,6 +122,7 @@ pub fn find(editor: Editor, prefs: &EditInPrefs) -> Result<Found, String> {
     match editor {
         Editor::NegPy => negpy::detect(prefs.negpy_location.as_deref()).map(Found::NegPy),
         Editor::Luminar => luminar::detect(prefs.luminar_location.as_deref()).map(Found::Luminar),
+        Editor::Darktable => darktable::detect(prefs.darktable_location.as_deref()).map(Found::Darktable),
     }
 }
 
@@ -248,8 +261,11 @@ const CHECK_EVERY: Duration = Duration::from_secs(2);
 const LAUNCH_GAP: Duration = Duration::from_secs(8);
 /// Originals are watched this long after they were sent.
 const WATCH_FOR: Duration = Duration::from_secs(24 * 3600);
-/// After Luminar closes, its result is waited for this long before giving up.
+/// After an editor closes, its result is waited for this long before giving up.
 const AFTER_EXIT: Duration = Duration::from_secs(15);
+/// An editor that closes this soon without changing anything probably never opened
+/// (darktable when another darktable already has its library).
+const QUICK_EXIT: Duration = Duration::from_secs(5);
 
 /// One editor process to start.
 #[derive(Debug, Clone)]
@@ -260,19 +276,64 @@ pub struct Launch {
     pub cwd: Option<PathBuf>,
     /// (photo id, folder of its result, the result's name).
     pub results: Vec<(i64, PathBuf, ResultName)>,
-    /// The next launch waits until this one exits (Luminar edits one photo at a time).
+    /// The next launch waits until this one exits (Luminar edits one photo at a time;
+    /// darktable renders after its window closes).
     pub wait_for_exit: bool,
+    /// Started when this process exits, each only if its file changed meanwhile.
+    pub then: Vec<FollowUp>,
+    /// Deleted before starting (darktable-cli never overwrites).
+    pub clear_first: Vec<PathBuf>,
+    /// After a successful exit: move each rendered file over its result.
+    pub finish: Vec<(PathBuf, PathBuf)>,
+}
+
+/// A launch that runs after another, for one original, if `if_changed` changed (darktable:
+/// render a photo whose sidecar was edited).
+#[derive(Debug, Clone)]
+pub struct FollowUp {
+    pub original: i64,
+    pub if_changed: PathBuf,
+    pub launch: Launch,
 }
 
 impl Launch {
     fn spawn(&self) -> std::io::Result<Child> {
+        for p in &self.clear_first {
+            if let Some(dir) = p.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            if p.exists() {
+                std::fs::remove_file(p)?;
+            }
+        }
         let mut c = Command::new(&self.program);
         c.args(&self.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         if let Some(dir) = &self.cwd {
             c.current_dir(dir);
         }
+        #[cfg(windows)]
+        {
+            // Command-line renderers (darktable-cli) without a console window.
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            if self.then.is_empty() && !self.finish.is_empty() {
+                c.creation_flags(CREATE_NO_WINDOW);
+            }
+        }
         c.spawn()
     }
+}
+
+/// Move `from` over `to` (across drives too).
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    if to.exists() {
+        std::fs::remove_file(to)?;
+    }
+    if std::fs::rename(from, to).is_err() {
+        std::fs::copy(from, to)?;
+        std::fs::remove_file(from)?;
+    }
+    Ok(())
 }
 
 struct Running {
@@ -281,6 +342,9 @@ struct Running {
     editor: Editor,
     wait_for_exit: bool,
     originals: Vec<i64>,
+    /// Follow-ups, with their file's contents when this started.
+    then: Vec<(FollowUp, Option<Vec<u8>>)>,
+    finish: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Edit In state for one catalog session.
@@ -306,31 +370,82 @@ impl EditTracker {
         self.queue.extend(launches);
     }
 
-    /// Start queued launches whose turn it is, notice editors that closed, and report
-    /// what went wrong.
+    /// Start queued launches whose turn it is, notice editors that closed (and start what
+    /// follows them), and report what went wrong.
     pub fn tick(&mut self) -> Vec<String> {
         let mut messages = Vec::new();
         let now = Instant::now();
-        let mut exited = Vec::new();
-        self.running.retain_mut(|r| match r.child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(status)) => {
-                if r.editor == Editor::NegPy && !status.success() {
-                    let code = status.code().map_or_else(|| "?".to_owned(), |c| c.to_string());
-                    let why = if code == "2" { "it didn't accept the launch options" } else { "it stopped" };
-                    messages.push(format!(
-                        "NegPy did not open the photos ({why}, exit code {code}; see negpy.log)"
-                    ));
+        let mut ended: Vec<i64> = Vec::new();
+        let mut dropped: Vec<i64> = Vec::new();
+        let mut next: Vec<Launch> = Vec::new();
+        let mut i = 0;
+        while i < self.running.len() {
+            let status = match self.running[i].child.try_wait() {
+                Ok(None) => {
+                    i += 1;
+                    continue;
                 }
-                if r.wait_for_exit {
-                    exited.extend(r.originals.iter().copied());
-                }
-                false
+                Ok(Some(status)) => Some(status),
+                Err(_) => None,
+            };
+            let r = self.running.remove(i);
+            let ok = status.is_some_and(|s| s.success());
+            let code = status.and_then(|s| s.code()).map_or_else(|| "?".to_owned(), |c| c.to_string());
+            if r.editor == Editor::NegPy && !ok {
+                let why = if code == "2" { "it didn't accept the launch options" } else { "it stopped" };
+                messages
+                    .push(format!("NegPy did not open the photos ({why}, exit code {code}; see negpy.log)"));
             }
-            Err(_) => false,
-        });
+            if !r.finish.is_empty() {
+                if ok {
+                    for (from, to) in &r.finish {
+                        if let Err(e) = replace_file(from, to) {
+                            messages.push(format!(
+                                "{}: could not save {}: {e}",
+                                r.editor.label(),
+                                to.display()
+                            ));
+                        }
+                    }
+                } else {
+                    messages
+                        .push(format!("{} could not render the edit (exit code {code})", r.editor.label()));
+                }
+            }
+            let mut unchanged = 0;
+            for (follow, before) in r.then {
+                let after = std::fs::read(&follow.if_changed).ok();
+                if after.is_some() && after != before {
+                    next.push(follow.launch);
+                } else {
+                    unchanged += 1;
+                    dropped.push(follow.original);
+                }
+            }
+            if unchanged > 0 {
+                let label = r.editor.label();
+                messages.push(if unchanged == r.originals.len() && now.duration_since(r.started) < QUICK_EXIT {
+                    format!("{label} closed right away; if it was already open, close it and try Edit In again")
+                } else if unchanged == 1 {
+                    format!("{label} closed without changes to the photo")
+                } else {
+                    format!("{label} closed without changes to {unchanged} photos")
+                });
+            }
+            if r.wait_for_exit {
+                // What follows reports on its photos; the others are done.
+                let following: Vec<i64> =
+                    next.iter().flat_map(|l| l.results.iter().map(|(id, _, _)| *id)).collect();
+                ended.extend(r.originals.iter().filter(|id| !following.contains(id)));
+            }
+        }
+        // Renders start right away, before anything else queued.
+        for l in next.into_iter().rev() {
+            self.queue.push_front(l);
+        }
+        self.watches.retain(|w| !dropped.contains(&w.original) || w.ended.is_some());
         for w in &mut self.watches {
-            if exited.contains(&w.original) && w.ended.is_none() {
+            if ended.contains(&w.original) && w.ended.is_none() && !dropped.contains(&w.original) {
                 w.ended = Some(now);
             }
         }
@@ -358,12 +473,22 @@ impl EditTracker {
                             ended: None,
                         });
                     }
+                    let then = launch
+                        .then
+                        .into_iter()
+                        .map(|f| {
+                            let before = std::fs::read(&f.if_changed).ok();
+                            (f, before)
+                        })
+                        .collect();
                     self.running.push(Running {
                         child,
                         started: now,
                         editor: launch.editor,
                         wait_for_exit: launch.wait_for_exit,
                         originals: launch.results.iter().map(|(id, _, _)| *id).collect(),
+                        then,
+                        finish: launch.finish,
                     });
                 }
                 Err(e) => messages.push(format!("Could not start {}: {e}", launch.editor.label())),
@@ -379,11 +504,12 @@ impl EditTracker {
             }
             let ResultName::Exact(name) = &w.name else { return false };
             if !handled.contains_key(&w.dir.join(name)) {
-                messages.push(format!(
-                    "{} closed without saving an edit of photo {}",
-                    w.editor.label(),
-                    name.to_string_lossy().split(luminar::RESULT_SUFFIX).next().unwrap_or_default()
-                ));
+                let stem = name.to_string_lossy();
+                let photo = [luminar::RESULT_SUFFIX, darktable::RESULT_SUFFIX]
+                    .iter()
+                    .find_map(|s| stem.split_once(s).map(|(p, _)| p.to_owned()))
+                    .unwrap_or_else(|| stem.into_owned());
+                messages.push(format!("{} closed without saving an edit of photo {photo}", w.editor.label()));
             }
             false
         });

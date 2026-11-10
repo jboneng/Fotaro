@@ -47,6 +47,9 @@ impl Luminar {
                 cwd: self.exe.parent().map(Path::to_path_buf),
                 results: vec![(*id, dir, ResultName::Exact(PathBuf::from(name)))],
                 wait_for_exit: true,
+                then: Vec::new(),
+                clear_first: Vec::new(),
+                finish: Vec::new(),
             });
         }
         launches

@@ -142,7 +142,17 @@ impl NegPy {
                         (*id, dir.clone(), ResultName::NegPy { stem })
                     })
                     .collect();
-                Launch { editor: super::Editor::NegPy, program, args, cwd, results, wait_for_exit: false }
+                Launch {
+                    editor: super::Editor::NegPy,
+                    program,
+                    args,
+                    cwd,
+                    results,
+                    wait_for_exit: false,
+                    then: Vec::new(),
+                    clear_first: Vec::new(),
+                    finish: Vec::new(),
+                }
             })
             .collect()
     }

@@ -94,6 +94,8 @@ fn names_are_matched_like_negpy_does() {
     assert_eq!(c("roll_3_NegPy", "tiff"), Some((Role::Edit, vec!["roll_3".into(), "roll".into()], false)));
     assert_eq!(c("x_LuminarNeo-edit_12", "tif"), Some((Role::Edit, vec!["x".into()], false)));
     assert_eq!(c("x_LuminarNeo-editor", "tif"), None);
+    assert_eq!(c("x_darktable", "tif"), Some((Role::Edit, vec!["x".into()], false)));
+    assert_eq!(c("x_darktable_01", "tif"), Some((Role::Edit, vec!["x".into()], false)));
     assert_eq!(c("plain", "tif"), None);
 }
 

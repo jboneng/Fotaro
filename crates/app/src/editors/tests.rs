@@ -269,6 +269,9 @@ fn luminar_launches_wait_for_the_previous_to_close_and_missing_edits_are_reporte
             ResultName::Exact(PathBuf::from(format!("{id}_LuminarNeo-edit.tif"))),
         )],
         wait_for_exit: true,
+        then: Vec::new(),
+        clear_first: Vec::new(),
+        finish: Vec::new(),
     };
     let mut t = EditTracker::default();
     t.enqueue(vec![launch(1), launch(2)]);
@@ -287,4 +290,106 @@ fn luminar_launches_wait_for_the_previous_to_close_and_missing_edits_are_reporte
     let messages = t.tick();
     assert!(messages.iter().any(|m| m.contains("closed without saving")), "{messages:?}");
     assert_eq!(t.watches.len(), 1);
+}
+
+#[test]
+fn darktable_opens_everything_at_once_and_renders_what_changed() {
+    let dt = Darktable {
+        exe: PathBuf::from("C:/Program Files/darktable/bin/darktable.exe"),
+        cli: PathBuf::from("C:/Program Files/darktable/bin/darktable-cli.exe"),
+        version: Some("5.6.2".into()),
+    };
+    let prefs = EditInPrefs { darktable_color_space: EditColorSpace::ProPhotoRgb, ..Default::default() };
+    let a = PathBuf::from("C:/scans/a.NEF");
+    let b = PathBuf::from("C:/scans/b.tif");
+    let launches = dt.launches(&[(1, a.clone()), (2, b.clone()), (3, a.clone())], &prefs);
+    assert_eq!(launches.len(), 1, "one window");
+    let gui = &launches[0];
+    assert_eq!(gui.args, [a.as_os_str(), b.as_os_str()], "a virtual copy's file only once");
+    assert!(gui.wait_for_exit);
+    assert_eq!(gui.results[0].2, ResultName::Exact(PathBuf::from("a_darktable.tif")));
+    assert_eq!(gui.then.len(), 2);
+    assert_eq!(gui.then[0].if_changed, PathBuf::from("C:/scans/a.NEF.xmp"), "darktable's own sidecar");
+
+    let render = &gui.then[1].launch;
+    let args: Vec<String> = render.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert_eq!(render.program, dt.cli);
+    assert_eq!(args[..2], ["C:/scans/b.tif", "C:/scans/b.tif.xmp"]);
+    assert!(!args[2].contains('\\'), "darktable-cli takes \\ as an escape: {}", args[2]);
+    assert!(args.windows(2).any(|w| w == ["--icc-type", "PROPHOTO_RGB"]));
+    assert!(args.contains(&"plugins/imageio/format/tiff/bpp=16".to_owned()));
+    assert_eq!(render.finish[0].1, PathBuf::from("C:/scans/b_darktable.tif"));
+    assert_eq!(render.clear_first, [render.finish[0].0.clone()], "the temporary render is cleared first");
+}
+
+/// A stand-in program: `script` run by the system shell.
+fn shell(script: &str) -> (PathBuf, Vec<OsString>) {
+    if cfg!(windows) {
+        (PathBuf::from("cmd"), vec!["/C".into(), script.into()])
+    } else {
+        (PathBuf::from("sh"), vec!["-c".into(), script.into()])
+    }
+}
+
+fn run_until(t: &mut EditTracker, done: impl Fn(&EditTracker) -> bool) -> Vec<String> {
+    let started = Instant::now();
+    let mut messages = Vec::new();
+    while !done(t) && started.elapsed() < Duration::from_secs(15) {
+        messages.extend(t.tick());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    messages
+}
+
+#[test]
+fn follow_ups_run_only_for_changed_files_and_replace_the_result() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let sidecar = dir.join("a.NEF.xmp");
+    std::fs::write(&sidecar, "before").unwrap();
+    let result = dir.join("a_darktable.tif");
+    std::fs::write(&result, "old render").unwrap();
+    let temp = dir.join("render.tmp");
+    let (program, args) = shell(&format!("echo rendered> {}", temp.display()));
+    let render = Launch {
+        editor: Editor::Darktable,
+        program,
+        args,
+        cwd: None,
+        results: vec![(1, dir.clone(), ResultName::Exact(PathBuf::from("a_darktable.tif")))],
+        wait_for_exit: true,
+        then: Vec::new(),
+        clear_first: vec![temp.clone()],
+        finish: vec![(temp.clone(), result.clone())],
+    };
+    let (program, args) = shell("exit 0");
+    let gui = Launch {
+        editor: Editor::Darktable,
+        program,
+        args,
+        cwd: None,
+        results: render.results.clone(),
+        wait_for_exit: true,
+        then: vec![FollowUp { original: 1, if_changed: sidecar.clone(), launch: render }],
+        clear_first: Vec::new(),
+        finish: Vec::new(),
+    };
+
+    // Edited: the sidecar changes while "darktable" runs; the render replaces the result.
+    let mut t = EditTracker::default();
+    t.enqueue(vec![gui.clone()]);
+    t.tick();
+    std::fs::write(&sidecar, "after").unwrap();
+    let messages =
+        run_until(&mut t, |_| std::fs::read_to_string(&result).is_ok_and(|s| s.contains("rendered")));
+    assert!(std::fs::read_to_string(&result).unwrap().contains("rendered"), "{messages:?}");
+    assert!(!temp.exists(), "moved, not copied");
+    assert_eq!(t.watches.len(), 1, "still watched: the result comes back to the catalog");
+
+    // Not edited: no render, and said so.
+    let mut t = EditTracker::default();
+    t.enqueue(vec![gui]);
+    let messages = run_until(&mut t, |t| t.is_idle());
+    assert!(messages.iter().any(|m| m.contains("darktable closed")), "{messages:?}");
+    assert!(t.watches.is_empty());
 }

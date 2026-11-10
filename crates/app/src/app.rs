@@ -1525,7 +1525,7 @@ impl PhotoLibraryApp {
             }
             Action::CreateVirtualCopy => self.create_virtual_copies(),
             Action::EditIn => self.execute(ctx, Command::EditIn(self.ui.edit_in.primary)),
-            Action::EditInOther => self.execute(ctx, Command::EditIn(self.ui.edit_in.primary.other())),
+            Action::EditInOther => self.execute(ctx, Command::EditIn(self.ui.edit_in.secondary)),
         }
     }
 
@@ -2286,6 +2286,9 @@ impl PhotoLibraryApp {
                 let mut msg = format!("Opening {n} photo{} in {name}", if n == 1 { "" } else { "s" });
                 if editor == crate::editors::Editor::Luminar && n > 1 {
                     msg += ", one at a time";
+                }
+                if editor == crate::editors::Editor::Darktable {
+                    msg += "; close darktable when you're done and the edited photos are rendered";
                 }
                 if skipped > 0 {
                     msg += &format!(" ({skipped} missing, skipped)");
