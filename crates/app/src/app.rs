@@ -314,9 +314,10 @@ pub enum Command {
     StartImport,
     CloseImport,
     CancelImport,
-    /// Photo ▸ Edit In ▸ Edit in NegPy (Ctrl+E) for the selected photos.
-    EditInNegPy,
-    /// External Editing settings (NegPy location, file format).
+    /// Photo ▸ Edit In ▸ Edit in NegPy / Luminar Neo (Ctrl+E: the primary editor,
+    /// Ctrl+Alt+E: the other) for the selected photos.
+    EditIn(crate::editors::Editor),
+    /// External Editing settings (where the editors are, NegPy's file format).
     OpenEditSettings,
     /// File ▸ Export… for the selected photos.
     OpenExport,
@@ -985,8 +986,9 @@ pub struct PhotoLibraryApp {
     /// The open modal dialog, if any.
     pub dialog: Option<Dialog>,
     pub commands: Vec<Command>,
-    /// NegPy as last detected (`None`: not looked for yet, or settings changed).
-    pub negpy: Option<Result<crate::editors::NegPy, String>>,
+    /// External editors as last looked for (missing: not looked for yet, or the settings
+    /// changed).
+    pub editors: std::collections::HashMap<crate::editors::Editor, Result<crate::editors::Found, String>>,
     /// The External Editing settings window is open.
     pub edit_settings: bool,
     /// Rects of panels drawn this frame (dimmed by Lights Out).
@@ -1020,7 +1022,7 @@ impl PhotoLibraryApp {
             error: None,
             dialog: None,
             commands: Vec::new(),
-            negpy: None,
+            editors: Default::default(),
             edit_settings: false,
             panel_rects: Vec::new(),
             grid_cols: 1,
@@ -1408,7 +1410,8 @@ impl PhotoLibraryApp {
                 }
             }
             Action::CreateVirtualCopy => self.create_virtual_copies(),
-            Action::EditIn => self.execute(ctx, Command::EditInNegPy),
+            Action::EditIn => self.execute(ctx, Command::EditIn(self.ui.edit_in.primary)),
+            Action::EditInOther => self.execute(ctx, Command::EditIn(self.ui.edit_in.primary.other())),
         }
     }
 
@@ -2085,21 +2088,25 @@ impl PhotoLibraryApp {
                     self.notify("Stopping the import after the current photo");
                 }
             }
-            Command::EditInNegPy => {
+            Command::EditIn(editor) => {
                 if self.session.is_none() {
                     self.notify("Open or create a catalog first");
                     return;
                 }
-                // Look again each time: NegPy may have been installed or updated meanwhile.
-                self.negpy = Some(crate::editors::detect(self.ui.edit_in.negpy_location.as_deref()));
-                if let Some(Err(why)) = &self.negpy {
-                    let why = why.clone();
-                    self.notify(format!(
-                        "Can't edit in NegPy: {why}. Set its location in External Editing settings."
-                    ));
-                    self.edit_settings = true;
-                    return;
-                }
+                // Look again each time: the editor may have been installed or updated meanwhile.
+                let found = crate::editors::find(editor, &self.ui.edit_in);
+                self.editors.insert(editor, found.clone());
+                let found = match found {
+                    Ok(f) => f,
+                    Err(why) => {
+                        self.notify(format!(
+                            "Can't edit in {}: {why}. Set its location in External Editing settings.",
+                            editor.label()
+                        ));
+                        self.edit_settings = true;
+                        return;
+                    }
+                };
                 let view = self.view;
                 let Some(s) = &mut self.session else { return };
                 let ids = s.targets(view);
@@ -2119,16 +2126,20 @@ impl PhotoLibraryApp {
                     return;
                 }
                 let n = originals.len();
-                s.edits.enqueue(crate::editors::plan_launches(&originals));
+                s.edits.enqueue(found.launches(&originals, &self.ui.edit_in));
                 let skipped = rows.len() - n;
-                let mut msg = format!("Opening {n} photo{} in NegPy", if n == 1 { "" } else { "s" });
+                let name = editor.label();
+                let mut msg = format!("Opening {n} photo{} in {name}", if n == 1 { "" } else { "s" });
+                if editor == crate::editors::Editor::Luminar && n > 1 {
+                    msg += ", one at a time";
+                }
                 if skipped > 0 {
                     msg += &format!(" ({skipped} missing, skipped)");
                 }
-                self.notify(msg + "; its exports come back stacked with the originals");
+                self.notify(msg + "; edits come back stacked with the originals");
             }
             Command::OpenEditSettings => {
-                self.negpy = None;
+                self.editors.clear();
                 self.edit_settings = true;
             }
             Command::OpenExport => {
@@ -2277,14 +2288,9 @@ impl eframe::App for PhotoLibraryApp {
                 self.toast = Some(Toast { text: msg, at: Instant::now() });
             }
             if !s.edits.is_idle() {
-                // NegPy launches waiting their turn, and results to look for.
-                if self.negpy.is_none() {
-                    self.negpy = Some(crate::editors::detect(self.ui.edit_in.negpy_location.as_deref()));
-                }
-                if let Some(Ok(negpy)) = &self.negpy {
-                    for msg in s.edits.tick(negpy, &self.ui.edit_in) {
-                        self.toast = Some(Toast { text: msg, at: Instant::now() });
-                    }
+                // Editor launches waiting their turn, and results to look for.
+                for msg in s.edits.tick() {
+                    self.toast = Some(Toast { text: msg, at: Instant::now() });
                 }
                 if let Some(watches) = s.edits.due_check() {
                     s.jobs.submit_normal(Job::CheckEdits { watches });

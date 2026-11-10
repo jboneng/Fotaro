@@ -62,6 +62,7 @@ pub enum Action {
     Export,
     ExportWithPrevious,
     EditIn,
+    EditInOther,
     Keywording,
     ShowShortcuts,
     SaveMetadata,
@@ -106,6 +107,9 @@ const fn shift(key: Key) -> Binding {
 }
 const fn ctrl_shift(key: Key) -> Binding {
     Binding { key, ctrl: true, shift: true, alt: false }
+}
+const fn ctrl_alt(key: Key) -> Binding {
+    Binding { key, ctrl: true, shift: false, alt: true }
 }
 const fn ctrl_alt_shift(key: Key) -> Binding {
     Binding { key, ctrl: true, shift: true, alt: true }
@@ -265,7 +269,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl(K::F), A::Find, VIEW, "Find (text filter)"),
     s(ctrl(K::K), A::Keywording, ORG, "Add keywords (Keywording panel)"),
     s(ctrl(K::S), A::SaveMetadata, ORG, "Save metadata to files (XMP sidecars)"),
-    s(ctrl(K::E), A::EditIn, ORG, "Edit in NegPy"),
+    s(ctrl(K::E), A::EditIn, ORG, "Edit in the primary external editor (NegPy or Luminar Neo)"),
+    s(ctrl_alt(K::E), A::EditInOther, ORG, "Edit in the other external editor"),
     s(ctrl(K::Slash), A::ShowShortcuts, ORG, "Show keyboard shortcuts"),
 ];
 

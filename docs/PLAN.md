@@ -96,7 +96,8 @@ This is a top-level requirement, not polish. Every phase is judged against "woul
 ## Open items to verify later
 - ~~How NegPy is launched from the command line~~: `NegPy <files> --format … --output-dir … --filename …
   [--quit-after-export]` (NegPy's launch support, in its source; releases after 0.68.0).
-- How Luminar Neo writes back its result (same folder as the original or a separate export path?).
+- ~~How Luminar Neo writes back its result~~: as its Lightroom plug-in launches it, `Luminar Neo.exe
+  lightroom <base64 photo> -MPResPath <base64 result>`; per the plug-in, Apply writes the TIFF there and Luminar exits.
 
 ## Progress (Phase 0)
 - [x] 1. Plan + initial commit
@@ -266,7 +267,14 @@ building; revisit with 1:1 previews in Phase 2.
       original's rating, label, IPTC and keywords, and stacked right below it. Exporting again from
       NegPy updates the photo, its metadata and its previews. NegPy launch failures are reported.
 - [x] Checked end to end with NegPy from source: launch, recipe, both results added and stacked.
-- [ ] Later: Luminar.
+- [x] Luminar Neo (Photo ▸ Edit In ▸ Edit in Luminar Neo…): found in the registry / Program Files,
+      launched like its Lightroom plug-in does, one photo at a time (the next opens when Luminar
+      closes). Luminar opens the original, RAW included; Apply writes `<name>_LuminarNeo-edit.tif`
+      (`_0`, `_1`… when taken) next to it, which is added and stacked like NegPy's. Closing without
+      Apply is reported. Ctrl+E opens the primary editor (External Editing settings), Ctrl+Alt+E the
+      other.
+- [x] Checked: Luminar Neo 1.29 opens a NEF in its plug-in mode (Cancel / Apply) from these arguments.
+- [ ] To check by hand: Apply in Luminar writes the result and it comes back stacked.
 
 ## Progress (Phase 8)
 - [x] Export dialog (File ▸ Export…, Ctrl+Shift+E, photo context menu) laid out like LrC's:

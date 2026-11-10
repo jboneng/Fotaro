@@ -1,11 +1,13 @@
-//! External Editing settings (LrC's Preferences ▸ External Editing): where NegPy is,
-//! and the file NegPy exports for the catalog.
+//! External Editing settings (LrC's Preferences ▸ External Editing): where NegPy and
+//! Luminar Neo are, which one Ctrl+E opens, and the file NegPy exports for the catalog.
+
+use std::path::PathBuf;
 
 use eframe::egui::{self, Align, Layout, RichText};
 
 use super::theme;
-use crate::app::PhotoLibraryApp;
-use crate::editors::{EditColorSpace, EditFormat, RESULT_SUFFIX};
+use crate::app::{Command, PhotoLibraryApp};
+use crate::editors::{EditColorSpace, EditFormat, Editor, RESULT_SUFFIX, luminar};
 
 fn weak(text: impl Into<String>) -> RichText {
     RichText::new(text).color(theme::TEXT_WEAK)
@@ -18,52 +20,86 @@ fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// Look for the editors not looked for yet.
+fn refresh(app: &mut PhotoLibraryApp) {
+    for e in Editor::ALL {
+        if !app.editors.contains_key(&e) {
+            let found = crate::editors::find(e, &app.ui.edit_in);
+            app.editors.insert(e, found);
+        }
+    }
+}
+
+/// "Application:" with what was found, and the buttons to choose another location.
+/// Returns true when the location changed.
+fn location(
+    ui: &mut egui::Ui,
+    found: Option<&Result<crate::editors::Found, String>>,
+    editor: Editor,
+    place: &mut Option<PathBuf>,
+) -> bool {
+    let mut changed = false;
+    row(ui, "Application:", |ui| match found {
+        Some(Ok(f)) => {
+            ui.label(RichText::new(f.describe()).color(theme::TEXT_STRONG));
+        }
+        Some(Err(why)) => {
+            ui.label(RichText::new(why).color(theme::MISSING));
+        }
+        None => {}
+    });
+    row(ui, "", |ui| {
+        ui.label(weak(if place.is_some() { "Chosen by you" } else { "Found automatically" }));
+        let folder_hint = match editor {
+            Editor::NegPy => "A NegPy source checkout, or the folder NegPy is installed in",
+            Editor::Luminar => "The folder Luminar Neo is installed in",
+        };
+        if ui.button("Choose Folder…").on_hover_text(folder_hint).clicked()
+            && let Some(dir) = rfd::FileDialog::new().set_title(editor.label()).pick_folder()
+        {
+            *place = Some(dir);
+            changed = true;
+        }
+        if ui.button("Choose Program…").clicked()
+            && let Some(f) = rfd::FileDialog::new().set_title(editor.label()).pick_file()
+        {
+            *place = Some(f);
+            changed = true;
+        }
+        if ui.add_enabled(place.is_some(), egui::Button::new("Find Automatically")).clicked() {
+            *place = None;
+            changed = true;
+        }
+    });
+    changed
+}
+
 pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     if !app.edit_settings {
         return;
     }
-    if app.negpy.is_none() {
-        app.negpy = Some(crate::editors::detect(app.ui.edit_in.negpy_location.as_deref()));
-    }
+    refresh(app);
     let mut close = false;
-    let mut location_changed = false;
-    let width = 600.0_f32.min(ctx.content_rect().width() - 40.0);
+    let mut changed = Vec::new();
+    let width = 640.0_f32.min(ctx.content_rect().width() - 40.0);
+    let editors = &app.editors;
+    let p = &mut app.ui.edit_in;
     egui::Modal::new(egui::Id::unique("edit_in_settings")).show(ctx, |ui| {
         ui.set_width(width);
         ui.label(RichText::new("External Editing").size(18.0).color(theme::TEXT_STRONG));
         ui.separator();
-        ui.label(RichText::new("NegPy").strong().color(theme::TEXT_STRONG));
-        let p = &mut app.ui.edit_in;
-        row(ui, "Application:", |ui| match &app.negpy {
-            Some(Ok(n)) => {
-                ui.label(RichText::new(n.describe()).color(theme::TEXT_STRONG));
+        row(ui, "Ctrl+E opens:", |ui| {
+            for e in Editor::ALL {
+                ui.radio_value(&mut p.primary, e, e.label());
             }
-            Some(Err(why)) => {
-                ui.label(RichText::new(why).color(theme::MISSING));
-            }
-            None => {}
-        });
-        row(ui, "", |ui| {
-            let how = if p.negpy_location.is_some() { "Chosen by you" } else { "Found automatically" };
-            ui.label(weak(how));
-            if ui.button("Choose Folder…").on_hover_text("A NegPy source checkout, or the folder NegPy is installed in").clicked()
-                && let Some(dir) = rfd::FileDialog::new().set_title("NegPy Folder").pick_folder()
-            {
-                p.negpy_location = Some(dir);
-                location_changed = true;
-            }
-            if ui.button("Choose Program…").clicked()
-                && let Some(f) = rfd::FileDialog::new().set_title("NegPy Program").pick_file()
-            {
-                p.negpy_location = Some(f);
-                location_changed = true;
-            }
-            if ui.add_enabled(p.negpy_location.is_some(), egui::Button::new("Find Automatically")).clicked() {
-                p.negpy_location = None;
-                location_changed = true;
-            }
+            ui.label(weak("(Ctrl+Alt+E the other)"));
         });
         ui.add_space(6.0);
+
+        ui.label(RichText::new("NegPy").strong().color(theme::TEXT_STRONG));
+        if location(ui, editors.get(&Editor::NegPy), Editor::NegPy, &mut p.negpy_location) {
+            changed.push(Editor::NegPy);
+        }
         row(ui, "File Format:", |ui| {
             egui::ComboBox::from_id_salt("edit_format").selected_text(p.format.label()).show_ui(ui, |ui| {
                 for f in EditFormat::ALL {
@@ -84,18 +120,38 @@ pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
             }
         });
         row(ui, "Color Space:", |ui| {
-            egui::ComboBox::from_id_salt("edit_color").selected_text(p.color_space.label()).show_ui(ui, |ui| {
-                for c in EditColorSpace::ALL {
-                    ui.selectable_value(&mut p.color_space, c, c.label());
-                }
-            });
+            egui::ComboBox::from_id_salt("edit_color").selected_text(p.color_space.label()).show_ui(
+                ui,
+                |ui| {
+                    for c in EditColorSpace::ALL {
+                        ui.selectable_value(&mut p.color_space, c, c.label());
+                    }
+                },
+            );
         });
         row(ui, "", |ui| {
             ui.label(weak(format!(
-                "NegPy saves its export next to the original as \"<name>_{RESULT_SUFFIX}\" ({}); it is added to \
-                 the catalog and stacked with the original. Exporting again in NegPy updates it.",
+                "NegPy saves its export next to the original as \"<name>_{RESULT_SUFFIX}\" ({}). Exporting \
+                 again in NegPy updates it.",
                 p.format.label()
             )));
+        });
+        ui.add_space(6.0);
+
+        ui.label(RichText::new("Luminar Neo").strong().color(theme::TEXT_STRONG));
+        if location(ui, editors.get(&Editor::Luminar), Editor::Luminar, &mut p.luminar_location) {
+            changed.push(Editor::Luminar);
+        }
+        row(ui, "", |ui| {
+            ui.label(weak(format!(
+                "Luminar Neo opens the original, one photo at a time. Apply saves the edit next to the \
+                 original as \"<name>{}.tif\".",
+                luminar::RESULT_SUFFIX
+            )));
+        });
+        ui.add_space(4.0);
+        row(ui, "", |ui| {
+            ui.label(weak("Edits are added to the catalog with the original's metadata, stacked below it."));
         });
         ui.separator();
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -107,8 +163,8 @@ pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         close = true;
     }
-    if location_changed {
-        app.negpy = None;
+    for e in changed {
+        app.editors.remove(&e);
     }
     if close {
         app.edit_settings = false;
@@ -118,24 +174,29 @@ pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
 /// Photo ▸ Edit In, and the same in the photo context menu.
 pub fn menu(ui: &mut egui::Ui, app: &mut PhotoLibraryApp) {
     let has_catalog = app.session.is_some();
-    let shortcut = super::layout::shortcut_for(super::shortcuts::Action::EditIn);
-    let button = egui::Button::new("Edit in NegPy…").shortcut_text(shortcut.unwrap_or_default());
-    let r = ui.add_enabled(has_catalog, button);
-    let r = match &app.negpy {
-        Some(Err(why)) => r.on_hover_text(why.clone()),
-        Some(Ok(n)) => r.on_hover_text(n.describe()),
-        None => r,
-    };
-    if r.clicked() {
-        app.run(crate::app::Command::EditInNegPy);
-        ui.close();
+    let primary = app.ui.edit_in.primary;
+    for editor in Editor::ALL {
+        let action = if editor == primary {
+            super::shortcuts::Action::EditIn
+        } else {
+            super::shortcuts::Action::EditInOther
+        };
+        let shortcut = super::layout::shortcut_for(action).unwrap_or_default();
+        let button = egui::Button::new(format!("Edit in {}…", editor.label())).shortcut_text(shortcut);
+        let r = ui.add_enabled(has_catalog, button);
+        let r = match app.editors.get(&editor) {
+            Some(Err(why)) => r.on_hover_text(why.clone()),
+            Some(Ok(f)) => r.on_hover_text(f.describe()),
+            None => r,
+        };
+        if r.clicked() {
+            app.run(Command::EditIn(editor));
+            ui.close();
+        }
     }
-    let _ = ui
-        .add_enabled(false, egui::Button::new("Edit in Luminar…"))
-        .on_disabled_hover_text("Not yet supported");
     ui.separator();
     if ui.button("External Editing Settings…").clicked() {
-        app.run(crate::app::Command::OpenEditSettings);
+        app.run(Command::OpenEditSettings);
         ui.close();
     }
 }
