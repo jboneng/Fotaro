@@ -409,3 +409,25 @@ This replaces them. Decided with the user:
 4. Version strip: layout, viewing, make active, Alt+arrows, compare with original.
 5. Grouping commands and Detach from Picture; shortcuts, menus, `docs/SHORTCUTS.md`.
 6. Remove the old stack code; real-file check with scans + IR passes + NegPy edits.
+
+### Progress (stacks)
+- [x] Schema v6 and its migration (tested on a v5 catalog with pairs, copies, stacks, IR and
+      NegPy files); triggers keep pictures and groups whole when photos come and go.
+- [x] Catalog: roles, joining by name at sync / import / add (`_IR`, `_IR_valid`, `_NegPy`,
+      `_<n>_NegPy`, `_LuminarNeo-edit[_n]`, RAW+JPEG), active members, groups, detach,
+      `unit_members`; the grid query returns one row per unit and matches any member.
+      10,000 photos: 40 ms (two simple queries and the sort in Rust; the one-query version
+      took 110–140 ms).
+- [x] Edit In, Export (Add to Stack, now from any folder) and virtual copies join pictures;
+      a new edit or copy becomes what the unit shows.
+- [x] Grid / filmstrip: one cell per unit; badge with the member count (two cards for a
+      group), the shown member's role when it isn't the original, a dot when a filter
+      matched another member. Selection follows a unit whose shown photo changes.
+- [x] Version strip above the filmstrip (S shows / hides): members picture by picture with
+      their roles; click shows one (ratings etc. then go to it), double-click / Shift+S makes
+      it the one shown, Alt+← / Alt+→ step, right-click: Detach from Picture, Compare with
+      Original (Before / After, zoom linked).
+- [x] Photo ▸ Stacking: Group Pictures (Ctrl+G), Ungroup (Ctrl+Shift+G), Show for the Stack,
+      Previous / Next Member, Compare with Original, Detach from Picture, Show Version Strip.
+- [ ] To check by hand: the version strip and Compare with Original in the app (automated
+      keystrokes were stopped while the PC was in use).

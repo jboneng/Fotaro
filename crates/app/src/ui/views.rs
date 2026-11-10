@@ -165,10 +165,7 @@ fn paint_cell(
             FontId::proportional(13.0),
             text_color,
         );
-        let mut ext = photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
-        if let Some(pair) = &photo.paired_ext {
-            ext = format!("{ext}+{pair}");
-        }
+        let ext = photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
         painter.text(
             egui::pos2(cell.right() - 6.0, y),
             Align2::RIGHT_CENTER,
@@ -253,25 +250,34 @@ fn paint_cell(
             true,
         );
     }
-    // Stacks: the top photo shows how many are in the stack; members of an open
-    // stack show their place in it.
-    if let Some(stack) = photo.stack {
-        let text = if stack.position == 0 {
-            stack.size.to_string()
-        } else {
-            format!("{}/{}", stack.position + 1, stack.size)
-        };
+    // Stacks: how many photos the unit holds (a card behind; two for a group of
+    // pictures), what the shown one is when it isn't the original, and a dot when the
+    // filter matched another member.
+    let unit = photo.unit;
+    if unit.is_stack() {
+        let mut text = unit.members.to_string();
+        if unit.role != catalog::Role::Original {
+            text = format!("{text}  {}", member_label(photo));
+        }
         let font = FontId::proportional(10.5);
         let galley = painter.layout_no_wrap(text, font, theme::TEXT_STRONG);
         let pos = cell.left_top() + egui::vec2(5.0, header + 5.0);
         let r = Rect::from_min_size(pos, galley.size() + egui::vec2(8.0, 4.0));
-        if stack.position == 0 && stack.collapsed {
-            // A second card behind: collapsed stacks look stacked.
-            painter.rect_filled(r.translate(egui::vec2(2.5, 2.5)), 2.0, Color32::from_gray(0x50));
+        let cards = if unit.pictures > 1 { 2 } else { 1 };
+        for i in (1..=cards).rev() {
+            let off = 2.5 * i as f32;
+            painter.rect_filled(
+                r.translate(egui::vec2(off, off)),
+                2.0,
+                Color32::from_gray(0x50 - 0x10 * i as u8),
+            );
         }
         painter.rect_filled(r, 2.0, Color32::from_gray(0x30));
         painter.rect_stroke(r, 2.0, Stroke::new(1.0, theme::TEXT_WEAK), egui::StrokeKind::Inside);
         painter.galley(r.min + egui::vec2(4.0, 2.0), galley, theme::TEXT_STRONG);
+        if unit.hidden_match {
+            painter.circle_filled(r.right_top() + egui::vec2(-1.0, 1.0), 3.0, theme::MISSING);
+        }
     }
     if st.show_dirty && style != GridStyle::Minimal {
         paint_needs_saving(&painter, cell.right_bottom() - egui::vec2(12.0, 10.0 + footer.max(4.0) / 2.0));
@@ -756,6 +762,10 @@ pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 pub fn compare(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
     ui.allocate_rect(rect, Sense::hover());
+    if let Some((original, other)) = app.member_compare.clone() {
+        member_compare(app, ui, rect, &original, &other);
+        return;
+    }
     let Some(s) = &mut app.session else { return };
     let Some(mut pair) = app.compare else {
         app.view = View::Grid;
@@ -1129,6 +1139,159 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             });
         }
     });
+}
+
+/// What a member of a stack is, for badges and the version strip: "Original", "IR",
+/// "IR mask", "JPEG", "NegPy", "Luminar", "Copy 1", "Export"…
+pub fn member_label(photo: &PhotoRow) -> String {
+    let stem = photo.path.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let ext = photo.path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+    match photo.unit.role {
+        catalog::Role::Original => "Original".into(),
+        catalog::Role::Pass if stem.ends_with("_ir_valid") => "IR mask".into(),
+        catalog::Role::Pass if stem.ends_with("_ir") => "IR".into(),
+        catalog::Role::Pass if ext == "JPG" || ext == "JPEG" => "JPEG".into(),
+        catalog::Role::Pass => ext,
+        catalog::Role::Edit if stem.contains("_negpy") => "NegPy".into(),
+        catalog::Role::Edit if stem.contains("_luminarneo-edit") => "Luminar".into(),
+        catalog::Role::Edit => "Edit".into(),
+        catalog::Role::Copy => photo.virtual_copy.clone().unwrap_or_else(|| "Copy".into()),
+        catalog::Role::Export => "Export".into(),
+    }
+}
+
+/// Compare with Original: a picture's original (left) and the member that was shown
+/// (right), zoom and position linked. Esc or G leaves.
+fn member_compare(
+    app: &mut PhotoLibraryApp,
+    ui: &mut egui::Ui,
+    rect: Rect,
+    original: &PhotoRow,
+    other: &PhotoRow,
+) {
+    let gap = 6.0;
+    let half = (rect.width() - gap) / 2.0;
+    let panes = [
+        (Rect::from_min_size(rect.min, egui::vec2(half, rect.height())), original, "Before"),
+        (
+            Rect::from_min_size(rect.min + egui::vec2(half + gap, 0.0), egui::vec2(half, rect.height())),
+            other,
+            "After",
+        ),
+    ];
+    for (r, photo, salt) in panes {
+        let header = Rect::from_min_size(r.min, egui::vec2(r.width(), 24.0));
+        let body = Rect::from_min_max(egui::pos2(r.left(), header.bottom()), r.max);
+        let painter = ui.painter();
+        painter.rect_filled(header, 0.0, Color32::from_gray(0x38));
+        painter.text(
+            header.left_center() + egui::vec2(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            format!("{}   {}", member_label(photo), photo.file_name),
+            FontId::proportional(12.0),
+            theme::TEXT_STRONG,
+        );
+        photo_pane(app, ui, body, photo, salt, salt == "After", true);
+    }
+}
+
+/// The version strip (above the filmstrip): every member of the active unit, picture by
+/// picture, with its role. Click shows a member (the grid cell keeps its photo);
+/// double-click or Shift+S makes it the one shown for the stack.
+pub fn version_strip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
+    let members: Vec<catalog::Member> = s.strip_members().to_vec();
+    let shown = s.active_photo().map(|p| p.id);
+    let mut actions = Vec::new();
+    let mut view = None;
+    // The panel's height, measured before the row (a row is only as tall as a line).
+    let height = (ui.available_height() - 8.0).max(40.0);
+    ui.horizontal(|ui| {
+        ui.set_min_height(height);
+        ui.add_space(6.0);
+        let tile = egui::vec2(height * 1.1, height);
+        let mut last_picture = None;
+        for m in &members {
+            let photo = &m.photo;
+            if last_picture.is_some_and(|p| p != photo.unit.picture_id) {
+                // Between the pictures of a group.
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, height), Sense::hover());
+                ui.painter().vline(r.center().x, r.y_range().shrink(6.0), Stroke::new(1.0, theme::TEXT_WEAK));
+            }
+            last_picture = Some(photo.unit.picture_id);
+            let (rect, resp) = ui.allocate_exact_size(tile, Sense::click());
+            let painter = ui.painter_at(rect);
+            let is_shown = shown == Some(photo.id);
+            let bg = if is_shown { theme::CELL_ACTIVE } else { Color32::from_rgb(0x3a, 0x3a, 0x3a) };
+            painter.rect_filled(rect.shrink(2.0), 2.0, bg);
+            let label_h = 15.0;
+            let image_rect = Rect::from_min_max(
+                rect.min + egui::vec2(5.0, 5.0),
+                rect.max - egui::vec2(5.0, label_h + 2.0),
+            );
+            let tint = if m.picture_active { Color32::WHITE } else { Color32::from_white_alpha(150) };
+            match s.thumbs.get(photo.id) {
+                Some(tex) => {
+                    let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), image_rect);
+                    paint_image(&painter, &tex, r, photo.rotation, tint);
+                }
+                None if !photo.missing => s.request(photo, PreviewSize::Thumb),
+                None => {}
+            }
+            let mut label = member_label(photo);
+            if m.active && m.picture_active {
+                label = format!("● {label}");
+            }
+            painter.text(
+                egui::pos2(rect.center().x, rect.bottom() - label_h / 2.0 - 2.0),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(10.5),
+                if is_shown { Color32::from_gray(0x20) } else { theme::TEXT },
+            );
+            let resp = resp.on_hover_text(format!(
+                "{}\nClick: show it   Double-click / Shift+S: show it for the stack",
+                photo.file_name
+            ));
+            if resp.double_clicked() {
+                view = Some(photo.clone());
+                actions.push(Action::MoveToTopOfStack);
+            } else if resp.clicked() {
+                view = Some(photo.clone());
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Show for the Stack (Shift+S)").clicked() {
+                    view = Some(photo.clone());
+                    actions.push(Action::MoveToTopOfStack);
+                    ui.close();
+                }
+                if ui.button("Compare with Original").clicked() {
+                    view = Some(photo.clone());
+                    actions.push(Action::CompareWithOriginal);
+                    ui.close();
+                }
+                if ui.button("Detach from Picture").clicked() {
+                    view = Some(photo.clone());
+                    actions.push(Action::DetachFromPicture);
+                    ui.close();
+                }
+            });
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(8.0);
+            if ui.button("Compare with Original").clicked() {
+                actions.push(Action::CompareWithOriginal);
+            }
+        });
+    });
+    if let Some(photo) = view
+        && let Some(s) = &mut app.session
+    {
+        s.view_member(photo);
+    }
+    for a in actions {
+        app.run(Command::Action(a));
+    }
 }
 
 #[cfg(test)]

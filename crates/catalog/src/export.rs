@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn exported_file_stacks_below_its_original() {
+    fn exported_file_joins_its_original_picture() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("p");
         std::fs::create_dir(&dir).unwrap();
@@ -245,11 +245,14 @@ mod tests {
         };
         let (a, b, e) = (id(&cat, "a.NEF"), id(&cat, "b.NEF"), id(&cat, "a.jpg"));
         assert_eq!(added[0], Some(e));
-        cat.stack_photos(&[a, b]).unwrap();
-        cat.stack_below(a, e).unwrap();
+        assert_ne!(
+            cat.photo(e).unwrap().unwrap().unit.picture_id,
+            cat.photo(a).unwrap().unwrap().unit.picture_id
+        );
+        cat.add_to_picture(a, e, crate::Role::Export).unwrap();
         let photos = cat.photos(crate::Source::AllPhotographs).unwrap();
-        let order: Vec<i64> = photos.iter().map(|p| p.id).collect();
-        assert_eq!(order, vec![a, e, b]);
-        assert!(photos.iter().all(|p| p.stack.is_some_and(|s| s.size == 3 && !s.collapsed)));
+        assert_eq!(photos.iter().map(|p| (p.id, p.unit.members)).collect::<Vec<_>>(), vec![(a, 2), (b, 1)]);
+        let members = cat.unit_members(a).unwrap();
+        assert_eq!((members[1].photo.id, members[1].photo.unit.role), (e, crate::Role::Export));
     }
 }

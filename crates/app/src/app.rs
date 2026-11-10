@@ -176,6 +176,8 @@ pub struct UiState {
     pub export_presets: Vec<crate::export::ExportPreset>,
     /// External Editing settings (Edit In).
     pub edit_in: crate::editors::EditInPrefs,
+    /// The version strip above the filmstrip (S).
+    pub show_version_strip: bool,
 }
 
 impl Default for UiState {
@@ -203,6 +205,7 @@ impl Default for UiState {
             export: crate::export::ExportPrefs::default(),
             export_presets: Vec::new(),
             edit_in: crate::editors::EditInPrefs::default(),
+            show_version_strip: true,
         }
     }
 }
@@ -456,6 +459,11 @@ pub struct Session {
     metadata: Option<(i64, Option<PhotoMetadata>)>,
     pub scroll_to_active: bool,
     reload_due: Option<Instant>,
+    /// A member of the active unit shown instead of the unit's own photo (picked in the
+    /// version strip): (the grid cell's photo id, the member).
+    pub viewing: Option<(i64, PhotoRow)>,
+    /// The active unit's members, for the version strip: (cell photo id, meta_gen, members).
+    strip: Option<(i64, u64, Vec<catalog::Member>)>,
 }
 
 impl Session {
@@ -501,6 +509,8 @@ impl Session {
             metadata: None,
             scroll_to_active: false,
             reload_due: None,
+            viewing: None,
+            strip: None,
         };
         s.refresh_tree()?;
         s.reload_photos()?;
@@ -525,12 +535,33 @@ impl Session {
     pub fn reload_photos(&mut self) -> Result<()> {
         let started = Instant::now();
         let old_index = self.active_index();
+        // Units by (group or picture), to follow a unit whose shown photo changes (a new
+        // edit, another member made active).
+        let unit_key = |p: &PhotoRow| p.unit.group_id.map_or((false, p.unit.picture_id), |g| (true, g));
+        let old_units: HashMap<i64, (bool, i64)> = self.photos.iter().map(|p| (p.id, unit_key(p))).collect();
         self.photos = self.catalog.photos_filtered(self.source, self.sort, &self.filter)?;
         if started.elapsed() > Duration::from_millis(50) {
             log::warn!("slow reload: {} photos in {:.0?}", self.photos.len(), started.elapsed());
         }
         self.index_of = self.photos.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
-        self.selected.retain(|id| self.index_of.contains_key(id));
+        let by_unit: HashMap<(bool, i64), i64> = self.photos.iter().map(|p| (unit_key(p), p.id)).collect();
+        let follow = |id: i64| -> Option<i64> { old_units.get(&id).and_then(|u| by_unit.get(u)).copied() };
+        if let Some(a) = self.active.filter(|a| !self.index_of.contains_key(a)) {
+            self.active = follow(a).or(self.active);
+        }
+        self.selected = self
+            .selected
+            .iter()
+            .filter_map(|&id| if self.index_of.contains_key(&id) { Some(id) } else { follow(id) })
+            .collect();
+        self.strip = None;
+        self.viewing = match self.viewing.take() {
+            // Still in the same unit (and still a member): refresh it.
+            Some((cell, m)) if Some(cell) == self.active => {
+                self.catalog.photo(m.id).ok().flatten().filter(|r| r.id != cell).map(|r| (cell, r))
+            }
+            _ => None,
+        };
         if self.active.is_none_or(|id| !self.index_of.contains_key(&id)) {
             // The active photo left the view (filtered out, stacked away): stay at the
             // same place in the grid rather than jumping to the start.
@@ -542,8 +573,53 @@ impl Session {
         Ok(())
     }
 
+    /// The photo shown: the active cell's, or the member of its unit picked in the
+    /// version strip. Ratings, flags, metadata… apply to it.
     pub fn active_photo(&self) -> Option<&PhotoRow> {
+        if let Some((cell, member)) = &self.viewing
+            && self.active == Some(*cell)
+        {
+            return Some(member);
+        }
         self.active.and_then(|id| self.index_of.get(&id)).map(|&i| &self.photos[i])
+    }
+
+    /// The active unit's members (for the version strip), read when the unit or the
+    /// catalog's metadata changed.
+    pub fn strip_members(&mut self) -> &[catalog::Member] {
+        let Some(cell) = self.active else { return &[] };
+        let fresh = self.strip.as_ref().is_some_and(|(c, g, _)| *c == cell && *g == self.meta_gen);
+        if !fresh {
+            let members = if self.active_photo().is_some_and(|p| p.unit.is_stack()) {
+                self.catalog.unit_members(cell).unwrap_or_else(|e| {
+                    log::warn!("reading the version strip: {e:#}");
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+            self.strip = Some((cell, self.meta_gen, members));
+        }
+        self.strip.as_ref().map_or(&[], |(_, _, m)| m.as_slice())
+    }
+
+    /// Show a member of the active unit in place of the cell's photo (the cell's own
+    /// photo: back to it).
+    pub fn view_member(&mut self, photo: PhotoRow) {
+        let Some(cell) = self.active else { return };
+        self.viewing = (photo.id != cell).then_some((cell, photo));
+        self.metadata = None;
+    }
+
+    /// Alt+← / Alt+→: the previous / next member of the active unit.
+    pub fn step_member(&mut self, forward: bool) {
+        let shown = self.active_photo().map(|p| p.id);
+        let members: Vec<PhotoRow> = self.strip_members().iter().map(|m| m.photo.clone()).collect();
+        let Some(i) = members.iter().position(|m| Some(m.id) == shown) else { return };
+        let j = if forward { i + 1 } else { i.wrapping_sub(1) };
+        if let Some(m) = members.get(j) {
+            self.view_member(m.clone());
+        }
     }
 
     pub fn active_index(&self) -> Option<usize> {
@@ -551,7 +627,7 @@ impl Session {
     }
 
     pub fn active_metadata(&mut self) -> Option<PhotoMetadata> {
-        let id = self.active?;
+        let id = self.active_photo()?.id;
         if self.metadata.as_ref().is_none_or(|(mid, _)| *mid != id) {
             let m = self.catalog.metadata(id).unwrap_or_else(|e| {
                 log::warn!("reading metadata: {e:#}");
@@ -759,11 +835,16 @@ impl Session {
             ids.sort_by_key(|id| self.index_of.get(id));
             ids
         } else {
-            self.active.into_iter().collect()
+            self.active_photo().map(|p| p.id).into_iter().collect()
         }
     }
 
     fn update_rows(&mut self, ids: &[i64], f: impl Fn(&mut PhotoRow)) {
+        if let Some((_, m)) = &mut self.viewing
+            && ids.contains(&m.id)
+        {
+            f(m);
+        }
         for id in ids {
             if let Some(&i) = self.index_of.get(id) {
                 f(&mut self.photos[i]);
@@ -991,6 +1072,9 @@ pub struct PhotoLibraryApp {
     pub editors: std::collections::HashMap<crate::editors::Editor, Result<crate::editors::Found, String>>,
     /// The External Editing settings window is open.
     pub edit_settings: bool,
+    /// Compare with Original: two members of one picture side by side (the original, then
+    /// the member that was shown).
+    pub member_compare: Option<(PhotoRow, PhotoRow)>,
     /// Rects of panels drawn this frame (dimmed by Lights Out).
     pub panel_rects: Vec<egui::Rect>,
     /// Grid geometry from the last frame, for Up/Down and scroll-to-active.
@@ -1024,6 +1108,7 @@ impl PhotoLibraryApp {
             commands: Vec::new(),
             editors: Default::default(),
             edit_settings: false,
+            member_compare: None,
             panel_rects: Vec::new(),
             grid_cols: 1,
             grid_rows_visible: 1,
@@ -1346,9 +1431,14 @@ impl PhotoLibraryApp {
                     Err(e) => self.error = Some(format!("{e:#}")),
                 }
             }
-            Action::Stack | Action::Unstack | Action::ToggleStack | Action::MoveToTopOfStack => {
-                self.stacking(action)
-            }
+            Action::Stack
+            | Action::Unstack
+            | Action::ToggleStack
+            | Action::MoveToTopOfStack
+            | Action::PreviousMember
+            | Action::NextMember
+            | Action::DetachFromPicture
+            | Action::CompareWithOriginal => self.stacking(action),
             Action::ToggleFilters => {
                 self.ui.filter.enabled ^= true;
                 self.notify(if self.ui.filter.enabled { "Filters on" } else { "Filters off" });
@@ -1556,40 +1646,80 @@ impl PhotoLibraryApp {
         });
     }
 
-    /// LrC Photo ▸ Stacking: group (Ctrl+G), unstack (Ctrl+Shift+G), collapse/expand
-    /// (S) and move to top (Shift+S).
+    /// Photo ▸ Stacking: group pictures (Ctrl+G), ungroup (Ctrl+Shift+G), show / hide
+    /// the version strip (S), make the member shown the active one (Shift+S), step
+    /// through members (Alt+← / Alt+→), detach a member, compare with the original.
     fn stacking(&mut self, action: Action) {
         let view = self.view;
         let Some(s) = &mut self.session else { return };
         let ids = s.targets(view);
-        let active_stack = s.active_photo().and_then(|p| p.stack);
+        let shown = s.active_photo().cloned();
         let result: Result<Option<String>> = match action {
-            Action::Stack if ids.len() < 2 => Ok(Some("Select two or more photos to stack".into())),
+            Action::Stack if ids.len() < 2 => Ok(Some("Select two or more photos to group".into())),
             Action::Stack => {
-                s.catalog.stack_photos(&ids).map(|_| Some(format!("Stacked {} photos", ids.len())))
+                s.catalog.group_photos(&ids).map(|_| Some(format!("Grouped {} pictures", ids.len())))
             }
-            Action::Unstack => s.catalog.unstack(&ids).map(|n| (n > 0).then(|| "Unstacked".to_string())),
-            Action::ToggleStack => match active_stack {
-                Some(st) => s.catalog.set_stack_collapsed(st.id, !st.collapsed).map(|()| None),
-                None => Ok(None),
-            },
-            Action::MoveToTopOfStack => match (s.active, active_stack) {
-                (Some(id), Some(_)) => {
-                    s.catalog.move_to_top_of_stack(id).map(|()| Some("Moved to top of stack".into()))
+            Action::Unstack => s.catalog.ungroup(&ids).map(|n| (n > 0).then(|| "Ungrouped".to_string())),
+            Action::ToggleStack => {
+                self.ui.show_version_strip = !self.ui.show_version_strip;
+                return;
+            }
+            Action::MoveToTopOfStack => match &shown {
+                Some(p) if p.unit.is_stack() => {
+                    let id = p.id;
+                    s.catalog.set_active(id).map(|()| {
+                        // The unit now shows this photo: it is the active cell.
+                        s.selected.retain(|x| Some(*x) != s.active);
+                        s.active = Some(id);
+                        s.selected.insert(id);
+                        s.viewing = None;
+                        Some(format!("{} is now shown for its stack", p.file_name))
+                    })
                 }
                 _ => Ok(None),
             },
+            Action::PreviousMember | Action::NextMember => {
+                s.step_member(action == Action::NextMember);
+                return;
+            }
+            Action::DetachFromPicture => match &shown {
+                Some(p) if p.unit.members > p.unit.pictures => {
+                    let id = p.id;
+                    s.catalog.detach(id).map(|()| {
+                        s.viewing = None;
+                        Some(format!("{} is now a picture of its own", p.file_name))
+                    })
+                }
+                _ => Ok(Some("Pick a member of a picture in the version strip first".into())),
+            },
+            Action::CompareWithOriginal => {
+                let members = s.strip_members().to_vec();
+                let Some(shown) = shown else { return };
+                let original = members
+                    .iter()
+                    .filter(|m| m.photo.unit.picture_id == shown.unit.picture_id)
+                    .find(|m| m.photo.unit.role == catalog::Role::Original)
+                    .map(|m| m.photo.clone());
+                match original {
+                    Some(o) if o.id != shown.id => {
+                        self.member_compare = Some((o, shown));
+                        self.view = View::Compare;
+                        return;
+                    }
+                    _ => Ok(Some("This photo is the original of its picture".into())),
+                }
+            }
             _ => Ok(None),
         };
         let reloaded = result.and_then(|msg| s.reload_photos().map(|()| msg));
-        // LrC selects the top of a new stack (its other photos are now folded away).
+        // Select the new group's cell (its other pictures are now inside it).
         if action == Action::Stack
             && reloaded.is_ok()
-            && let Some(&top) = ids.first()
-            && s.index_of.contains_key(&top)
+            && let Some(cell) = s.active
         {
-            s.click(top, egui::Modifiers::NONE);
+            s.click(cell, egui::Modifiers::NONE);
         }
+        s.meta_gen += 1;
         match reloaded {
             Ok(Some(msg)) => self.notify(msg),
             Ok(None) => {}
@@ -2314,6 +2444,9 @@ impl eframe::App for PhotoLibraryApp {
 
         let draw_started = Instant::now();
         crate::ui::layout::draw(self, ui);
+        if self.view != View::Compare {
+            self.member_compare = None;
+        }
         if draw_started.elapsed() > Duration::from_millis(100) {
             log::warn!("slow frame: drawing took {:.0?}", draw_started.elapsed());
         }

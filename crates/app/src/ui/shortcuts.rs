@@ -70,6 +70,10 @@ pub enum Action {
     ClearQuickCollection,
     ToggleStack,
     MoveToTopOfStack,
+    PreviousMember,
+    NextMember,
+    DetachFromPicture,
+    CompareWithOriginal,
     ToggleFilters,
     Find,
     RemoveFromCollection,
@@ -107,6 +111,9 @@ const fn shift(key: Key) -> Binding {
 }
 const fn ctrl_shift(key: Key) -> Binding {
     Binding { key, ctrl: true, shift: true, alt: false }
+}
+const fn alt(key: Key) -> Binding {
+    Binding { key, ctrl: false, shift: false, alt: true }
 }
 const fn ctrl_alt(key: Key) -> Binding {
     Binding { key, ctrl: true, shift: false, alt: true }
@@ -260,10 +267,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl_shift(K::B), A::ClearQuickCollection, ORG, "Clear Quick Collection"),
     s(ctrl(K::Quote), A::CreateVirtualCopy, ORG, "Create virtual copy"),
     s(ctrl(K::N), A::NewCollection, ORG, "New collection (with the selected photos)"),
-    s(ctrl(K::G), A::Stack, ORG, "Group into stack"),
-    s(ctrl_shift(K::G), A::Unstack, ORG, "Unstack"),
-    s(k(K::S), A::ToggleStack, ORG, "Collapse / expand stack"),
-    s(shift(K::S), A::MoveToTopOfStack, ORG, "Move to top of stack"),
+    s(ctrl(K::G), A::Stack, ORG, "Group the selected pictures"),
+    s(ctrl_shift(K::G), A::Unstack, ORG, "Ungroup"),
+    s(k(K::S), A::ToggleStack, ORG, "Show / hide the version strip"),
+    s(shift(K::S), A::MoveToTopOfStack, ORG, "Show this member for its stack (make it active)"),
+    s(alt(K::ArrowLeft), A::PreviousMember, ORG, "Previous member of the stack"),
+    s(alt(K::ArrowRight), A::NextMember, ORG, "Next member of the stack"),
     s(k(K::Delete), A::RemoveFromCollection, ORG, "Remove from collection (when viewing a collection)"),
     s(ctrl(K::L), A::ToggleFilters, VIEW, "Enable / disable Library filters"),
     s(ctrl(K::F), A::Find, VIEW, "Find (text filter)"),

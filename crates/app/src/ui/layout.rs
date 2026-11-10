@@ -181,10 +181,17 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             menu_action(ui, app, "Create Virtual Copy", Action::CreateVirtualCopy);
             menu_action(ui, app, "Add to Quick Collection", Action::QuickCollection);
             ui.menu_button("Stacking", |ui| {
-                menu_action(ui, app, "Group into Stack", Action::Stack);
-                menu_action(ui, app, "Unstack", Action::Unstack);
-                menu_action(ui, app, "Collapse / Expand Stack", Action::ToggleStack);
-                menu_action(ui, app, "Move to Top of Stack", Action::MoveToTopOfStack);
+                menu_action(ui, app, "Group Pictures", Action::Stack);
+                menu_action(ui, app, "Ungroup", Action::Unstack);
+                ui.separator();
+                menu_action(ui, app, "Show for the Stack", Action::MoveToTopOfStack);
+                menu_action(ui, app, "Previous Member", Action::PreviousMember);
+                menu_action(ui, app, "Next Member", Action::NextMember);
+                menu_action(ui, app, "Compare with Original", Action::CompareWithOriginal);
+                menu_action(ui, app, "Detach from Picture", Action::DetachFromPicture);
+                ui.separator();
+                let strip = app.ui.show_version_strip;
+                menu_toggle(ui, app, "Show Version Strip", strip, Action::ToggleStack);
             });
             ui.separator();
             menu_action(ui, app, "Rotate Left (CCW)", Action::RotateLeft);
@@ -404,6 +411,17 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         app.panel_rects.push(r.response.rect);
     }
     app.ui.show_filmstrip = show;
+
+    // The version strip, above the filmstrip, while the photo shown is in a stack.
+    let in_stack = app.session.as_ref().and_then(|s| s.active_photo()).is_some_and(|p| p.unit.is_stack());
+    if app.ui.show_version_strip && in_stack && !app.fullscreen {
+        let r = egui::Panel::bottom("version_strip")
+            .resizable(false)
+            .exact_size(92.0)
+            .frame(panel_frame(theme::PANEL))
+            .show(ui, |ui| timed("version strip", || views::version_strip(app, ui)));
+        app.panel_rects.push(r.response.rect);
+    }
 
     let mut show = app.ui.show_left;
     if let Some(r) = egui::Panel::left("left_panels")

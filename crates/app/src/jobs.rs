@@ -765,7 +765,7 @@ fn add_edited(
     }
     if new && cat.photo(original)?.is_some() {
         cat.copy_metadata(original, id)?;
-        cat.stack_below(original, id)?;
+        cat.add_to_picture(original, id, catalog::Role::Edit)?;
     }
     if let Some(row) = cat.photo(id)? {
         let photo = PhotoRef::from(&row);
@@ -939,8 +939,10 @@ mod tests {
         assert!(jobs.progress().export.is_none(), "progress is cleared when done");
         let cat = Catalog::open(&dir).unwrap();
         let all = cat.photos(catalog::Source::AllPhotographs).unwrap();
-        assert_eq!(all.iter().map(|p| p.file_name.as_str()).collect::<Vec<_>>(), ["a.png", "a.jpg"]);
-        assert_eq!(all[0].stack.map(|s| s.size), Some(2));
+        assert_eq!(
+            all.iter().map(|p| (p.file_name.as_str(), p.unit.members)).collect::<Vec<_>>(),
+            [("a.png", 2)]
+        );
     }
 
     #[test]

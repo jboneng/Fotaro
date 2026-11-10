@@ -308,12 +308,8 @@ fn settings(p: &mut ExportPrefs, sample: Option<&(String, String, i64)>, ui: &mu
         });
         row(ui, "", |ui| {
             ui.checkbox(&mut p.add_to_catalog, "Add to This Catalog");
-            let can_stack = p.export_to == ExportTo::SameFolder && !p.subfolder_on;
-            ui.add_enabled(
-                can_stack && p.add_to_catalog,
-                egui::Checkbox::new(&mut p.add_to_stack, "Add to Stack"),
-            )
-            .on_disabled_hover_text("Stacking needs exporting to the original's folder, without a subfolder");
+            ui.add_enabled(p.add_to_catalog, egui::Checkbox::new(&mut p.add_to_stack, "Add to Stack"))
+                .on_hover_text("Each export joins its original's stack (role Export)");
         });
         row(ui, "Existing Files:", |ui| {
             combo(ui, "export_existing", 300.0, &mut p.existing, &ExistingFiles::ALL, ExistingFiles::label);

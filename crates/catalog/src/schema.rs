@@ -165,6 +165,164 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE exif ADD COLUMN gps_alt  REAL;
     ALTER TABLE exif ADD COLUMN gps_read INTEGER NOT NULL DEFAULT 0;
     "#,
+    // v6: pictures and groups replace stacks (see `pictures.rs`). Every photo belongs to
+    // a picture with a role; pictures may be grouped by hand. The JPEG of a RAW+JPEG
+    // pair becomes a photo of its own (a pass of the raw's picture). Table rebuilds drop
+    // the stack and sidecar columns; `pictures::finish_v6` then joins passes and edits
+    // by name and tidies the groups.
+    r#"
+    CREATE TABLE groups (
+        id                INTEGER PRIMARY KEY,
+        active_picture_id INTEGER
+    );
+    CREATE TABLE pictures (
+        id              INTEGER PRIMARY KEY,
+        group_id        INTEGER REFERENCES groups(id) ON DELETE SET NULL,
+        group_pos       INTEGER,
+        active_photo_id INTEGER
+    );
+    CREATE INDEX pictures_group ON pictures(group_id);
+
+    -- A picture per photo that isn't a virtual copy (same id: the table is empty), and
+    -- the old stacks as groups.
+    INSERT INTO pictures (id, active_photo_id) SELECT id, id FROM photos WHERE virtual_of IS NULL;
+    INSERT INTO groups (id) SELECT id FROM stacks;
+    UPDATE pictures SET (group_id, group_pos) =
+        (SELECT p.stack_id, p.stack_pos FROM photos p WHERE p.id = pictures.id);
+
+    CREATE TABLE photos_new (
+        id              INTEGER PRIMARY KEY,
+        master_file_id  INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        capture_time    INTEGER,
+        rating          INTEGER NOT NULL DEFAULT 0 CHECK (rating BETWEEN 0 AND 5),
+        flag            INTEGER NOT NULL DEFAULT 0 CHECK (flag IN (-1, 0, 1)),
+        color_label     TEXT,
+        orientation     INTEGER NOT NULL DEFAULT 1,
+        imported_at     INTEGER NOT NULL,
+        title           TEXT,
+        caption         TEXT,
+        creator         TEXT,
+        copyright       TEXT,
+        metadata_dirty  INTEGER NOT NULL DEFAULT 0,
+        xmp_mtime_ms    INTEGER,
+        virtual_of      INTEGER REFERENCES photos(id) ON DELETE CASCADE,
+        copy_name       TEXT,
+        picture_id      INTEGER REFERENCES pictures(id),
+        role            TEXT    NOT NULL DEFAULT 'original'
+                        CHECK (role IN ('original', 'pass', 'edit', 'copy', 'export')),
+        derived_from    INTEGER REFERENCES photos(id) ON DELETE SET NULL,
+        member_pos      INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO photos_new (id, master_file_id, capture_time, rating, flag, color_label, orientation,
+                            imported_at, title, caption, creator, copyright, metadata_dirty,
+                            xmp_mtime_ms, virtual_of, copy_name,
+                            picture_id, role, derived_from, member_pos)
+        SELECT id, master_file_id, capture_time, rating, flag, color_label, orientation,
+               imported_at, title, caption, creator, copyright, metadata_dirty,
+               xmp_mtime_ms, virtual_of, copy_name,
+               coalesce(virtual_of, id),
+               CASE WHEN virtual_of IS NULL THEN 'original' ELSE 'copy' END,
+               virtual_of,
+               CASE WHEN virtual_of IS NULL THEN 0 ELSE id END
+          FROM photos;
+    -- Paired JPEGs: photos of their own, with the raw photo's metadata, in its picture.
+    INSERT INTO photos_new (master_file_id, capture_time, rating, color_label, orientation,
+                            imported_at, title, caption, creator, copyright, picture_id, role,
+                            member_pos)
+        SELECT f.id, p.capture_time, p.rating, p.color_label, p.orientation, p.imported_at,
+               p.title, p.caption, p.creator, p.copyright, p.id, 'pass', 0
+          FROM files f JOIN photos p ON p.id = f.sidecar_of;
+    INSERT INTO photo_keywords (photo_id, keyword_id)
+        SELECT n.id, pk.keyword_id
+          FROM photos_new n JOIN files f ON f.id = n.master_file_id
+          JOIN photo_keywords pk ON pk.photo_id = f.sidecar_of
+         WHERE n.role = 'pass';
+    DROP TABLE photos;
+    ALTER TABLE photos_new RENAME TO photos;
+    CREATE INDEX photos_capture_time ON photos(capture_time);
+    CREATE INDEX photos_master_file ON photos(master_file_id);
+    CREATE INDEX photos_virtual_of ON photos(virtual_of);
+    CREATE INDEX photos_picture ON photos(picture_id);
+    DROP TABLE stacks;
+
+    CREATE TABLE files_new (
+        id          INTEGER PRIMARY KEY,
+        folder_id   INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        name        TEXT    NOT NULL,
+        ext         TEXT    NOT NULL,
+        kind        TEXT    NOT NULL CHECK (kind IN ('raw', 'image')),
+        size        INTEGER NOT NULL,
+        mtime_ms    INTEGER NOT NULL,
+        missing     INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (folder_id, name)
+    );
+    INSERT INTO files_new (id, folder_id, name, ext, kind, size, mtime_ms, missing)
+        SELECT id, folder_id, name, ext, kind, size, mtime_ms, missing FROM files;
+    DROP TABLE files;
+    ALTER TABLE files_new RENAME TO files;
+
+    -- Every photo has a picture: a new photo without one gets a picture of its own.
+    CREATE TRIGGER photo_new_picture AFTER INSERT ON photos WHEN NEW.picture_id IS NULL
+    BEGIN
+        INSERT INTO pictures (active_photo_id) VALUES (NEW.id);
+        UPDATE photos SET picture_id = last_insert_rowid() WHERE id = NEW.id;
+    END;
+
+    -- A picture that loses a photo (removed, or moved to another picture): gone when
+    -- empty; otherwise it keeps an original and an active member.
+    CREATE TRIGGER photo_gone AFTER DELETE ON photos
+    BEGIN
+        DELETE FROM pictures WHERE id = OLD.picture_id
+           AND NOT EXISTS (SELECT 1 FROM photos WHERE picture_id = OLD.picture_id);
+        UPDATE photos SET role = 'original'
+         WHERE id = (SELECT id FROM photos WHERE picture_id = OLD.picture_id ORDER BY member_pos, id LIMIT 1)
+           AND OLD.role = 'original'
+           AND NOT EXISTS (SELECT 1 FROM photos WHERE picture_id = OLD.picture_id AND role = 'original');
+        UPDATE pictures SET active_photo_id =
+               (SELECT id FROM photos WHERE picture_id = pictures.id
+                 ORDER BY role <> 'original', member_pos, id LIMIT 1)
+         WHERE id = OLD.picture_id AND active_photo_id = OLD.id;
+    END;
+    CREATE TRIGGER photo_moved AFTER UPDATE OF picture_id ON photos
+      WHEN OLD.picture_id IS NOT NULL AND OLD.picture_id IS NOT NEW.picture_id
+    BEGIN
+        DELETE FROM pictures WHERE id = OLD.picture_id
+           AND NOT EXISTS (SELECT 1 FROM photos WHERE picture_id = OLD.picture_id);
+        UPDATE photos SET role = 'original'
+         WHERE id = (SELECT id FROM photos WHERE picture_id = OLD.picture_id ORDER BY member_pos, id LIMIT 1)
+           AND OLD.role = 'original'
+           AND NOT EXISTS (SELECT 1 FROM photos WHERE picture_id = OLD.picture_id AND role = 'original');
+        UPDATE pictures SET active_photo_id =
+               (SELECT id FROM photos WHERE picture_id = pictures.id
+                 ORDER BY role <> 'original', member_pos, id LIMIT 1)
+         WHERE id = OLD.picture_id AND active_photo_id = OLD.id;
+    END;
+
+    -- A group that loses a picture keeps an active picture; a group of one is no group.
+    CREATE TRIGGER picture_gone AFTER DELETE ON pictures WHEN OLD.group_id IS NOT NULL
+    BEGIN
+        UPDATE groups SET active_picture_id =
+               (SELECT id FROM pictures WHERE group_id = groups.id ORDER BY group_pos, id LIMIT 1)
+         WHERE id = OLD.group_id AND active_picture_id = OLD.id;
+        UPDATE pictures SET group_id = NULL, group_pos = NULL
+         WHERE group_id = OLD.group_id
+           AND (SELECT COUNT(*) FROM pictures WHERE group_id = OLD.group_id) < 2;
+        DELETE FROM groups WHERE id = OLD.group_id
+           AND NOT EXISTS (SELECT 1 FROM pictures WHERE group_id = OLD.group_id);
+    END;
+    CREATE TRIGGER picture_regrouped AFTER UPDATE OF group_id ON pictures
+      WHEN OLD.group_id IS NOT NULL AND OLD.group_id IS NOT NEW.group_id
+    BEGIN
+        UPDATE groups SET active_picture_id =
+               (SELECT id FROM pictures WHERE group_id = groups.id ORDER BY group_pos, id LIMIT 1)
+         WHERE id = OLD.group_id AND active_picture_id = OLD.id;
+        UPDATE pictures SET group_id = NULL, group_pos = NULL
+         WHERE group_id = OLD.group_id
+           AND (SELECT COUNT(*) FROM pictures WHERE group_id = OLD.group_id) < 2;
+        DELETE FROM groups WHERE id = OLD.group_id
+           AND NOT EXISTS (SELECT 1 FROM pictures WHERE group_id = OLD.group_id);
+    END;
+    "#,
 ];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -193,6 +351,9 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
             let next = i as u32 + 1;
             let tx = conn.transaction()?;
             tx.execute_batch(sql).with_context(|| format!("migrating catalog to v{next}"))?;
+            if next == 6 {
+                crate::pictures::finish_v6(&tx).context("migrating catalog to v6")?;
+            }
             let broken: i64 =
                 tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
             anyhow::ensure!(

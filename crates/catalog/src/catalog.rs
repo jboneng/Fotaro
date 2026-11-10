@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::pictures::{Role, UnitInfo};
 use crate::query::{Criterion, Facet, MetaColumn, SmartRules};
 use crate::scan::FileKind;
 use crate::schema;
@@ -66,24 +67,13 @@ pub struct PhotoRow {
     pub rotation: u8,
     /// Changed in the catalog since it was last written to the XMP sidecar.
     pub metadata_dirty: bool,
-    pub stack: Option<StackInfo>,
+    /// Its picture, group and role, and the size of its unit (see `pictures.rs`).
+    pub unit: UnitInfo,
     pub in_quick_collection: bool,
-    /// Extension of a JPEG paired with this raw file (shown as "NEF+JPG").
-    pub paired_ext: Option<String>,
     /// A virtual copy's name ("Copy 1"); `None` for master photos.
     pub virtual_copy: Option<String>,
     /// The master photo (itself, unless this is a virtual copy): copies share its previews.
     pub master_id: i64,
-}
-
-/// A photo's place in a stack (LrC Photo ▸ Stacking).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StackInfo {
-    pub id: i64,
-    /// 0 is the top of the stack.
-    pub position: u32,
-    pub size: u32,
-    pub collapsed: bool,
 }
 
 /// Camera/exposure metadata stored per photo. `capture_time` is "naive local"
@@ -166,27 +156,67 @@ impl SortKey {
         }
     }
 
-    /// SQL ORDER BY terms (ascending), each ending with stable tie-breakers.
-    /// Higher ratings and picks come first, as in LrC.
-    fn order_by(self) -> &'static str {
+    /// Compare two grid rows (ascending), each order ending with stable tie-breakers:
+    /// capture time (of the picture's original), folder, name, id. Higher ratings and
+    /// picks come first, as in LrC. Sorting happens here rather than in SQL: with every
+    /// column carried through SQLite's sorter, a 10,000-photo grid sorted several times
+    /// slower.
+    fn compare(self, a: &SortRow, b: &SortRow) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let nocase = |x: &str, y: &str| {
+            x.bytes().map(|c| c.to_ascii_lowercase()).cmp(y.bytes().map(|c| c.to_ascii_lowercase()))
+        };
+        // Unknown capture times last, then by time, folder, name and id.
+        let tail = |a: &SortRow, b: &SortRow| -> Ordering {
+            a.time
+                .is_none()
+                .cmp(&b.time.is_none())
+                .then(a.time.cmp(&b.time))
+                .then_with(|| a.folder.cmp(&b.folder))
+                .then_with(|| a.row.file_name.cmp(&b.row.file_name))
+                .then(a.row.id.cmp(&b.row.id))
+        };
+        let label_rank = |r: &SortRow| match r.row.color_label.as_deref() {
+            Some("red") => 1,
+            Some("yellow") => 2,
+            Some("green") => 3,
+            Some("blue") => 4,
+            Some("purple") => 5,
+            _ => 6,
+        };
         match self {
-            SortKey::CaptureTime => "p.capture_time IS NULL, p.capture_time, fo.path, f.name",
-            SortKey::AddedOrder => "p.id",
-            SortKey::FileName => "f.name COLLATE NOCASE, fo.path",
-            SortKey::Extension => "f.ext, f.name COLLATE NOCASE, fo.path",
-            SortKey::Rating => "p.rating DESC, p.capture_time IS NULL, p.capture_time, fo.path, f.name",
-            SortKey::Pick => "p.flag DESC, p.capture_time IS NULL, p.capture_time, fo.path, f.name",
-            SortKey::LabelColor => {
-                "CASE p.color_label WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 WHEN 'green' THEN 3
-                     WHEN 'blue' THEN 4 WHEN 'purple' THEN 5 ELSE 6 END,
-                 p.capture_time IS NULL, p.capture_time, fo.path, f.name"
-            }
-            SortKey::AspectRatio => {
-                "e.width IS NULL, CAST(e.width AS REAL) / MAX(e.height, 1),
-                 p.capture_time IS NULL, p.capture_time, fo.path, f.name"
-            }
+            SortKey::CaptureTime => tail(a, b),
+            SortKey::AddedOrder => a.row.id.cmp(&b.row.id),
+            SortKey::FileName => nocase(&a.row.file_name, &b.row.file_name)
+                .then_with(|| a.folder.cmp(&b.folder))
+                .then(a.row.id.cmp(&b.row.id)),
+            SortKey::Extension => a
+                .ext
+                .cmp(&b.ext)
+                .then_with(|| nocase(&a.row.file_name, &b.row.file_name))
+                .then_with(|| a.folder.cmp(&b.folder))
+                .then(a.row.id.cmp(&b.row.id)),
+            SortKey::Rating => b.row.rating.cmp(&a.row.rating).then_with(|| tail(a, b)),
+            SortKey::Pick => (b.row.flag as i8).cmp(&(a.row.flag as i8)).then_with(|| tail(a, b)),
+            SortKey::LabelColor => label_rank(a).cmp(&label_rank(b)).then_with(|| tail(a, b)),
+            SortKey::AspectRatio => a
+                .aspect
+                .is_none()
+                .cmp(&b.aspect.is_none())
+                .then(a.aspect.partial_cmp(&b.aspect).unwrap_or(Ordering::Equal))
+                .then_with(|| tail(a, b)),
         }
     }
+}
+
+/// A grid row with the values it sorts by.
+struct SortRow {
+    row: PhotoRow,
+    /// Capture time of the picture's original (or the photo's own).
+    time: Option<i64>,
+    folder: String,
+    ext: String,
+    aspect: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -196,20 +226,27 @@ pub struct SortOrder {
     pub descending: bool,
 }
 
-const PHOTOS_FROM: &str = "FROM photos p
-    JOIN files f    ON f.id = p.master_file_id
-    JOIN folders fo ON fo.id = f.folder_id
+pub(crate) const PHOTOS_FROM: &str = "FROM photos p
+    JOIN files f     ON f.id = p.master_file_id
+    JOIN folders fo  ON fo.id = f.folder_id
+    JOIN pictures pi ON pi.id = p.picture_id
     LEFT JOIN exif e ON e.photo_id = p.id";
 
-const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, f.missing,
+pub(crate) const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f.mtime_ms, f.missing,
      p.rating, p.flag, p.color_label, p.capture_time, p.orientation, p.metadata_dirty,
-     p.stack_id, p.stack_pos,
-     (SELECT COUNT(*) FROM photos ps WHERE ps.stack_id = p.stack_id),
-     (SELECT s.collapsed FROM stacks s WHERE s.id = p.stack_id),
+     p.picture_id, p.role, pi.group_id,
+     CASE WHEN pi.group_id IS NULL
+          THEN (SELECT COUNT(*) FROM photos m WHERE m.picture_id = p.picture_id)
+          ELSE (SELECT COUNT(*) FROM photos m JOIN pictures g ON g.id = m.picture_id
+                 WHERE g.group_id = pi.group_id) END,
+     CASE WHEN pi.group_id IS NULL THEN 1
+          ELSE (SELECT COUNT(*) FROM pictures g WHERE g.group_id = pi.group_id) END,
      EXISTS (SELECT 1 FROM quick_collection q WHERE q.photo_id = p.id),
-     (SELECT upper(sc.ext) FROM files sc WHERE sc.sidecar_of = p.id LIMIT 1),
      CASE WHEN p.virtual_of IS NULL THEN NULL ELSE coalesce(p.copy_name, 'Copy') END,
      coalesce(p.virtual_of, p.id)";
+
+/// How many columns [`PHOTO_COLUMNS`] has (queries add their own after them).
+pub(crate) const PHOTO_COLUMN_COUNT: usize = 21;
 
 /// `photos.orientation` holds the catalog rotation as an EXIF/XMP orientation code
 /// (1 = none, 6 = 90° CW, 3 = 180°, 8 = 90° CCW), the form XMP sidecars will use.
@@ -226,10 +263,11 @@ fn orientation_from_rotation(quarter_turns: u8) -> i64 {
     [1, 6, 3, 8][usize::from(quarter_turns % 4)]
 }
 
-fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
+pub(crate) fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
     let folder: String = r.get(1)?;
     let name: String = r.get(2)?;
     let kind: String = r.get(3)?;
+    let count = |i: usize| -> rusqlite::Result<u32> { Ok(r.get::<_, i64>(i)?.max(1) as u32) };
     Ok(PhotoRow {
         id: r.get(0)?,
         path: Path::new(&folder).join(&name),
@@ -244,66 +282,18 @@ fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         capture_time: r.get(10)?,
         rotation: rotation_from_orientation(r.get(11)?),
         metadata_dirty: r.get(12)?,
-        stack: match (r.get::<_, Option<i64>>(13)?, r.get::<_, i64>(15)?) {
-            (Some(id), size) if size >= 2 => Some(StackInfo {
-                id,
-                position: r.get::<_, Option<i64>>(14)?.unwrap_or(0).max(0) as u32,
-                size: size as u32,
-                collapsed: r.get::<_, Option<bool>>(16)?.unwrap_or(true),
-            }),
-            _ => None,
+        unit: UnitInfo {
+            picture_id: r.get(13)?,
+            role: Role::parse(&r.get::<_, String>(14)?),
+            group_id: r.get(15)?,
+            members: count(16)?,
+            pictures: count(17)?,
+            hidden_match: false,
         },
-        in_quick_collection: r.get(17)?,
-        paired_ext: r.get(18)?,
+        in_quick_collection: r.get(18)?,
         virtual_copy: r.get(19)?,
         master_id: r.get(20)?,
     })
-}
-
-/// Keep each stack's photos together at the place of its top-most photo, in stack
-/// order; a collapsed stack shows only that photo (as in LrC's Grid).
-pub(crate) fn group_stacks(rows: Vec<PhotoRow>) -> Vec<PhotoRow> {
-    use std::collections::HashMap;
-    let mut anchor: HashMap<i64, (u32, usize)> = HashMap::new();
-    for (i, r) in rows.iter().enumerate() {
-        if let Some(s) = r.stack {
-            let a = anchor.entry(s.id).or_insert((s.position, i));
-            if s.position < a.0 {
-                *a = (s.position, i);
-            }
-        }
-    }
-    if anchor.is_empty() {
-        return rows;
-    }
-    let mut groups: HashMap<i64, Vec<PhotoRow>> = HashMap::new();
-    let mut order: Vec<Result<PhotoRow, i64>> = Vec::with_capacity(rows.len());
-    for (i, r) in rows.into_iter().enumerate() {
-        match r.stack {
-            Some(s) => {
-                if anchor[&s.id].1 == i {
-                    order.push(Err(s.id));
-                }
-                groups.entry(s.id).or_default().push(r);
-            }
-            None => order.push(Ok(r)),
-        }
-    }
-    let mut out = Vec::with_capacity(order.len());
-    for item in order {
-        match item {
-            Ok(r) => out.push(r),
-            Err(id) => {
-                let mut members = groups.remove(&id).unwrap_or_default();
-                members.sort_by_key(|r| r.stack.map_or(0, |s| s.position));
-                if members.first().and_then(|r| r.stack).is_some_and(|s| s.collapsed) {
-                    members.truncate(1);
-                }
-                out.extend(members);
-            }
-        }
-    }
-    out
 }
 
 impl Catalog {
@@ -448,28 +438,98 @@ impl Catalog {
         })
     }
 
-    /// Photos of a source that match `filter`, in sort order, with stacks kept
-    /// together (and collapsed stacks showing only their top photo).
+    /// The grid: one row per unit (a group, or a picture in no group) of which any
+    /// member is in `source` and matches `filter`, showing the unit's active photo, in
+    /// sort order. Capture time sorts by the shown picture's original, so a film roll stays
+    /// in frame order whatever its edits are dated.
     pub fn photos_filtered(
         &self,
         source: Source,
         sort: SortOrder,
         filter: &Criterion,
     ) -> Result<Vec<PhotoRow>> {
+        use std::collections::{HashMap, HashSet};
+        // 1. The matching photos, and what each one's unit shows. (Two simple queries
+        //    and the unit logic here: SQLite planned the one-query version several
+        //    times slower on a 10,000-photo catalog.)
         let mut args = Vec::new();
         let source = self.source_condition(source, &mut args)?;
         let filter = filter.to_sql(&mut args);
         let sql = format!(
-            "SELECT {PHOTO_COLUMNS} {PHOTOS_FROM} WHERE ({source}) AND ({filter}) ORDER BY {}, p.id",
-            sort.key.order_by()
+            "SELECT p.id, pi.group_id, pi.active_photo_id {PHOTOS_FROM} WHERE ({source}) AND ({filter})"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(args), photo_row)?;
-        let mut photos: Vec<PhotoRow> = rows.collect::<rusqlite::Result<_>>()?;
+        let matched: Vec<(i64, Option<i64>, Option<i64>)> = stmt
+            .query_map(rusqlite::params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut group_shows: HashMap<i64, i64> = HashMap::new();
+        if matched.iter().any(|(_, g, _)| g.is_some()) {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT g.id, ap.active_photo_id FROM groups g JOIN pictures ap ON ap.id = g.active_picture_id",
+            )?;
+            for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+                let (g, p): (i64, Option<i64>) = row?;
+                group_shows.extend(p.map(|p| (g, p)));
+            }
+        }
+        let matched_ids: HashSet<i64> = matched.iter().map(|(id, _, _)| *id).collect();
+        let shown: HashSet<i64> = matched
+            .iter()
+            .filter_map(|&(id, group, active)| match group {
+                Some(g) => group_shows.get(&g).copied(),
+                None => Some(active.unwrap_or(id)),
+            })
+            .collect();
+        if shown.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 2. Those photos' rows, with what they sort by; sorted here.
+        let cols = format!(
+            "SELECT {PHOTO_COLUMNS}, coalesce(o.capture_time, p.capture_time), fo.path, f.ext,
+                    CAST(e.width AS REAL) / MAX(e.height, 1)
+               {PHOTOS_FROM}
+               LEFT JOIN photos o ON o.picture_id = p.picture_id AND o.role = 'original'"
+        );
+        let n = PHOTO_COLUMN_COUNT;
+        let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<SortRow> {
+            let mut row = photo_row(r)?;
+            row.unit.hidden_match = !matched_ids.contains(&row.id);
+            Ok(SortRow {
+                row,
+                time: r.get(n)?,
+                folder: r.get(n + 1)?,
+                ext: r.get(n + 2)?,
+                aspect: r.get(n + 3)?,
+            })
+        };
+        let mut rows: Vec<SortRow> = Vec::with_capacity(shown.len());
+        // Most of the catalog: read it all and keep the shown ones; a few: ask for them.
+        let total = self.photo_count()?;
+        if shown.len() as i64 * 4 > total {
+            let mut stmt = self.conn.prepare_cached(&cols)?;
+            for row in stmt.query_map([], read)? {
+                let row = row?;
+                if shown.contains(&row.row.id) {
+                    rows.push(row);
+                }
+            }
+        } else {
+            let ids: Vec<i64> = shown.into_iter().collect();
+            for chunk in ids.chunks(500) {
+                let marks = vec!["?"; chunk.len()].join(",");
+                let mut stmt = self.conn.prepare_cached(&format!("{cols} WHERE p.id IN ({marks})"))?;
+                for row in stmt.query_map(rusqlite::params_from_iter(chunk), read)? {
+                    rows.push(row?);
+                }
+            }
+        }
+        rows.sort_by(|a, b| sort.key.compare(a, b));
+        let mut photos: Vec<PhotoRow> = rows.into_iter().map(|r| r.row).collect();
         if sort.descending {
             photos.reverse();
         }
-        Ok(group_stacks(photos))
+        Ok(photos)
     }
 
     /// How many photos match a source and filter.
@@ -570,12 +630,7 @@ impl Catalog {
     }
 
     pub fn photo(&self, photo_id: i64) -> Result<Option<PhotoRow>> {
-        let sql = format!(
-            "SELECT {PHOTO_COLUMNS} FROM photos p
-               JOIN files f    ON f.id = p.master_file_id
-               JOIN folders fo ON fo.id = f.folder_id
-              WHERE p.id = ?1"
-        );
+        let sql = format!("SELECT {PHOTO_COLUMNS} {PHOTOS_FROM} WHERE p.id = ?1");
         Ok(self.conn.query_row(&sql, [photo_id], photo_row).optional()?)
     }
 

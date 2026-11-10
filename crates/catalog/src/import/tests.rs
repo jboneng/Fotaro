@@ -125,7 +125,11 @@ fn copy_import_into_dated_folders() {
             &AtomicBool::new(false),
         )
         .unwrap();
-    assert_eq!((report.imported, report.failed.len()), (2, 0), "RAW+JPEG is one photo: {report:?}");
+    assert_eq!(
+        (report.imported, report.failed.len()),
+        (3, 0),
+        "RAW+JPEG: two photos of one picture: {report:?}"
+    );
     assert_eq!(calls.lock().unwrap().last(), Some(&(3, 3)));
     let day = dest.join("2026").join("2026-11-08");
     assert_eq!(fs::read(day.join("DSC_1.NEF")).unwrap(), b"raw-one");
@@ -140,7 +144,7 @@ fn copy_import_into_dated_folders() {
     let previous = cat.photos(Source::PreviousImport).unwrap();
     assert_eq!(previous.len(), 2);
     let one = previous.iter().find(|p| p.file_name == "DSC_1.NEF").unwrap();
-    assert_eq!((one.rating, one.paired_ext.as_deref()), (4, Some("JPG")));
+    assert_eq!((one.rating, one.unit.members), (4, 2), "with its JPEG");
     assert_eq!(cat.photo_keywords(one.id).unwrap(), vec![vec!["Trips".to_string(), "Hegra".to_string()]]);
     let folders = cat.folders().unwrap();
     let id_of = |p: &Path| folders.iter().find(|f| f.path == dunce::canonicalize(p).unwrap()).unwrap();

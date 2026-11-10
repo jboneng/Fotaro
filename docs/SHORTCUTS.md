@@ -102,10 +102,12 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `Ctrl+Shift+B` | Clear Quick Collection | ✅ |
 | `Ctrl+Quote` | Create virtual copy | ✅ |
 | `Ctrl+N` | New collection (with the selected photos) | ✅ |
-| `Ctrl+G` | Group into stack | ✅ |
-| `Ctrl+Shift+G` | Unstack | ✅ |
-| `S` | Collapse / expand stack | ✅ |
-| `Shift+S` | Move to top of stack | ✅ |
+| `Ctrl+G` | Group the selected pictures | ✅ |
+| `Ctrl+Shift+G` | Ungroup | ✅ |
+| `S` | Show / hide the version strip | ✅ |
+| `Shift+S` | Show this member for its stack (make it active) | ✅ |
+| `Alt+←` | Previous member of the stack | ✅ |
+| `Alt+→` | Next member of the stack | ✅ |
 | `Delete` | Remove from collection (when viewing a collection) | ✅ |
 
 ## View

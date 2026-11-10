@@ -77,9 +77,10 @@ fn same_folder_export_is_added_and_stacked_with_its_original() {
     assert_eq!(r.exported, vec![f.photos.join("a.tif")]);
     assert_eq!(r.added.len(), 1);
     let photos = f.cat.photos(Source::AllPhotographs).unwrap();
-    let order: Vec<&str> = photos.iter().map(|p| p.file_name.as_str()).collect();
-    assert_eq!(order[..2], ["a.png", "a.tif"], "stacked below the original");
-    assert_eq!(photos[0].stack.map(|s| s.size), Some(2));
+    let order: Vec<(&str, u32)> = photos.iter().map(|p| (p.file_name.as_str(), p.unit.members)).collect();
+    assert_eq!(order, [("a.png", 2), ("b.tif", 1)], "in the original's stack, which still shows it");
+    let members = f.cat.unit_members(all[0]).unwrap();
+    assert_eq!(members[1].photo.unit.role, catalog::Role::Export);
 
     let r = export(&mut f.cat, &all[1..2], &prefs);
     assert_eq!(r.exported, vec![f.photos.join("b-2.tif")]);

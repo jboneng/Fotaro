@@ -216,17 +216,12 @@ impl Catalog {
             folder_ids.insert(path.clone(), id);
         }
 
-        // New JPEGs next to a raw file of the same name become part of that raw photo
-        // (unless the catalog treats them separately); handle them after the raws.
+        // New photos join the picture they belong to by name afterwards: a JPEG next to a
+        // raw file of the same name (unless the catalog treats them separately), IR passes,
+        // NegPy and Luminar edits.
         let pair_jpegs = !separate_raw_jpeg && opts.pair_raw_jpeg;
-        let is_pair_candidate = |c: &FileChange| {
-            pair_jpegs && c.existing_id.is_none() && c.kind == FileKind::Image && is_jpeg(&c.path)
-        };
-        let ordered = changes
-            .iter()
-            .filter(|c| !is_pair_candidate(c))
-            .chain(changes.iter().filter(|c| is_pair_candidate(c)));
-        for c in ordered {
+        let mut new_photos = Vec::new();
+        for c in &changes {
             let photo_id = match c.existing_id {
                 Some(file_id) => {
                     tx.execute(
@@ -243,7 +238,7 @@ impl Catalog {
                         .optional()?;
                     match photo {
                         Some(p) => p,
-                        None => continue, // a paired JPEG: no photo of its own
+                        None => continue,
                     }
                 }
                 None => {
@@ -254,17 +249,6 @@ impl Catalog {
                         .context("file outside walked folders")?;
                     let name = c.path.file_name().unwrap_or_default().to_string_lossy();
                     let ext = c.path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
-                    if is_pair_candidate(c)
-                        && let Some(raw_photo) = raw_partner(&tx, folder_id, &c.path)?
-                    {
-                        tx.execute(
-                            "INSERT INTO files (folder_id, name, ext, kind, size, mtime_ms, sidecar_of)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![folder_id, name, ext, c.kind.as_str(), c.size, c.mtime_ms, raw_photo],
-                        )?;
-                        report.paired += 1;
-                        continue;
-                    }
                     tx.execute(
                         "INSERT INTO files (folder_id, name, ext, kind, size, mtime_ms)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -275,6 +259,7 @@ impl Catalog {
                         params![tx.last_insert_rowid(), now],
                     )?;
                     report.added += 1;
+                    new_photos.push(tx.last_insert_rowid());
                     tx.last_insert_rowid()
                 }
             };
@@ -286,6 +271,7 @@ impl Catalog {
                 apply_xmp(&tx, photo_id, sidecar, file_turns)?;
             }
         }
+        report.paired = crate::pictures::adopt(&tx, &new_photos, pair_jpegs)?;
         for id in &restored {
             tx.execute("UPDATE files SET missing = 0 WHERE id = ?1", [id])?;
         }
@@ -340,27 +326,6 @@ pub(crate) fn ensure_folder(tx: &Transaction, path: &Path, parent_id: Option<i64
     }
     tx.execute("INSERT INTO folders (path, parent_id) VALUES (?1, ?2)", params![path_str(path), parent_id])?;
     Ok(tx.last_insert_rowid())
-}
-
-fn is_jpeg(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
-}
-
-/// The raw photo in `folder_id` with the same base name as `jpeg`, if any.
-fn raw_partner(tx: &Transaction, folder_id: i64, jpeg: &Path) -> Result<Option<i64>> {
-    let stem = jpeg.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
-    let mut stmt = tx.prepare_cached(
-        "SELECT p.id, f.name FROM files f JOIN photos p ON p.master_file_id = f.id
-          WHERE f.folder_id = ?1 AND f.kind = 'raw'",
-    )?;
-    let rows = stmt.query_map([folder_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-    for row in rows {
-        let (id, name) = row?;
-        if Path::new(&name).file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == stem) {
-            return Ok(Some(id));
-        }
-    }
-    Ok(None)
 }
 
 fn read_sidecar(path: &Path, kind: FileKind) -> Option<xmp::XmpData> {

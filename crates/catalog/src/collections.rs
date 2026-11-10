@@ -1,4 +1,4 @@
-//! Collections (and sets, and smart collections), the Quick Collection, stacks and
+//! Collections (and sets, and smart collections), the Quick Collection and
 //! catalog settings: LrC's ways of grouping photos apart from folders.
 
 use anyhow::{Context, Result};
@@ -237,99 +237,6 @@ impl Catalog {
 
     pub fn quick_collection_count(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM quick_collection", [], |r| r.get(0))?)
-    }
-
-    // ---- Stacks ----
-
-    /// LrC "Group into Stack" (Ctrl+G). `photo_ids` in display order; the first becomes
-    /// the top. Photos already in stacks bring their whole stack along (stacks merge).
-    /// Returns the new stack's id.
-    pub fn stack_photos(&mut self, photo_ids: &[i64]) -> Result<i64> {
-        let tx = self.conn.transaction()?;
-        let mut members: Vec<i64> = Vec::new();
-        let mut old_stacks: Vec<i64> = Vec::new();
-        for &id in photo_ids {
-            if members.contains(&id) {
-                continue;
-            }
-            let stack: Option<i64> = tx
-                .query_row("SELECT stack_id FROM photos WHERE id = ?1", [id], |r| r.get(0))
-                .optional()?
-                .flatten();
-            match stack {
-                Some(s) if !old_stacks.contains(&s) => {
-                    old_stacks.push(s);
-                    let mut stmt =
-                        tx.prepare("SELECT id FROM photos WHERE stack_id = ?1 ORDER BY stack_pos, id")?;
-                    for m in stmt.query_map([s], |r| r.get::<_, i64>(0))? {
-                        let m = m?;
-                        if !members.contains(&m) {
-                            members.push(m);
-                        }
-                    }
-                }
-                Some(_) => {}
-                None => members.push(id),
-            }
-        }
-        anyhow::ensure!(members.len() >= 2, "a stack needs at least two photos");
-        tx.execute("INSERT INTO stacks (collapsed) VALUES (1)", [])?;
-        let stack = tx.last_insert_rowid();
-        for (pos, id) in members.iter().enumerate() {
-            tx.execute(
-                "UPDATE photos SET stack_id = ?1, stack_pos = ?2 WHERE id = ?3",
-                params![stack, pos as i64, id],
-            )?;
-        }
-        for s in old_stacks {
-            tx.execute("DELETE FROM stacks WHERE id = ?1", [s])?;
-        }
-        tx.commit()?;
-        Ok(stack)
-    }
-
-    /// LrC "Unstack" (Ctrl+Shift+G): dissolve the stacks these photos are in.
-    pub fn unstack(&mut self, photo_ids: &[i64]) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        let mut n = 0;
-        for id in photo_ids {
-            let stack: Option<i64> = tx
-                .query_row("SELECT stack_id FROM photos WHERE id = ?1", [id], |r| r.get(0))
-                .optional()?
-                .flatten();
-            if let Some(s) = stack {
-                tx.execute("UPDATE photos SET stack_id = NULL, stack_pos = NULL WHERE stack_id = ?1", [s])?;
-                n += tx.execute("DELETE FROM stacks WHERE id = ?1", [s])?;
-            }
-        }
-        tx.commit()?;
-        Ok(n)
-    }
-
-    /// LrC "Collapse/Expand Stack" (S).
-    pub fn set_stack_collapsed(&mut self, stack_id: i64, collapsed: bool) -> Result<()> {
-        self.conn.execute("UPDATE stacks SET collapsed = ?1 WHERE id = ?2", params![collapsed, stack_id])?;
-        Ok(())
-    }
-
-    /// LrC "Move to Top of Stack" (Shift+S).
-    pub fn move_to_top_of_stack(&mut self, photo_id: i64) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        let stack: Option<i64> = tx
-            .query_row("SELECT stack_id FROM photos WHERE id = ?1", [photo_id], |r| r.get(0))
-            .optional()?
-            .flatten();
-        let stack = stack.context("the photo is not in a stack")?;
-        let mut stmt = tx.prepare("SELECT id FROM photos WHERE stack_id = ?1 ORDER BY stack_pos, id")?;
-        let mut order: Vec<i64> = stmt.query_map([stack], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        drop(stmt);
-        order.retain(|&id| id != photo_id);
-        order.insert(0, photo_id);
-        for (pos, id) in order.iter().enumerate() {
-            tx.execute("UPDATE photos SET stack_pos = ?1 WHERE id = ?2", params![pos as i64, id])?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     // ---- Settings ----

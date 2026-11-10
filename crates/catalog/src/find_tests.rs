@@ -165,54 +165,22 @@ fn quick_collection_toggles_like_b() {
 }
 
 #[test]
-fn stacks_group_collapse_merge_and_reorder() {
-    let mut fx = fixture(&["1.jpg", "2.jpg", "3.jpg", "4.jpg", "5.jpg"]);
-    let ids: Vec<i64> = ["1.jpg", "2.jpg", "3.jpg", "4.jpg", "5.jpg"].iter().map(|n| fx.id(n)).collect();
-    let by_name = crate::SortOrder { key: crate::SortKey::FileName, descending: false };
-    let shown = |cat: &Catalog| -> Vec<String> {
-        cat.photos_sorted(Source::AllPhotographs, by_name).unwrap().into_iter().map(|p| p.file_name).collect()
-    };
-    // Stack 4 (top), 2: collapsed, the stack sits where its top photo sorts.
-    let s = fx.cat.stack_photos(&[ids[3], ids[1]]).unwrap();
-    assert_eq!(shown(&fx.cat), ["1.jpg", "3.jpg", "4.jpg", "5.jpg"]);
-    fx.cat.set_stack_collapsed(s, false).unwrap();
-    assert_eq!(shown(&fx.cat), ["1.jpg", "3.jpg", "4.jpg", "2.jpg", "5.jpg"]);
-    let top = fx.cat.photo(ids[3]).unwrap().unwrap().stack.unwrap();
-    assert_eq!((top.position, top.size), (0, 2));
-
-    fx.cat.move_to_top_of_stack(ids[1]).unwrap();
-    assert_eq!(shown(&fx.cat), ["1.jpg", "2.jpg", "4.jpg", "3.jpg", "5.jpg"]);
-
-    // Stacking a stacked photo with another merges the stacks.
-    fx.cat.stack_photos(&[ids[4], ids[3]]).unwrap();
-    let st = fx.cat.photo(ids[1]).unwrap().unwrap().stack.unwrap();
-    assert_eq!(st.size, 3);
-    assert!(st.collapsed);
-    assert_eq!(shown(&fx.cat), ["1.jpg", "3.jpg", "5.jpg"]);
-
-    assert!(fx.cat.stack_photos(&[ids[0]]).is_err());
-    fx.cat.unstack(&[ids[3]]).unwrap();
-    assert_eq!(shown(&fx.cat).len(), 5);
-    assert!(fx.cat.photo(ids[3]).unwrap().unwrap().stack.is_none());
-}
-
-#[test]
-fn raw_and_jpeg_pairs_become_one_photo() {
+fn raw_and_jpeg_pairs_become_one_picture() {
     let mut fx = fixture(&["IMG_1.NEF", "IMG_1.JPG", "IMG_2.JPG"]);
     let photos = fx.cat.photos(Source::AllPhotographs).unwrap();
     let names: Vec<&str> = photos.iter().map(|p| p.file_name.as_str()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     let raw = photos.iter().find(|p| p.file_name == "IMG_1.NEF").unwrap();
-    assert_eq!(raw.paired_ext.as_deref(), Some("JPG"));
+    assert_eq!(raw.unit.members, 2, "the JPEG is a member of the raw's picture");
 
     // A JPEG added later still pairs; a changed paired JPEG re-syncs without errors.
     fs::write(fx.dir.join("IMG_3.NEF"), b"x").unwrap();
     fs::write(fx.dir.join("IMG_3.jpeg"), b"x").unwrap();
     fs::write(fx.dir.join("IMG_1.JPG"), b"changed").unwrap();
     let r = fx.cat.sync_folder(&fx.dir).unwrap();
-    assert_eq!((r.added, r.paired, r.errors), (1, 1, 0));
+    assert_eq!((r.added, r.paired, r.errors), (2, 1, 0));
     assert_eq!(fx.cat.photos(Source::AllPhotographs).unwrap().len(), 3);
-    assert_eq!(fx.cat.folders().unwrap()[0].photo_count, 3, "paired JPEGs are not separate photos");
+    assert_eq!(fx.cat.folders().unwrap()[0].photo_count, 5, "every file is a photo");
 
     // With pairing turned off, new JPEGs are photos of their own.
     fx.cat.set_separate_raw_jpeg(true).unwrap();

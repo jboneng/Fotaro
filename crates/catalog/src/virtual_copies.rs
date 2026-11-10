@@ -1,7 +1,7 @@
 //! Virtual copies (LrC Photo ▸ Create Virtual Copy, Ctrl+'): more photos of the same
 //! file, each with its own rating, flag, keywords and collections. A copy starts with
-//! its master's keywords, label, IPTC fields and rotation, and is stacked right after
-//! it. Only the master writes an XMP sidecar.
+//! its master's keywords, label, IPTC fields and rotation, and is a member of its
+//! picture (role Copy). Only the master writes an XMP sidecar.
 
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
@@ -42,30 +42,11 @@ impl Catalog {
             params![master, copy],
         )?;
 
-        // Stack it right after the photo it was made from (in the master's stack if it has
-        // one), and open the stack so the new copy is visible.
-        let place = |id: i64| -> rusqlite::Result<Option<i64>> {
-            tx.query_row("SELECT stack_id FROM photos WHERE id = ?1", [id], |r| r.get(0))
-        };
-        let after =
-            if place(photo_id)?.is_some() && place(photo_id)? == place(master)? { photo_id } else { master };
-        stack_after(&tx, after, copy)?;
+        // A member of the master's picture, and what the unit shows (you make a copy to
+        // work on it).
+        crate::pictures::join(&tx, copy, master, crate::pictures::Role::Copy, Some(photo_id), true)?;
         tx.commit()?;
         Ok(copy)
-    }
-
-    /// Put `new` in a stack right below `original` (creating the stack if needed) and
-    /// open it, like LrC's export / Edit In "Stack with original".
-    pub fn stack_below(&mut self, original: i64, new: i64) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute("UPDATE photos SET stack_id = NULL, stack_pos = NULL WHERE id = ?1", [new])?;
-        stack_after(&tx, original, new)?;
-        tx.execute(
-            "DELETE FROM stacks WHERE id NOT IN (SELECT stack_id FROM photos WHERE stack_id IS NOT NULL)",
-            [],
-        )?;
-        tx.commit()?;
-        Ok(())
     }
 
     /// Give `to` the catalog metadata of `from`: rating, label, title, caption, creator,
@@ -98,52 +79,9 @@ impl Catalog {
         for id in photo_ids {
             n += tx.execute("DELETE FROM photos WHERE id = ?1 AND virtual_of IS NOT NULL", [id])?;
         }
-        // A stack left with one photo is no stack.
-        tx.execute(
-            "UPDATE photos SET stack_id = NULL, stack_pos = NULL
-              WHERE stack_id IN (SELECT stack_id FROM photos WHERE stack_id IS NOT NULL
-                                  GROUP BY stack_id HAVING COUNT(*) < 2)",
-            [],
-        )?;
-        tx.execute(
-            "DELETE FROM stacks WHERE id NOT IN (SELECT stack_id FROM photos WHERE stack_id IS NOT NULL)",
-            [],
-        )?;
         tx.commit()?;
         Ok(n)
     }
-}
-
-/// Stack `new` (not in a stack) right after `after`, creating a stack if `after` has
-/// none, and open the stack.
-fn stack_after(tx: &rusqlite::Transaction, after: i64, new: i64) -> Result<()> {
-    let (stack, pos): (Option<i64>, Option<i64>) =
-        tx.query_row("SELECT stack_id, stack_pos FROM photos WHERE id = ?1", [after], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
-    let stack = match stack {
-        Some(s) => {
-            let after = pos.unwrap_or(0);
-            tx.execute(
-                "UPDATE photos SET stack_pos = stack_pos + 1 WHERE stack_id = ?1 AND stack_pos > ?2",
-                params![s, after],
-            )?;
-            tx.execute(
-                "UPDATE photos SET stack_id = ?1, stack_pos = ?2 WHERE id = ?3",
-                params![s, after + 1, new],
-            )?;
-            s
-        }
-        None => {
-            tx.execute("INSERT INTO stacks (collapsed) VALUES (0)", [])?;
-            let s = tx.last_insert_rowid();
-            tx.execute("UPDATE photos SET stack_id = ?1, stack_pos = 0 WHERE id = ?2", params![s, after])?;
-            tx.execute("UPDATE photos SET stack_id = ?1, stack_pos = 1 WHERE id = ?2", params![s, new])?;
-            s
-        }
-    };
-    tx.execute("UPDATE stacks SET collapsed = 0 WHERE id = ?1", [stack])?;
-    Ok(())
 }
 
 impl Catalog {
@@ -162,7 +100,7 @@ mod tests {
     use crate::{Catalog, Flag, IptcField, Source};
 
     #[test]
-    fn copies_have_their_own_metadata_and_stack_with_the_master() {
+    fn copies_have_their_own_metadata_and_join_the_masters_picture() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("p");
         std::fs::create_dir(&dir).unwrap();
@@ -180,16 +118,22 @@ mod tests {
 
         let c1 = cat.create_virtual_copy(a).unwrap();
         let c2 = cat.create_virtual_copy(c1).unwrap(); // a copy of a copy is a copy of the master
-        let photos = cat.photos(Source::AllPhotographs).unwrap();
-        let names: Vec<(i64, Option<&str>)> =
-            photos.iter().map(|p| (p.id, p.virtual_copy.as_deref())).collect();
-        assert_eq!(&names[..3], &[(a, None), (c1, Some("Copy 1")), (c2, Some("Copy 2"))], "stacked, open");
+        let members = cat.unit_members(a).unwrap();
+        let names: Vec<(i64, Option<&str>, bool)> =
+            members.iter().map(|m| (m.photo.id, m.photo.virtual_copy.as_deref(), m.active)).collect();
+        assert_eq!(
+            names,
+            [(a, None, false), (c1, Some("Copy 1"), false), (c2, Some("Copy 2"), true)],
+            "the newest shown"
+        );
+        assert_eq!(members[2].derived_from, Some(c1));
+        let photos: Vec<_> = members.into_iter().map(|m| m.photo).collect();
         let copy = photos.iter().find(|p| p.id == c1).unwrap();
         assert_eq!((copy.rating, copy.flag, copy.color_label.as_deref()), (0, Flag::Unflagged, Some("red")));
         assert_eq!(copy.path, photos[0].path, "same file");
         assert_eq!(cat.photo_keywords(c1).unwrap(), vec![vec!["Film".to_string()]]);
         assert_eq!(cat.iptc(c1).unwrap().title.as_deref(), Some("Hegra"));
-        assert_eq!(copy.stack.unwrap().size, 3);
+        assert_eq!((copy.unit.members, copy.unit.role), (3, crate::Role::Copy));
 
         // Own metadata from here on.
         cat.set_rating(c1, 1).unwrap();
@@ -200,11 +144,11 @@ mod tests {
         assert!(cat.write_xmp(c1, none).unwrap().is_none());
         assert!(cat.write_xmp(a, none).unwrap().is_some());
 
-        // Deleting copies leaves the master (and the file); a 1-photo stack dissolves.
+        // Deleting copies leaves the master (and the file), shown again.
         assert_eq!(cat.delete_virtual_copies(&[a, c1, c2]).unwrap(), 2);
         let left = cat.photos(Source::AllPhotographs).unwrap();
         assert_eq!(left.len(), 2);
-        assert!(left.iter().all(|p| p.stack.is_none() && p.virtual_copy.is_none()));
+        assert!(left.iter().all(|p| p.unit.members == 1 && p.virtual_copy.is_none()));
         assert!(dir.join("a.NEF").exists());
 
         // Removing the folder removes copies with their masters.
@@ -224,8 +168,10 @@ mod tests {
         std::fs::write(dir.join("a_NegPy.tif"), b"x").unwrap();
         let mut cat = Catalog::create(tmp.path().join("c.plcat")).unwrap();
         cat.sync_folder(&dir).unwrap();
+        // Look photos up among the unit's members: the grid shows the edit only.
         let id = |cat: &Catalog, n: &str| {
-            cat.photos(Source::AllPhotographs).unwrap().into_iter().find(|p| p.file_name == n).unwrap()
+            let shown = cat.photos(Source::AllPhotographs).unwrap()[0].id;
+            cat.unit_members(shown).unwrap().into_iter().map(|m| m.photo).find(|p| p.file_name == n).unwrap()
         };
         let (a, e) = (id(&cat, "a.NEF").id, id(&cat, "a_NegPy.tif").id);
         cat.set_rating(a, 3).unwrap();
@@ -291,10 +237,12 @@ mod tests {
         let cat = Catalog::open(&db).unwrap();
         assert_eq!(cat.schema_version().unwrap(), crate::schema::LATEST_VERSION);
         let photos = cat.photos(Source::AllPhotographs).unwrap();
-        assert_eq!(photos.len(), 2);
-        assert!(photos.iter().all(|p| p.rating == 3 && p.stack.is_some()));
+        assert_eq!(photos.len(), 1, "the old stack is a group");
+        assert_eq!((photos[0].unit.members, photos[0].unit.pictures), (2, 2));
+        assert!(cat.unit_members(1).unwrap().iter().all(|m| m.photo.rating == 3));
         assert_eq!(cat.photo_keywords(1).unwrap(), vec![vec!["cat".to_string()]]);
-        assert_eq!(cat.photos(Source::Collection { id: 1 }).unwrap()[0].id, 2);
+        // The collection holds photo 2: it shows that photo's unit, the group (photo 1 shown).
+        assert_eq!(cat.photos(Source::Collection { id: 1 }).unwrap()[0].id, 1);
         assert!(cat.photo(1).unwrap().unwrap().in_quick_collection);
         assert_eq!(cat.metadata(1).unwrap().unwrap().model.as_deref(), Some("D750"));
     }

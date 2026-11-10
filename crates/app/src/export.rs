@@ -37,7 +37,7 @@ pub struct ExportPrefs {
     pub subfolder_on: bool,
     pub subfolder: String,
     pub add_to_catalog: bool,
-    /// Same folder only: stack each export below its original.
+    /// Each export joins its original's picture (role Export).
     pub add_to_stack: bool,
     pub existing: ExistingFiles,
     pub rename_on: bool,
@@ -462,11 +462,11 @@ pub fn run(
     if prefs.add_to_catalog && !ok.is_empty() {
         let paths: Vec<PathBuf> = ok.iter().map(|t| t.dest.clone()).collect();
         let ids = cat.add_files(&paths, reader)?;
-        let stack = prefs.add_to_stack && prefs.export_to == ExportTo::SameFolder && !prefs.subfolder_on;
+        let stack = prefs.add_to_stack;
         for (t, id) in ok.iter().zip(ids) {
             let Some(id) = id else { continue };
             report.added.push(id);
-            if stack && let Err(e) = cat.stack_below(t.photo_id, id) {
+            if stack && let Err(e) = cat.add_to_picture(t.photo_id, id, catalog::Role::Export) {
                 log::warn!("stacking {}: {e:#}", t.dest.display());
             }
         }
