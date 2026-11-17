@@ -2,7 +2,7 @@
 
 ## Context
 
-Goal: a Rust/egui desktop app that recreates the **Lightroom Classic Library module** (catalog, import, folders, collections, grid/loupe/compare/survey, culling, filter bar, metadata/keywords). Photo editing (Develop) is out of scope; editing is delegated later via **Edit In** to **NegPy** and **Luminar**.
+Goal: a Rust/egui desktop app that recreates the **Lightroom Classic Library module** (catalog, import, folders, collections, grid/loupe/compare/survey, culling, filter bar, metadata/keywords). Editing was first delegated to external apps through **Edit In** (NegPy, Luminar, darktable). A **Develop** module of our own is now being added, starting with LrC's Basic panel (see "Design: Develop module" below); Edit In stays.
 
 Current state: a working scaffold (`photo_library` crate, eframe/egui 0.37, edition 2024) at `C:\Users\jbone\Desktop\PhotoLibrary`:
 - `src/main.rs` – window setup; `src/app.rs` – menu, file list, details panel, persisted `Settings`; `src/library.rs` – `is_photo()` + recursive `scan()` with 3 unit tests.
@@ -447,3 +447,41 @@ This replaces them. Decided with the user:
       leave the catalog after asking; files stay on disk (and come back with a sync or import).
 - [ ] To check by hand: the version strip and Compare with Original in the app (automated
       keystrokes were stopped while the PC was in use).
+
+## Design: Develop module (Basic panel)
+
+Decided with the user (2026-11-17): a Develop module like LrC's, starting with **Basic**.
+Our renderer is our own: the sliders behave as an LrC user expects, but the look will not
+match Adobe's exactly.
+
+- **Controls**: Treatment (Color / B&W); WB (As Shot, Auto, Daylight, Cloudy, Shade,
+  Tungsten, Fluorescent, Flash, Custom; Temp, Tint; eyedropper); Exposure, Contrast,
+  Highlights, Shadows, Whites, Blacks, Auto; Texture, Clarity, Dehaze; Vibrance, Saturation.
+- **Storage**: the catalog (`develop` + `develop_history`, schema v7) is the source of truth;
+  settings are also written to the XMP sidecar under our own `pldev:` namespace (LrC and
+  darktable ignore it). No `crs:` fields: our numbers don't mean what Adobe's do.
+- **Reach**: edited photos get re-rendered thumbnails and previews (the settings hash is part
+  of the preview key) and Export applies the edits. Unedited photos keep the camera's
+  embedded previews. Virtual copies have their own settings.
+- **Engine** (`imaging::develop`): LibRaw demosaics to linear camera RGB with unity white
+  balance; we apply WB (Kelvin/tint via Robertson isotemperature lines and the camera matrix),
+  so Temp/Tint are interactive. Working space linear ProPhoto, f32, rayon by rows; an
+  interactive proxy (~2560 px) and a full-size render for export and 1:1.
+- **UI**: module picker Library | Develop (D, G, E, Ctrl+Alt+1/2); left Navigator + History
+  (Presets, Snapshots planned); right Histogram + Basic (other panels planned); toolbar
+  Before/After (\), Copy / Paste settings, Reset. Shortcuts become per module.
+
+### Steps
+1. Docs.
+2. LibRaw camera-space render + colour info.
+3. `imaging::develop`: settings, WB, working image, global pipeline.
+4. Catalog v7, XMP namespace, settings copied to virtual copies.
+5. App: module switch, Develop layout, Basic sliders, render worker, histogram,
+   Before/After, Reset, Copy/Paste, History/Undo.
+6. Highlights/Shadows (local), Auto Tone, Auto WB, eyedropper, clipping (J).
+7. Texture, Clarity, Dehaze.
+8. Previews + grid badge, Export with edits.
+9. 1:1 full-resolution render in Develop.
+
+### Progress (Develop)
+- [x] 1. Docs
