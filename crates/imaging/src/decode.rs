@@ -64,7 +64,7 @@ fn bitmap_to_image(b: libraw::Bitmap) -> Result<DynamicImage> {
     .context("RAW bitmap has an inconsistent size")
 }
 
-fn orient_raw(img: DynamicImage, o: libraw::Orientation) -> DynamicImage {
+pub(crate) fn orient_raw(img: DynamicImage, o: libraw::Orientation) -> DynamicImage {
     match o {
         libraw::Orientation::Normal => img,
         libraw::Orientation::Rotate180 => img.rotate180(),
@@ -138,7 +138,7 @@ fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImag
 
 /// Decode a non-RAW image at full size and native bit depth, oriented, with its ICC
 /// profile (if any).
-fn open_image(path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+pub(crate) fn open_image(path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> {
     // Memory-map instead of `ImageReader::open`: TIFF decoding seeks a lot, and every seek
     // discards a BufReader's buffer (a 184 MB 16-bit TIFF decoded in 2 s that way vs 1 s).
     let file = std::fs::File::open(path)?;

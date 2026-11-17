@@ -20,7 +20,7 @@ use crate::decode::{SourceKind, decode_for_export};
 use crate::metadata::{Gps, Metadata};
 
 mod effects;
-mod space;
+pub(crate) mod space;
 
 pub use effects::{Anchor, SharpenAmount, SharpenFor, Watermark, WatermarkStyle};
 pub use space::ColorSpace;

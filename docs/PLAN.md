@@ -485,3 +485,7 @@ match Adobe's exactly.
 
 ### Progress (Develop)
 - [x] 1. Docs
+- [x] 2. LibRaw camera-space render (half size ~0.2 s, full ~5 s on a D750 NEF) + colour data
+- [x] 3. `imaging::develop`: settings, Kelvin/tint WB, working image, global pipeline. A 2560 px
+      proxy renders in ~22 ms. RAW base look tuned against the camera JPEG of a D750 sample
+      from raw.pixls.us (`testdata/web/`); our own RAW samples are film scans.

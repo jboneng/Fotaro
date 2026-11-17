@@ -84,7 +84,7 @@ fn rgb_profile(white: (f64, f64), primaries: [(f64, f64); 3], curve: &ToneCurve,
 
 /// LibRaw's linear 16-bit ProPhoto render (its white is D65, which an ICC transform
 /// maps to white either way).
-fn linear_prophoto() -> Profile {
+pub(crate) fn linear_prophoto() -> Profile {
     rgb_profile(D50, PROPHOTO, &ToneCurve::new(1.0), "Linear ProPhoto RGB")
 }
 
@@ -135,7 +135,7 @@ pub(crate) fn to_target(
 
 /// Convert interleaved RGB bytes in place, in parallel row bands (a single-threaded
 /// 16-bit transform of a 24 MP photo takes ~9 s).
-fn transform_parallel(src: &Profile, dst: &Profile, format: PixelFormat, bytes: &mut [u8]) {
+pub(crate) fn transform_parallel(src: &Profile, dst: &Profile, format: PixelFormat, bytes: &mut [u8]) {
     let t: Transform<u8, u8, GlobalContext, DisallowCache> = match Transform::new_flags_context(
         GlobalContext::new(),
         src,
