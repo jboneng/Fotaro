@@ -51,14 +51,24 @@ pub fn preview_key(
 ) -> (i64, u64) {
     let file = imaging::fingerprint(size, mtime_ms);
     match develop {
+        // An unedited RAW, rendered at default settings: shared with its virtual copies.
+        Some(s) if s.is_default() => (master_id, imaging::developed_fingerprint(file, s)),
         Some(s) => (-id, imaging::developed_fingerprint(file, s)),
         None => (master_id, file),
     }
 }
 
+/// The settings a photo's previews and exports are rendered with: its own, or for a RAW
+/// without any the defaults (so the Library shows what Develop shows, as LrC's Standard
+/// previews do, not the camera's embedded JPEG). `None`: the file's pixels as they are.
+pub fn render_settings(json: Option<&str>, kind: FileKind) -> Option<imaging::develop::DevelopSettings> {
+    develop_settings(json)
+        .or_else(|| (kind == FileKind::Raw).then(imaging::develop::DevelopSettings::default))
+}
+
 impl From<&PhotoRow> for PhotoRef {
     fn from(p: &PhotoRow) -> Self {
-        let develop = develop_settings(p.develop.as_deref());
+        let develop = render_settings(p.develop.as_deref(), p.kind);
         let (cache_id, fingerprint) =
             preview_key(p.id, p.master_id, p.size_bytes, p.mtime_ms, develop.as_ref());
         PhotoRef { id: p.id, cache_id, path: p.path.clone(), kind: p.kind, fingerprint, develop }
@@ -574,6 +584,22 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                 let path = match shared.cache.get(photo.cache_id, size, photo.fingerprint) {
                     Some(p) => p,
                     None => {
+                        // Rendering a RAW's preview takes a moment: show the camera's
+                        // embedded preview meanwhile (the rendered one then replaces it).
+                        if photo.kind == FileKind::Raw
+                            && let Some(rgb) = imaging::decode_embedded(&photo.path, size.max_px())
+                        {
+                            let image = egui::ColorImage::from_rgb(
+                                [rgb.width() as usize, rgb.height() as usize],
+                                rgb.as_raw(),
+                            );
+                            let _ = shared.events.send(Event::Image {
+                                photo_id: photo.id,
+                                size,
+                                image,
+                                histogram: None,
+                            });
+                        }
                         ensure_previews(shared, cat, &photo)?;
                         shared.cache.path(photo.cache_id, size, photo.fingerprint)
                     }
@@ -715,16 +741,18 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
             let started = std::time::Instant::now();
             // Previews written after this moment are kept whatever the snapshot says.
             let snapshot = std::time::SystemTime::now();
-            let current: std::collections::HashMap<i64, u64> = match cat.photo_versions() {
-                // Every photo's plain previews (kept for an edited master's virtual copies,
-                // and for when an edit is reset), and its developed ones if it has settings.
+            let current: HashSet<(i64, u64)> = match cat.photo_versions() {
+                // Each photo's previews of the file as it is, rendered at default settings
+                // (RAWs), and with its own settings if it has any. Keeping one a photo
+                // doesn't use costs little; building a new version removes the old ones.
                 Ok(v) => v
                     .into_iter()
                     .flat_map(|(id, size, mtime, json)| {
                         let plain = (id, imaging::fingerprint(size, mtime));
+                        let defaults = preview_key(id, id, size, mtime, Some(&Default::default()));
                         let developed = develop_settings(json.as_deref())
                             .map(|s| preview_key(id, id, size, mtime, Some(&s)));
-                        std::iter::once(plain).chain(developed)
+                        [plain, defaults].into_iter().chain(developed)
                     })
                     .collect(),
                 Err(e) => {
@@ -738,7 +766,7 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                 log::info!("preview cleanup skipped: the catalog has no photos");
                 return;
             }
-            let r = shared.cache.purge_orphans(snapshot, |id, fp| current.get(&id) == Some(&fp));
+            let r = shared.cache.purge_orphans(snapshot, |id, fp| current.contains(&(id, fp)));
             log::info!(
                 "preview cleanup: removed {} of {} files ({}) in {:.0?}",
                 r.removed,
@@ -1051,6 +1079,14 @@ mod preview_key_tests {
         // Other settings, another fingerprint.
         let other = imaging::develop::DevelopSettings { exposure: 0.5, ..Default::default() };
         assert_ne!(preview_key(3, 3, 100, 5, Some(&other)).1, master.1);
+        // An unedited RAW renders at the default settings (as Develop shows it), with a key of
+        // its own that its virtual copies share; other files keep their own pixels.
+        let raw = render_settings(None, FileKind::Raw).expect("RAWs render");
+        assert!(raw.is_default());
+        assert!(render_settings(None, FileKind::Image).is_none());
+        let unedited = preview_key(8, 3, 100, 5, Some(&raw));
+        assert_eq!(unedited.0, 3);
+        assert_ne!(unedited.1, imaging::fingerprint(100, 5), "not the embedded-preview key");
         // Default settings (a reset) count as none.
         assert!(develop_settings(Some(&imaging::develop::DevelopSettings::default().to_json())).is_none());
         assert!(develop_settings(Some(&s.to_json())).is_some());

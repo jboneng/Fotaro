@@ -136,6 +136,15 @@ fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImag
     Ok((img.into_rgb8(), meta))
 }
 
+/// Just the camera's embedded preview of a RAW, fitted to `max_px` and oriented, if it
+/// has one big enough: a quick stand-in while a rendered preview is built.
+pub fn decode_embedded(path: &Path, max_px: u32) -> Option<RgbImage> {
+    let mut raw = libraw::RawFile::open(path).ok()?;
+    let info = raw.info();
+    let img = embedded_preview(&mut raw, (max_px as f32 * MIN_EMBEDDED_FRACTION) as u32)?;
+    Some(orient_raw(fit(img, max_px), info.orientation).into_rgb8())
+}
+
 /// Decode a non-RAW image at full size and native bit depth, oriented, with its ICC
 /// profile (if any).
 pub(crate) fn open_image(path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> {

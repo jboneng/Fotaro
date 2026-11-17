@@ -12,7 +12,7 @@ pub mod export;
 mod metadata;
 mod preview;
 
-pub use decode::{SourceKind, decode, decode_full, fit_image};
+pub use decode::{SourceKind, decode, decode_embedded, decode_full, fit_image};
 pub use image::RgbImage;
 pub use metadata::{Gps, Metadata, read_metadata};
 pub use preview::{

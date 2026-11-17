@@ -343,7 +343,7 @@ fn plan(
             dest,
             data,
             copyright: all.copyright,
-            develop: crate::jobs::develop_settings(row.develop.as_deref()),
+            develop: crate::jobs::render_settings(row.develop.as_deref(), row.kind),
         });
     }
     Ok(tasks)

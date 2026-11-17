@@ -560,3 +560,11 @@ All nine steps of the Basic panel plan are done.
       Highlights below, Luminance under each) or one wheel with Hue / Saturation / Luminance
       sliders. Drag a wheel's handle; double-click resets. Tints are added in Oklab after HSL
       and after B&W, so it split-tones black & white photos. ~23 ms per proxy render when on.
+
+## Library previews of RAWs match Develop (2026-11-18)
+- [x] Unedited RAWs' thumbnails, standard and 1:1 previews (and exports) are rendered by the
+      Develop engine at default settings, as LrC's Standard previews are, instead of the
+      camera's embedded JPEG, so a photo looks the same in Library and Develop. Decided with
+      the user. The embedded JPEG shows as a placeholder while the rendered preview is built
+      (~0.3–0.5 s per RAW instead of ~0.05 s). Existing caches rebuild once (new key); old
+      embedded previews are removed as their replacements are written.
