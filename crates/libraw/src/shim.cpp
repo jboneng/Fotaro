@@ -120,24 +120,46 @@ int pl_thumbnail(void *raw, pl_image *out) {
     });
 }
 
-static int render(void *raw, int half_size, bool sixteen_linear_prophoto, pl_image *out) {
+enum RenderMode { SRGB8, LINEAR_PROPHOTO16, CAMERA16 };
+
+static int render(void *raw, int half_size, RenderMode mode, pl_image *out) {
     std::memset(out, 0, sizeof(*out));
     PL_GUARD({
         LibRaw *lr = static_cast<LibRaw *>(raw);
         libraw_output_params_t &p = lr->imgdata.params;
-        if (sixteen_linear_prophoto) {
+        p.use_camera_wb = 1;  // as-shot white balance
+        p.user_mul[0] = p.user_mul[1] = p.user_mul[2] = p.user_mul[3] = 0.0f;
+        p.no_auto_bright = 0;
+        p.gamm[0] = 0.45;  // LibRaw's defaults (BT.709 curve)
+        p.gamm[1] = 4.5;
+        switch (mode) {
+        case SRGB8:
+            p.output_bps = 8;
+            p.output_color = 1;  // sRGB
+            break;
+        case LINEAR_PROPHOTO16:
             p.output_bps = 16;
             p.output_color = 4;  // ProPhoto
             p.gamm[0] = 1.0;     // linear
             p.gamm[1] = 1.0;
-        } else {
-            p.output_bps = 8;
-            p.output_color = 1;  // sRGB
+            break;
+        case CAMERA16:
+            p.output_bps = 16;
+            p.output_color = 0;  // raw camera colour
+            p.gamm[0] = 1.0;
+            p.gamm[1] = 1.0;
+            p.use_camera_wb = 0;
+            p.user_mul[0] = p.user_mul[1] = p.user_mul[2] = p.user_mul[3] = 1.0f;
+            p.no_auto_bright = 1;
+            break;
         }
-        p.use_camera_wb = 1;  // as-shot white balance
         p.half_size = half_size ? 1 : 0;
-        int rc = lr->unpack();
-        if (rc != LIBRAW_SUCCESS) return rc;
+        // unpack() may run once per open file; dcraw_process() can then run repeatedly.
+        int rc = LIBRAW_SUCCESS;
+        if (!(lr->imgdata.progress_flags & LIBRAW_PROGRESS_LOAD_RAW)) {
+            rc = lr->unpack();
+            if (rc != LIBRAW_SUCCESS) return rc;
+        }
         rc = lr->dcraw_process();
         if (rc != LIBRAW_SUCCESS) return rc;
         int err = LIBRAW_SUCCESS;
@@ -148,10 +170,28 @@ static int render(void *raw, int half_size, bool sixteen_linear_prophoto, pl_ima
     });
 }
 
-int pl_render(void *raw, int half_size, pl_image *out) { return render(raw, half_size, false, out); }
+int pl_render(void *raw, int half_size, pl_image *out) { return render(raw, half_size, SRGB8, out); }
 
 int pl_render16_linear_prophoto(void *raw, int half_size, pl_image *out) {
-    return render(raw, half_size, true, out);
+    return render(raw, half_size, LINEAR_PROPHOTO16, out);
+}
+
+int pl_render16_camera(void *raw, int half_size, pl_image *out) {
+    return render(raw, half_size, CAMERA16, out);
+}
+
+void pl_get_color(void *raw, pl_color *out) {
+    std::memset(out, 0, sizeof(*out));
+    const libraw_data_t &d = static_cast<LibRaw *>(raw)->imgdata;
+    out->colors = d.idata.colors;
+    for (int c = 0; c < 4; c++) {
+        out->cam_mul[c] = d.color.cam_mul[c];
+        out->pre_mul[c] = d.color.pre_mul[c];
+        for (int i = 0; i < 3; i++) {
+            out->rgb_cam[i][c] = d.color.rgb_cam[i][c];
+            out->cam_xyz[c][i] = d.color.cam_xyz[c][i];
+        }
+    }
 }
 
 void pl_image_free(pl_image *img) {

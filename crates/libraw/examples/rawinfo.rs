@@ -71,5 +71,27 @@ fn main() {
             }
             Err(e) => println!("   render FAILED: {e}"),
         }
+
+        let c = raw.color();
+        println!("   colour: {} channels, as shot {:?}, daylight {:?}", c.colors, c.as_shot, c.daylight);
+        println!("   rgb_cam {:?}\n   cam_xyz {:?}", c.rgb_cam, c.cam_xyz);
+        for half in [true, false] {
+            let t = Instant::now();
+            match raw.render_camera_linear(half) {
+                Ok(img) => {
+                    let max = img.data.iter().flatten().fold(0f32, |a, v| a.max(*v));
+                    let mean: [f32; 3] = std::array::from_fn(|c| {
+                        img.data.iter().map(|p| p[c]).sum::<f32>() / img.data.len().max(1) as f32
+                    });
+                    println!(
+                        "   camera render (half {half}) {}x{} in {:?}, max {max:.3}, mean {mean:.3?}",
+                        img.width,
+                        img.height,
+                        t.elapsed()
+                    );
+                }
+                Err(e) => println!("   camera render FAILED: {e}"),
+            }
+        }
     }
 }

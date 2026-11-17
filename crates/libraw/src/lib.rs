@@ -55,6 +55,15 @@ mod ffi {
         pub handle: *mut c_void,
     }
 
+    #[repr(C)]
+    pub struct Color {
+        pub colors: i32,
+        pub cam_mul: [f32; 4],
+        pub pre_mul: [f32; 4],
+        pub rgb_cam: [[f32; 4]; 3],
+        pub cam_xyz: [[f32; 3]; 4],
+    }
+
     unsafe extern "C" {
         pub fn pl_new() -> *mut c_void;
         pub fn pl_free(raw: *mut c_void);
@@ -63,6 +72,8 @@ mod ffi {
         pub fn pl_thumbnail(raw: *mut c_void, out: *mut Image) -> c_int;
         pub fn pl_render(raw: *mut c_void, half_size: c_int, out: *mut Image) -> c_int;
         pub fn pl_render16_linear_prophoto(raw: *mut c_void, half_size: c_int, out: *mut Image) -> c_int;
+        pub fn pl_render16_camera(raw: *mut c_void, half_size: c_int, out: *mut Image) -> c_int;
+        pub fn pl_get_color(raw: *mut c_void, out: *mut Color);
         pub fn pl_image_free(img: *mut Image);
         pub fn pl_strerror(code: c_int) -> *const c_char;
         pub fn pl_version() -> *const c_char;
@@ -191,15 +202,51 @@ pub struct Bitmap {
     pub data: Vec<u8>,
 }
 
+/// The camera's colour data, for turning [`RawFile::render_camera_linear`] output into
+/// colorimetric RGB with any white balance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorInfo {
+    /// Colour channels after demosaicing: 3 for RGB sensors, 1 for monochrome ones.
+    pub colors: u32,
+    /// As-shot white balance multipliers (R, G, B), if the file records them.
+    pub as_shot: Option<[f32; 3]>,
+    /// Daylight (D65) multipliers derived from the colour matrix.
+    pub daylight: [f32; 3],
+    /// White-balanced camera RGB → linear sRGB (D65). Rows sum to 1, so equal camera
+    /// channels map to white.
+    pub rgb_cam: [[f32; 3]; 3],
+    /// XYZ → camera RGB, if LibRaw knows the camera's colour matrix.
+    pub cam_xyz: Option<[[f32; 3]; 3]>,
+}
+
+/// A linear camera-RGB render: `width × height × 3` samples, 0..1 (1 = sensor clipping).
+#[derive(Debug, Clone)]
+pub struct CameraImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<[f32; 3]>,
+}
+
+/// Multipliers for R, G, B from LibRaw's four (the second green duplicates the first).
+fn rgb_of(m: [f32; 4]) -> Option<[f32; 3]> {
+    let m = [m[0], m[1], m[2]];
+    m.iter().all(|v| v.is_finite() && *v > 0.0).then_some(m)
+}
+
 /// An open RAW file. Not thread-safe to share, but can be moved between threads.
 pub struct RawFile {
     raw: NonNull<c_void>,
     // LibRaw reads from this mapping; it must outlive `raw` (see Drop).
     _map: memmap2::Mmap,
+    /// Read right after opening: rendering overwrites some of LibRaw's colour fields.
+    color: Option<ColorInfo>,
 }
 
 // SAFETY: a LibRaw instance has no thread affinity; we never share it (&mut for work).
 unsafe impl Send for RawFile {}
+
+/// CIE XYZ of D65 white (Y = 1).
+const D65_XYZ: [f32; 3] = [0.950_47, 1.0, 1.088_83];
 
 impl RawFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -209,9 +256,10 @@ impl RawFile {
         let map = unsafe { memmap2::Mmap::map(&file)? };
         // SAFETY: plain allocation.
         let raw = NonNull::new(unsafe { ffi::pl_new() }).ok_or(Error::OutOfMemory)?;
-        let this = RawFile { raw, _map: map };
+        let mut this = RawFile { raw, _map: map, color: None };
         // SAFETY: `raw` is valid and the buffer lives as long as `this`.
         check(unsafe { ffi::pl_open_buffer(this.raw.as_ptr(), this._map.as_ptr().cast(), this._map.len()) })?;
+        this.color = Some(this.read_color());
         Ok(this)
     }
 
@@ -268,6 +316,59 @@ impl RawFile {
         let img = self
             .call_image(|raw, out| unsafe { ffi::pl_render16_linear_prophoto(raw, half_size.into(), out) })?;
         Ok(img.bitmap())
+    }
+
+    /// The camera's colour matrices and white balance multipliers.
+    pub fn color(&self) -> ColorInfo {
+        self.color.clone().unwrap_or_else(|| self.read_color())
+    }
+
+    fn read_color(&self) -> ColorInfo {
+        // SAFETY: Color is plain-old-data; the shim fills every field.
+        let mut c: ffi::Color = unsafe { std::mem::zeroed() };
+        unsafe { ffi::pl_get_color(self.raw.as_ptr(), &mut c) };
+        let rgb_cam = std::array::from_fn(|i| [c.rgb_cam[i][0], c.rgb_cam[i][1], c.rgb_cam[i][2]]);
+        let cam_xyz: [[f32; 3]; 3] = [c.cam_xyz[0], c.cam_xyz[1], c.cam_xyz[2]];
+        let has_matrix =
+            cam_xyz.iter().flatten().any(|v| *v != 0.0) && cam_xyz.iter().flatten().all(|v| v.is_finite());
+        // Daylight from the matrix when there is one: the camera's response to D65 white.
+        let from_matrix = has_matrix
+            .then(|| {
+                let neutral: [f32; 3] =
+                    std::array::from_fn(|i| (0..3).map(|j| cam_xyz[i][j] * D65_XYZ[j]).sum());
+                rgb_of([1.0 / neutral[0], 1.0 / neutral[1], 1.0 / neutral[2], 0.0])
+            })
+            .flatten();
+        let normalize = |m: [f32; 3]| [m[0] / m[1], 1.0, m[2] / m[1]];
+        ColorInfo {
+            colors: c.colors.max(1) as u32,
+            as_shot: rgb_of(c.cam_mul).map(normalize),
+            daylight: normalize(from_matrix.or_else(|| rgb_of(c.pre_mul)).unwrap_or([1.0; 3])),
+            rgb_cam,
+            cam_xyz: has_matrix.then_some(cam_xyz),
+        }
+    }
+
+    /// Demosaic to linear camera RGB with no white balance and no colour matrix
+    /// (see [`ColorInfo`]), 0..1 per channel. Monochrome sensors give R = G = B.
+    /// `half_size` skips demosaicing and halves each dimension (much faster).
+    pub fn render_camera_linear(&mut self, half_size: bool) -> Result<CameraImage> {
+        let img =
+            self.call_image(|raw, out| unsafe { ffi::pl_render16_camera(raw, half_size.into(), out) })?;
+        let (w, h, colors) =
+            (img.0.width.max(0) as usize, img.0.height.max(0) as usize, img.0.colors.max(0) as usize);
+        if img.0.bits != 16 || !(colors == 1 || colors == 3) || img.bytes().len() < w * h * colors * 2 {
+            return Err(Error::LibRaw {
+                code: -1,
+                message: format!("unexpected {colors}x{}-bit camera render", img.0.bits),
+            });
+        }
+        let samples = img.bytes();
+        let px = |i: usize| f32::from(u16::from_ne_bytes([samples[2 * i], samples[2 * i + 1]])) / 65535.0;
+        let data = (0..w * h)
+            .map(|i| if colors == 3 { [px(3 * i), px(3 * i + 1), px(3 * i + 2)] } else { [px(i); 3] })
+            .collect();
+        Ok(CameraImage { width: w as u32, height: h as u32, data })
     }
 
     fn call_image(&mut self, f: impl FnOnce(*mut c_void, *mut ffi::Image) -> c_int) -> Result<OwnedImage> {
@@ -329,6 +430,13 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(b"definitely not a raw file").unwrap();
         assert!(matches!(RawFile::open(f.path()), Err(Error::LibRaw { .. })));
+    }
+
+    #[test]
+    fn multipliers_need_three_positive_values() {
+        assert_eq!(rgb_of([2.0, 1.0, 1.5, 1.0]), Some([2.0, 1.0, 1.5]));
+        assert_eq!(rgb_of([0.0, 0.0, 0.0, 0.0]), None);
+        assert_eq!(rgb_of([2.0, f32::NAN, 1.5, 0.0]), None);
     }
 
     #[test]
