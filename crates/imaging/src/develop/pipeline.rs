@@ -3,14 +3,15 @@
 //! Per pixel: white balance (and the camera matrix) → Dehaze (see [`super::dehaze`]) →
 //! exposure, Highlights / Shadows, Clarity and Texture (gains from local brightness maps,
 //! see [`super::local`]) → tone curve (whites, blacks, contrast, highlight shoulder; plus
-//! the base rendering for RAW files) → vibrance / saturation → B&W → output. Values are
-//! linear until the output encoding.
+//! the base rendering for RAW files) → HSL → vibrance / saturation or B&W → Color Grading
+//! → output. Values are linear until the output encoding.
 
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
+use super::grading::Grading;
 use super::hsl::HslAdjust;
 use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
 use super::matrix::{self, Mat3f};
@@ -148,6 +149,8 @@ struct Prepared {
     bw: bool,
     /// HSL (colour) or B&W Mix (black & white), when either changes something.
     hsl: Option<HslAdjust>,
+    /// Color Grading, when it does something.
+    grading: Option<Grading>,
     luma: [f32; 3],
     /// Highlights / Shadows, Clarity, Texture: −1..+1.
     highlights: f32,
@@ -193,6 +196,7 @@ impl Prepared {
             vibrance: s.vibrance / 100.0,
             saturation: s.saturation / 100.0,
             bw: s.treatment == Treatment::BlackAndWhite,
+            grading: Grading::new(&s.grading),
             hsl: if s.treatment == Treatment::BlackAndWhite {
                 HslAdjust::bw_mix(&s.bw_mix)
             } else {
@@ -359,10 +363,8 @@ impl Prepared {
         }
         let y = self.luminance(d);
         if self.bw {
-            let grey = self.hsl.as_ref().map_or(y, |m| m.grey(d, y)).min(1.0);
-            return [grey; 3];
-        }
-        if self.vibrance != 0.0 || self.saturation != 0.0 {
+            d = [self.hsl.as_ref().map_or(y, |m| m.grey(d, y)).min(1.0); 3];
+        } else if self.vibrance != 0.0 || self.saturation != 0.0 {
             let (hi, lo) = (d[0].max(d[1]).max(d[2]), d[0].min(d[1]).min(d[2]));
             let sat = if hi > 1e-6 { (hi - lo) / hi } else { 0.0 };
             let mut v = self.vibrance * (1.0 - sat).powi(2);
@@ -374,7 +376,11 @@ impl Prepared {
             let f = (1.0 + v) * (1.0 + self.saturation);
             d = d.map(|c| (y + (c - y) * f).max(0.0));
         }
-        d
+        // Color Grading last, so it also tones black & white photos (split toning).
+        match &self.grading {
+            Some(g) => g.apply(d),
+            None => d,
+        }
     }
 }
 

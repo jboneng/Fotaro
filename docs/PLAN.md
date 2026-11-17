@@ -552,3 +552,11 @@ All nine steps of the Basic panel plan are done.
 - [x] Fix found while checking it: a render requested before the photo's load reached the
       worker in another batch was dropped, leaving "Loading…" forever (timing-dependent,
       since step 5). Requests now wait for their photo.
+
+## Develop: Color Grading
+- [x] Shadows, Midtones, Highlights and Global wheels (hue 0–360 on the colour wheel,
+      saturation 0–100, luminance ±100), Blending (how far the ranges overlap) and Balance
+      (moves them towards shadows or highlights). 3-Way view (Midtones above, Shadows and
+      Highlights below, Luminance under each) or one wheel with Hue / Saturation / Luminance
+      sliders. Drag a wheel's handle; double-click resets. Tints are added in Oklab after HSL
+      and after B&W, so it split-tones black & white photos. ~23 ms per proxy render when on.

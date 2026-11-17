@@ -96,18 +96,18 @@ const M1_INV: Mat3f = [
     [-0.004_196_086_3, -0.703_418_6, 1.707_614_7],
 ];
 
-fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+pub(super) fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
     let lms = matrix::apply(&M1, rgb).map(f32::cbrt);
     matrix::apply(&M2, lms)
 }
 
-fn oklab_to_srgb(lab: [f32; 3]) -> [f32; 3] {
+pub(super) fn oklab_to_srgb(lab: [f32; 3]) -> [f32; 3] {
     let lms = matrix::apply(&M2_INV, lab).map(|v| v * v * v);
     matrix::apply(&M1_INV, lms)
 }
 
 /// Hue in degrees 0..360 and chroma of an Oklab colour.
-fn hue_chroma(lab: [f32; 3]) -> (f32, f32) {
+pub(super) fn hue_chroma(lab: [f32; 3]) -> (f32, f32) {
     (lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0), lab[1].hypot(lab[2]))
 }
 

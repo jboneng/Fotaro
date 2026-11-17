@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::curve::ToneCurve;
+use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::hsl::{COLORS, Hsl, HslGroup};
 
 /// Bumped when the renderer changes how existing settings look.
@@ -101,6 +102,8 @@ pub struct DevelopSettings {
     pub hsl: Hsl,
     /// Black & White Mix (the HSL panel in Black & White), −100..+100 per colour range.
     pub bw_mix: [f32; 8],
+    /// The Color Grading panel.
+    pub grading: ColorGrading,
 }
 
 impl Default for DevelopSettings {
@@ -125,6 +128,7 @@ impl Default for DevelopSettings {
             curve: ToneCurve::default(),
             hsl: Hsl::default(),
             bw_mix: [0.0; 8],
+            grading: ColorGrading::default(),
         }
     }
 }
@@ -154,6 +158,10 @@ pub enum Slider {
     Hsl(HslGroup, u8),
     /// B&W Mix for a colour range.
     BwMix(u8),
+    /// Color Grading: a wheel's hue, saturation or luminance.
+    Grade(GradeWheel, GradeParam),
+    GradeBlending,
+    GradeBalance,
 }
 
 impl Slider {
@@ -186,6 +194,9 @@ impl Slider {
             Self::CurveDarks => "Darks",
             Self::CurveShadows => "Shadows",
             Self::Hsl(_, i) | Self::BwMix(i) => COLORS[usize::from(i) % 8],
+            Self::Grade(_, p) => p.label(),
+            Self::GradeBlending => "Blending",
+            Self::GradeBalance => "Balance",
         }
     }
 
@@ -195,6 +206,8 @@ impl Slider {
             Self::Temp if kelvin => (2000.0, 50000.0),
             Self::Tint if kelvin => (-150.0, 150.0),
             Self::Exposure => (-5.0, 5.0),
+            Self::Grade(_, GradeParam::Hue) => (0.0, 360.0),
+            Self::Grade(_, GradeParam::Saturation) | Self::GradeBlending => (0.0, 100.0),
             _ => (-100.0, 100.0),
         }
     }
@@ -224,6 +237,9 @@ impl Slider {
             Self::CurveShadows => s.curve.shadows,
             Self::Hsl(g, i) => s.hsl.get(g)[usize::from(i) % 8],
             Self::BwMix(i) => s.bw_mix[usize::from(i) % 8],
+            Self::Grade(w, p) => s.grading.wheel(w).get(p),
+            Self::GradeBlending => s.grading.blending,
+            Self::GradeBalance => s.grading.balance,
         }
     }
 
@@ -251,6 +267,9 @@ impl Slider {
             Self::CurveShadows => &mut s.curve.shadows,
             Self::Hsl(g, i) => &mut s.hsl.get_mut(g)[usize::from(i) % 8],
             Self::BwMix(i) => &mut s.bw_mix[usize::from(i) % 8],
+            Self::Grade(w, p) => s.grading.wheel_mut(w).get_mut(p),
+            Self::GradeBlending => &mut s.grading.blending,
+            Self::GradeBalance => &mut s.grading.balance,
         };
         *field = v;
     }
@@ -259,6 +278,10 @@ impl Slider {
     pub fn format(self, v: f32, kelvin: bool) -> String {
         match self {
             Self::Temp if kelvin => format!("{v:.0}"),
+            // Angles and amounts that are never negative show without a sign, as in LrC.
+            Self::Grade(_, GradeParam::Hue | GradeParam::Saturation) | Self::GradeBlending => {
+                format!("{v:.0}")
+            }
             _ if v.abs() < 0.5 * 10f32.powi(-(self.decimals() as i32)) => {
                 format!("{:.*}", self.decimals(), 0.0)
             }
@@ -334,6 +357,17 @@ impl DevelopSettings {
                 eat(v.to_bits());
             }
         }
+        if self.grading != ColorGrading::default() {
+            eat(0x9_ade);
+            let g = &self.grading;
+            for w in [g.shadows, g.midtones, g.highlights, g.global] {
+                for v in [w.hue, w.saturation, w.luminance] {
+                    eat(v.to_bits());
+                }
+            }
+            eat(g.blending.to_bits());
+            eat(g.balance.to_bits());
+        }
         if self.bw_mix.iter().any(|v| *v != 0.0) {
             eat(0xb_a1);
             for v in &self.bw_mix {
@@ -361,6 +395,35 @@ impl DevelopSettings {
                 [] if c.splits != o.splits => "Tone Curve: Split Points".into(),
                 [] => "Tone Curve: Point Curve".into(),
                 _ => "Tone Curve".into(),
+            };
+        }
+        if self.grading != old.grading {
+            let all = GradeWheel::ALL
+                .into_iter()
+                .flat_map(|w| {
+                    [GradeParam::Hue, GradeParam::Saturation, GradeParam::Luminance]
+                        .map(|p| Slider::Grade(w, p))
+                })
+                .chain([Slider::GradeBlending, Slider::GradeBalance]);
+            let changed: Vec<Slider> = all.filter(|s| s.get(self) != s.get(old)).collect();
+            return match changed.as_slice() {
+                [s @ Slider::Grade(w, GradeParam::Luminance)] => {
+                    format!(
+                        "Color Grading: {} Luminance {}",
+                        w.label(),
+                        s.format(s.get(self) - s.get(old), kelvin)
+                    )
+                }
+                [s @ (Slider::GradeBlending | Slider::GradeBalance)] => {
+                    format!("Color Grading: {} {}", s.label(), s.format(s.get(self), kelvin))
+                }
+                // A wheel's hue and saturation (dragging its handle): "Color Grading: Shadows".
+                [Slider::Grade(w, _), rest @ ..]
+                    if rest.iter().all(|s| matches!(s, Slider::Grade(v, _) if v == w)) =>
+                {
+                    format!("Color Grading: {}", w.label())
+                }
+                _ => "Color Grading".into(),
             };
         }
         if self.hsl != old.hsl || self.bw_mix != old.bw_mix {

@@ -359,6 +359,8 @@ pub struct DevelopState {
     pub curve_drag: Option<usize>,
     /// HSL / Color panel: the group shown (`None`: All).
     pub hsl_tab: Option<imaging::develop::HslGroup>,
+    /// Color Grading panel: one wheel, or `None` for the 3-way view.
+    pub grading_view: Option<imaging::develop::GradeWheel>,
     pub history: Vec<HistoryStep>,
     /// Steps undone (Ctrl+Z, or clicking an earlier History step), newest last.
     redo: Vec<(String, Option<String>)>,
@@ -406,6 +408,7 @@ impl DevelopState {
             curve_channel: imaging::develop::CurveChannel::Rgb,
             curve_drag: None,
             hsl_tab: None,
+            grading_view: None,
             history: Vec::new(),
             redo: Vec::new(),
         }

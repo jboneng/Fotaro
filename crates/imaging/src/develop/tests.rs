@@ -348,3 +348,65 @@ fn hsl_settings_round_trip_and_name_history_steps() {
     assert_eq!(m.describe_change(&old, true), "B&W Mix: Orange +15");
     assert!(DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap().hsl.is_default());
 }
+
+fn graded(f: impl FnOnce(&mut ColorGrading)) -> DevelopSettings {
+    let mut s = DevelopSettings::default();
+    f(&mut s.grading);
+    s
+}
+
+#[test]
+fn grading_tints_shadows_and_highlights_separately() {
+    let (dark, light) = ([45u8, 45, 45], [215u8, 215, 215]);
+    let blue_shadows = graded(|g| {
+        g.shadows.hue = 220.0;
+        g.shadows.saturation = 80.0;
+    });
+    let d = patch(dark, &blue_shadows);
+    assert!(d[2] > d[0] + 8, "dark tones turn blue: {d:?}");
+    let l = patch(light, &blue_shadows);
+    assert!(l[2].abs_diff(l[0]) <= 3, "light tones stay neutral: {l:?}");
+
+    let warm_highlights = graded(|g| {
+        g.highlights.hue = 35.0;
+        g.highlights.saturation = 80.0;
+    });
+    let l = patch(light, &warm_highlights);
+    assert!(l[0] > l[2] + 8, "light tones warm up: {l:?}");
+    let d = patch(dark, &warm_highlights);
+    assert!(d[0].abs_diff(d[2]) <= 3, "dark tones stay neutral: {d:?}");
+}
+
+#[test]
+fn grading_luminance_and_split_toning_black_and_white() {
+    let darker = graded(|g| g.midtones.luminance = -60.0);
+    assert!(patch([128, 128, 128], &darker)[1] < 115);
+    // Black & White with toned shadows and highlights: split toning.
+    let mut s = graded(|g| {
+        g.shadows.hue = 220.0;
+        g.shadows.saturation = 70.0;
+        g.highlights.hue = 40.0;
+        g.highlights.saturation = 70.0;
+    });
+    s.treatment = Treatment::BlackAndWhite;
+    let d = patch([60, 60, 60], &s);
+    let l = patch([220, 220, 220], &s);
+    assert!(d[2] > d[0] && l[0] > l[2], "cool shadows {d:?}, warm highlights {l:?}");
+}
+
+#[test]
+fn grading_settings_round_trip_and_name_history_steps() {
+    let old = DevelopSettings::default();
+    let s = graded(|g| {
+        g.shadows.hue = 200.0;
+        g.shadows.saturation = 25.0;
+    });
+    assert_eq!(DevelopSettings::from_json(&s.to_json()), Some(s.clone()));
+    assert_ne!(s.stable_hash(), old.stable_hash());
+    assert_eq!(s.describe_change(&old, true), "Color Grading: Shadows");
+    let b = graded(|g| g.balance = 30.0);
+    assert_eq!(b.describe_change(&old, true), "Color Grading: Balance +30");
+    let h = graded(|g| g.highlights.luminance = -10.0);
+    assert_eq!(h.describe_change(&old, true), "Color Grading: Highlights Luminance -10");
+    assert_eq!(DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap().grading, ColorGrading::default());
+}

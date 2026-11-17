@@ -14,8 +14,8 @@ use catalog::PhotoRow;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Vec2};
 use imaging::PreviewSize;
 use imaging::develop::{
-    CurveChannel, CurveFns, DEFAULT_SPLITS, HslGroup, POINT_PRESETS, Region, SWATCHES, Slider, ToneCurve,
-    Treatment, WbPreset,
+    CurveChannel, CurveFns, DEFAULT_SPLITS, GradeParam, GradeWheel, HslGroup, POINT_PRESETS, Region,
+    SWATCHES, Slider, ToneCurve, Treatment, WbPreset,
 };
 
 use super::panels::Side;
@@ -26,7 +26,7 @@ use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::Slot;
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
-const PLANNED_RIGHT: &[&str] = &["Color Grading", "Detail", "Lens Corrections", "Transform", "Effects"];
+const PLANNED_RIGHT: &[&str] = &["Detail", "Lens Corrections", "Transform", "Effects"];
 const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
@@ -149,6 +149,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 stack.section(ui, Side::Right, "Basic", RIGHT, true, |ui| basic(app, ui));
                 stack.section(ui, Side::Right, "Tone Curve", RIGHT, false, |ui| tone_curve(app, ui));
                 stack.section(ui, Side::Right, "HSL / Color", RIGHT, false, |ui| hsl_panel(app, ui));
+                stack.section(ui, Side::Right, "Color Grading", RIGHT, false, |ui| color_grading(app, ui));
                 for title in PLANNED_RIGHT {
                     stack.section(ui, Side::Right, title, RIGHT, false, |ui| {
                         ui.label(weak("Comes in a later version."));
@@ -1111,6 +1112,181 @@ fn hsl_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 row(ui, &mut st, Slider::Hsl(g, i), gradient);
             }
         }
+    }
+
+    if st != d.settings {
+        d.set_live(st);
+    }
+    if let Some(label) = done {
+        app.run(Command::DevelopCommit(label));
+    }
+}
+
+/// A linear sRGB colour for painting.
+fn paint_color(c: [f32; 3]) -> Color32 {
+    let enc = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        let e = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        (e * 255.0).round() as u8
+    };
+    Color32::from_rgb(enc(c[0]), enc(c[1]), enc(c[2]))
+}
+
+/// A colour wheel: hue round the edge, saturation outwards from the neutral centre. Drag
+/// the handle (or anywhere) to set both; double-click resets the saturation.
+fn color_wheel(ui: &mut egui::Ui, id: egui::Id, size: f32, hue: &mut f32, sat: &mut f32) -> Moved {
+    let mut out = Moved::default();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let (c, r) = (rect.center(), size / 2.0 - 4.0);
+    // The disc: a fan from a grey centre to the wheel's colours at the edge.
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(c, Color32::from_gray(0x7a));
+    let n = 72;
+    for i in 0..=n {
+        let h = i as f32 * 360.0 / n as f32;
+        let a = h.to_radians();
+        let edge = imaging::develop::wheel_color(h).map(|v| 0.25 + 0.6 * v);
+        mesh.colored_vertex(c + egui::vec2(a.cos(), -a.sin()) * r, paint_color(edge));
+        if i > 0 {
+            mesh.add_triangle(0, i, i + 1);
+        }
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().circle_stroke(c, r, egui::Stroke::new(1.0, Color32::from_gray(0x20)));
+
+    if let Some(p) = resp.interact_pointer_pos()
+        && (resp.dragged() || resp.drag_started() || resp.clicked())
+    {
+        let d = p - c;
+        let (h, s) = (
+            (-d.y).atan2(d.x).to_degrees().rem_euclid(360.0).round(),
+            (d.length() / r * 100.0).clamp(0.0, 100.0).round(),
+        );
+        if (h, s) != (*hue, *sat) {
+            (*hue, *sat) = (h, s);
+            out.changed = true;
+        }
+    }
+    if resp.drag_stopped() || resp.clicked() {
+        out.done = true;
+    }
+    if resp.double_clicked() {
+        *sat = 0.0;
+        out = Moved { changed: true, done: true, reset: true };
+    }
+    // The handle: where hue and saturation point.
+    let a = hue.to_radians();
+    let at = c + egui::vec2(a.cos(), -a.sin()) * r * (*sat / 100.0);
+    let fill =
+        if *sat > 0.0 { paint_color(imaging::develop::wheel_color(*hue)) } else { Color32::from_gray(0x7a) };
+    ui.painter().circle(at, 5.0, fill, egui::Stroke::new(1.5, Color32::WHITE));
+    resp.on_hover_text("Drag to set hue and saturation; double-click to reset");
+    out
+}
+
+/// LrC's Color Grading panel: 3-way (Midtones above, Shadows and Highlights below) or one
+/// wheel at a time (Shadows, Midtones, Highlights, Global), then Blending and Balance.
+fn color_grading(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
+    let d = &mut s.develop;
+    if d.photo.is_none() {
+        ui.label(weak("Select a photo to develop."));
+        return;
+    }
+    let mut st = d.settings.clone();
+    let mut done: Option<Option<String>> = None;
+    let note = |m: Moved, done: &mut Option<Option<String>>| {
+        if m.done {
+            *done = Some(None);
+        }
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(weak("Adjust:"));
+        for (view, name) in [
+            (None, "3-Way"),
+            (Some(GradeWheel::Shadows), "Shadows"),
+            (Some(GradeWheel::Midtones), "Midtones"),
+            (Some(GradeWheel::Highlights), "Highlights"),
+            (Some(GradeWheel::Global), "Global"),
+        ] {
+            if ui.selectable_label(d.grading_view == view, name).clicked() {
+                d.grading_view = view;
+            }
+        }
+    });
+    ui.add_space(4.0);
+
+    let w = ui.available_width();
+    // A wheel with its name and Luminance slider (and in the one-wheel view, Hue and
+    // Saturation sliders too).
+    let mut wheel = |ui: &mut egui::Ui,
+                     st: &mut imaging::develop::DevelopSettings,
+                     which: GradeWheel,
+                     size: f32,
+                     full: bool| {
+        let id = ui.scope_id().with(("grade_wheel", which));
+        let mut wh = *st.grading.wheel(which);
+        ui.vertical_centered(|ui| {
+            let m = color_wheel(ui, id, size, &mut wh.hue, &mut wh.saturation);
+            note(m, &mut done);
+            ui.label(RichText::new(which.label()).size(12.0).color(theme::TEXT));
+        });
+        *st.grading.wheel_mut(which) = wh;
+        let params: &[GradeParam] = if full {
+            &[GradeParam::Hue, GradeParam::Saturation, GradeParam::Luminance]
+        } else {
+            &[GradeParam::Luminance]
+        };
+        for p in params {
+            let slider = Slider::Grade(which, *p);
+            let gradient = match p {
+                GradeParam::Hue => None,
+                GradeParam::Saturation => {
+                    Some([Color32::from_gray(0x80), paint_color(imaging::develop::wheel_color(wh.hue))])
+                }
+                GradeParam::Luminance => Some([Color32::from_gray(0x20), Color32::from_gray(0xe0)]),
+            };
+            let spec = Spec {
+                slider,
+                range: slider.range(false),
+                default: 0.0,
+                log: false,
+                gradient,
+                kelvin: false,
+            };
+            let mut v = slider.get(st);
+            let m = slider_row(ui, &spec, &mut v);
+            if m.changed {
+                slider.set(st, v);
+            }
+            note(m, &mut done);
+        }
+    };
+
+    match d.grading_view {
+        None => {
+            let size = (w * 0.42).clamp(90.0, 160.0);
+            wheel(ui, &mut st, GradeWheel::Midtones, size, false);
+            ui.add_space(6.0);
+            ui.columns(2, |cols| {
+                wheel(&mut cols[0], &mut st, GradeWheel::Shadows, size, false);
+                wheel(&mut cols[1], &mut st, GradeWheel::Highlights, size, false);
+            });
+        }
+        Some(which) => wheel(ui, &mut st, which, (w * 0.7).clamp(120.0, 230.0), true),
+    }
+    ui.add_space(6.0);
+    for (slider, default) in [(Slider::GradeBlending, 50.0), (Slider::GradeBalance, 0.0)] {
+        let spec =
+            Spec { slider, range: slider.range(false), default, log: false, gradient: None, kelvin: false };
+        let mut v = slider.get(&st);
+        let m = slider_row(ui, &spec, &mut v);
+        if m.changed {
+            slider.set(&mut st, v);
+        }
+        note(m, &mut done);
     }
 
     if st != d.settings {
