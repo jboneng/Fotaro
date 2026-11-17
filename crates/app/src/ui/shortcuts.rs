@@ -479,9 +479,43 @@ pub fn take_actions(ctx: &egui::Context, module: Module) -> Vec<&'static Shortcu
 /// The shortcut for a key press: exact logical matches win over the physical fallback.
 fn resolve(key: Key, physical: Option<Key>, m: egui::Modifiers, module: Module) -> Option<&'static Shortcut> {
     let active = || SHORTCUTS.iter().filter(move |s| s.scope.includes(module));
-    active()
-        .find(|s| s.binding.key == key && s.binding.modifiers_match(m))
-        .or_else(|| active().find(|s| s.binding.matches(key, physical, m)))
+    let find = |m: egui::Modifiers| {
+        active()
+            .find(|s| s.binding.key == key && s.binding.modifiers_match(m))
+            .or_else(|| active().find(|s| s.binding.matches(key, physical, m)))
+    };
+    find(m).or_else(|| {
+        // Symbols typed with AltGr (`\` is AltGr+'+' on Nordic layouts, `[` AltGr+8 on
+        // German ones) arrive as Ctrl+Alt+symbol on Windows: match the plain binding.
+        (m.ctrl && m.alt && !m.shift && is_symbol(key))
+            .then(|| find(egui::Modifiers { ctrl: false, alt: false, command: false, ..m }))
+            .flatten()
+    })
+}
+
+/// Punctuation keys, which some layouts only reach through AltGr.
+fn is_symbol(key: Key) -> bool {
+    matches!(
+        key,
+        Key::Backslash
+            | Key::Pipe
+            | Key::OpenBracket
+            | Key::CloseBracket
+            | Key::OpenCurlyBracket
+            | Key::CloseCurlyBracket
+            | Key::Equals
+            | Key::Plus
+            | Key::Minus
+            | Key::Slash
+            | Key::Questionmark
+            | Key::Quote
+            | Key::Semicolon
+            | Key::Colon
+            | Key::Comma
+            | Key::Period
+            | Key::Backtick
+            | Key::Exclamationmark
+    )
 }
 
 /// Markdown reference, written to `docs/SHORTCUTS.md` (kept in sync by a test).
@@ -537,6 +571,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn altgr_symbols_match_plain_bindings() {
+        // Windows reports AltGr as Ctrl+Alt: Nordic `\` is AltGr+'+'.
+        let altgr = egui::Modifiers { ctrl: true, alt: true, command: true, ..Default::default() };
+        let s = resolve(Key::Backslash, Some(Key::Minus), altgr, Module::Develop).unwrap();
+        assert_eq!(s.action, Action::BeforeAfter);
+        let s = resolve(Key::Backslash, Some(Key::Minus), altgr, Module::Library).unwrap();
+        assert_eq!(s.action, Action::ToggleFilterBar);
+        // Letters and digits with Ctrl+Alt keep their own bindings.
+        let s = resolve(Key::E, None, altgr, Module::Library).unwrap();
+        assert_eq!(s.action, Action::EditInOther);
+        assert!(resolve(Key::P, None, altgr, Module::Library).is_none());
     }
 
     #[test]

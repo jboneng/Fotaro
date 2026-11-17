@@ -448,6 +448,14 @@ impl DevelopState {
         }
     }
 
+    /// The photo's settings were changed in the catalog by something else (a sidecar was
+    /// read): show them.
+    pub fn external_change(&mut self, json: Option<&str>, history: Vec<HistoryStep>) {
+        self.adopt(json);
+        self.history = history;
+        self.redo.clear();
+    }
+
     /// Take stored settings (JSON) as both shown and saved.
     fn adopt(&mut self, json: Option<&str>) {
         let s = json.and_then(DevelopSettings::from_json).unwrap_or_default();

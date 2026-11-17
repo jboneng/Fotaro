@@ -561,7 +561,24 @@ impl Session {
         // edit, another member made active).
         let unit_key = |p: &PhotoRow| p.unit.group_id.map_or((false, p.unit.picture_id), |g| (true, g));
         let old_units: HashMap<i64, (bool, i64)> = self.photos.iter().map(|p| (p.id, unit_key(p))).collect();
+        let old_develop: HashMap<i64, Option<String>> =
+            self.photos.iter().map(|p| (p.id, p.develop.clone())).collect();
         self.photos = self.catalog.photos_filtered(self.source, self.sort, &self.filter)?;
+        // Develop settings changed outside the Develop module (Read Metadata from File, a
+        // sync reading a sidecar): show them.
+        let developed: Vec<PhotoRow> = self
+            .photos
+            .iter()
+            .filter(|p| old_develop.get(&p.id).is_some_and(|d| *d != p.develop))
+            .cloned()
+            .collect();
+        for row in &developed {
+            self.reload_images(row);
+            if self.develop.photo == Some(row.id) {
+                let history = self.catalog.develop_history(row.id)?;
+                self.develop.external_change(row.develop.as_deref(), history);
+            }
+        }
         if started.elapsed() > Duration::from_millis(50) {
             log::warn!("slow reload: {} photos in {:.0?}", self.photos.len(), started.elapsed());
         }
@@ -682,18 +699,26 @@ impl Session {
     pub fn develop_changed(&mut self, id: i64) -> Result<()> {
         let json = self.catalog.develop_settings(id)?;
         self.update_rows(&[id], |p| p.develop = json.clone());
-        self.full.invalidate(id);
         let row = self
             .index_of
             .get(&id)
             .map(|&i| self.photos[i].clone())
             .or_else(|| self.viewing.as_ref().map(|(_, m)| m.clone()).filter(|m| m.id == id));
-        if let Some(row) = row.filter(|r| !r.missing) {
-            for size in [PreviewSize::Thumb, PreviewSize::Standard] {
-                self.jobs.submit_visible(Job::Load { photo: PhotoRef::from(&row), size });
-            }
+        if let Some(row) = row {
+            self.reload_images(&row);
         }
         Ok(())
+    }
+
+    /// Load a photo's thumbnail and preview again (the old ones stay up meanwhile) and
+    /// forget its 1:1 preview: its Develop settings changed.
+    fn reload_images(&mut self, row: &PhotoRow) {
+        self.full.invalidate(row.id);
+        if !row.missing {
+            for size in [PreviewSize::Thumb, PreviewSize::Standard] {
+                self.jobs.submit_visible(Job::Load { photo: PhotoRef::from(row), size });
+            }
+        }
     }
 
     pub fn source_label(&self) -> String {

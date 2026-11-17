@@ -443,14 +443,17 @@ fn submit(shared: &Shared, job: Job, lane: Lane) {
         Lane::Normal => lanes.normal.push_back(job),
         Lane::Background => {
             // Progress accounting happens under the queue lock, so a worker can never
-            // count a job as done before it was counted as queued.
-            let p = &shared.progress;
-            if p.previews_done.load(Ordering::Relaxed) >= p.previews_total.load(Ordering::Relaxed) {
-                p.previews_total.store(0, Ordering::Relaxed);
-                p.previews_done.store(0, Ordering::Relaxed);
-                *p.previews_started.lock().unwrap() = Some(std::time::Instant::now());
+            // count a job as done before it was counted as queued. Only preview builds
+            // count: other background work (reading GPS) isn't part of "Building Previews".
+            if matches!(job, Job::BuildPreviews { .. }) {
+                let p = &shared.progress;
+                if p.previews_done.load(Ordering::Relaxed) >= p.previews_total.load(Ordering::Relaxed) {
+                    p.previews_total.store(0, Ordering::Relaxed);
+                    p.previews_done.store(0, Ordering::Relaxed);
+                    *p.previews_started.lock().unwrap() = Some(std::time::Instant::now());
+                }
+                p.previews_total.fetch_add(1, Ordering::Relaxed);
             }
-            p.previews_total.fetch_add(1, Ordering::Relaxed);
             lanes.background.push_back(job);
         }
     }
@@ -750,9 +753,17 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
             {
                 log::warn!("building previews for {}: {e:#}", photo.path.display());
             }
+            // Count it, unless it wasn't counted as queued (a build on the visible lane, for
+            // an Edit In result): "done" never runs past the total.
             let p = &shared.progress;
-            let done = p.previews_done.fetch_add(1, Ordering::Relaxed) + 1;
-            if done == p.previews_total.load(Ordering::Relaxed)
+            let total = p.previews_total.load(Ordering::Relaxed);
+            let counted = p
+                .previews_done
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |d| (d < total).then_some(d + 1))
+                .is_ok();
+            let done = p.previews_done.load(Ordering::Relaxed);
+            if counted
+                && done == total
                 && let Some(t) = p.previews_started.lock().unwrap().take()
             {
                 log::info!("built previews for {done} photos in {:.1?}", t.elapsed());
