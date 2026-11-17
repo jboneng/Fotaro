@@ -211,3 +211,24 @@ fn dehaze_adds_contrast_to_a_hazy_photo_and_negative_adds_haze() {
     assert!(s(&clear) > s(&base) * 1.2, "{} vs {}", s(&clear), s(&base));
     assert!(s(&foggy) < s(&base) * 0.8, "{} vs {}", s(&foggy), s(&base));
 }
+
+#[test]
+fn a_region_renders_like_that_part_of_the_whole() {
+    let img = rendered(&patterned(16, 12));
+    let s =
+        DevelopSettings { clarity: 60.0, texture: 50.0, shadows: 40.0, dehaze: 30.0, ..Default::default() };
+    let whole = render_srgb8(&img, &s);
+    let part = render_region_srgb8(&img, &s, Region { x: 37, y: 51, w: 120, h: 90 });
+    assert_eq!((part.width(), part.height()), (120, 90));
+    for y in 0..90 {
+        for x in 0..120 {
+            let (a, b) = (part.get_pixel(x, y), whole.get_pixel(x + 37, y + 51));
+            for c in 0..3 {
+                assert!(a[c].abs_diff(b[c]) <= 1, "({x}, {y}): {a:?} vs {b:?}");
+            }
+        }
+    }
+    // Regions past the edge are clipped to the image.
+    let edge = render_region_srgb8(&img, &s, Region { x: 380, y: 290, w: 100, h: 100 });
+    assert_eq!((edge.width(), edge.height()), (20, 10));
+}

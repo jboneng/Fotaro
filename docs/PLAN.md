@@ -517,3 +517,11 @@ match Adobe's exactly.
       thumbnail and preview reload (the old ones stay up until then). ± badge in Grid cells.
       Export develops the photo at full size (16-bit through the colour conversion, also for
       8-bit files). Checked in the app: B&W + Auto showed in Grid, filmstrip and Navigator.
+- [x] 9. 1:1 in Develop: Z / click zooms (Navigator levels, drag / scroll to pan, the
+      Library's Navigator with the visible area). The enlarged proxy shows at once; once the
+      settings have been still for 200 ms, the visible region is rendered from the full-size
+      image (loaded on its own thread the first time: ~4.4 s for the D750 NEF; then ~10 ms per
+      view). Regions render exactly like that part of a full render (the local maps come from
+      the whole image; Texture uses the region plus a margin); tested.
+
+All nine steps of the Basic panel plan are done.

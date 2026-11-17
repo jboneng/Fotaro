@@ -57,7 +57,7 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut stack = std::mem::take(&mut app.ui.left);
         stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| {
-            super::layout::timed("navigator", || navigator(app, ui))
+            super::layout::timed("navigator", || navigator(app, ui, None))
         });
         stack.section(ui, Side::Left, "Catalog", LEFT, true, |ui| catalog_section(app, ui));
         stack.section(ui, Side::Left, "Folders", LEFT, true, |ui| {
@@ -72,7 +72,8 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
 /// LrC's Navigator: the active photo, the zoom level picker (FIT FILL 1:1 2:1 3:1), and
 /// while zoomed a rectangle showing the visible area; click or drag to move it.
-fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+/// `shown`: the image to show instead of the photo's thumbnail (Develop's live render).
+pub(super) fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, shown: Option<egui::TextureHandle>) {
     let fit_selected = !(app.zoom.zoomed && matches!(app.view, View::Loupe | View::Compare));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
@@ -99,7 +100,7 @@ fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let Some(photo) = s.active_photo().cloned() else { return };
     // The thumbnail is about the Navigator's size; the 2048 px preview would alias.
-    let Some(tex) = s.thumbs.get(photo.id).or_else(|| s.previews.get(photo.id)) else {
+    let Some(tex) = shown.or_else(|| s.thumbs.get(photo.id)).or_else(|| s.previews.get(photo.id)) else {
         if !photo.missing {
             s.request(&photo, PreviewSize::Thumb);
         }

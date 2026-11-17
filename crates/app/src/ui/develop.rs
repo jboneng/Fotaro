@@ -13,12 +13,12 @@
 use catalog::PhotoRow;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Vec2};
 use imaging::PreviewSize;
-use imaging::develop::{Slider, Treatment, WbPreset};
+use imaging::develop::{Region, Slider, Treatment, WbPreset};
 
 use super::panels::Side;
 use super::shortcuts::Action;
 use super::theme;
-use super::views::{fit_rect, paint_image, rotated_size};
+use super::views::{paint_image, rotated_size};
 use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::Slot;
 
@@ -93,18 +93,10 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     });
 }
 
-/// The photo as developed, small.
+/// The Library's Navigator (zoom levels, visible area), showing the photo as developed.
 fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, width * 0.66), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0x22, 0x22, 0x22));
-    let Some(s) = &mut app.session else { return };
-    let Some(photo) = s.active_photo().cloned() else { return };
-    let tex = s.develop.textures.get(&Slot::Current).cloned().or_else(|| s.thumbs.get(photo.id));
-    if let Some(tex) = tex {
-        let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), rect.shrink(4.0));
-        paint_image(ui.painter(), &tex, r, photo.rotation, Color32::WHITE);
-    }
+    let shown = app.session.as_ref().and_then(|s| s.develop.textures.get(&Slot::Current).cloned());
+    super::sidebars::navigator(app, ui, shown);
 }
 
 /// LrC's History: newest step first; click one to go back to it.
@@ -515,25 +507,106 @@ fn clipping_triangles(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, hist: Rect) 
     }
 }
 
-/// The center view: the developed photo (or Before), the WB Selector's clicks.
+/// The center view: the developed photo (or Before), fitted or zoomed (Z, click; drag or
+/// scroll to move around, as in the Loupe). Zoomed, the visible part is rendered from the
+/// full-size image once the settings settle, over the enlarged proxy. Also the WB
+/// Selector's clicks.
 pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(rect, Sense::click());
+    let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+    let ppp = ui.ctx().pixels_per_point();
+    let zoom_level = app.ui.zoom_level;
     let Some(s) = &mut app.session else { return };
     let Some(photo) = s.active_photo().cloned() else { return };
     // Render at the size the photo is shown (LrC renders previews at screen size).
-    let shown = rect.shrink(18.0).size().max_elem() * ui.ctx().pixels_per_point();
-    s.develop.set_view_px(shown.ceil() as u32, &photo);
+    let fitted = rect.shrink(18.0);
+    s.develop.set_view_px((fitted.size().max_elem() * ppp).ceil() as u32, &photo);
     let slot = if s.develop.before { Slot::Before } else { Slot::Current };
     let developed = s.develop.textures.get(&slot).cloned();
-    let tex = developed.clone().or_else(|| standard_preview(s, &photo));
+    let Some(tex) = developed.clone().or_else(|| standard_preview(s, &photo)) else {
+        app.zoom.image_rect = None;
+        return;
+    };
     let painter = ui.painter().with_clip_rect(rect);
-    let mut img_rect = None;
-    if let Some(tex) = &tex {
-        let r = fit_rect(rotated_size(tex.size_vec2(), photo.rotation), rect.shrink(18.0));
-        paint_image(&painter, tex, r, photo.rotation, Color32::WHITE);
-        img_rect = Some(r);
+
+    // Size of the photo in pixels as displayed (file orientation, then catalog rotation).
+    let full_size = s.develop.info.as_ref().map(|i| egui::vec2(i.full_size.0 as f32, i.full_size.1 as f32));
+    let img_px = rotated_size(full_size.unwrap_or_else(|| tex.size_vec2()), photo.rotation);
+    let zoomed = app.zoom.zoomed && !photo.missing && !s.develop.picking_wb;
+    let view = if zoomed { rect } else { fitted };
+    let fit = (view.width() / img_px.x).min(view.height() / img_px.y);
+    let fill = (view.width() / img_px.x).max(view.height() / img_px.y);
+    let scale = if zoomed { zoom_level.scale(fill, ppp).max(fit) } else { fit };
+    let size = img_px * scale;
+    let z = &mut app.zoom;
+    if zoomed {
+        if let Some((q, offset)) = z.anchor.take() {
+            z.center = q - offset / size;
+        }
+        if resp.dragged() {
+            z.center -= resp.drag_delta() / size;
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta);
+            if scroll != Vec2::ZERO {
+                z.center -= scroll / size;
+            }
+        }
+        z.center = super::views::clamp_center(z.center, view.size() / size);
     }
+    let img_rect = if zoomed {
+        Rect::from_min_size(view.center() - size * z.center, size)
+    } else {
+        Rect::from_center_size(view.center(), size)
+    };
+    let visible = view.intersect(img_rect);
+    let visible_q = Rect::from_min_max(
+        ((visible.min - img_rect.min) / size).to_pos2(),
+        ((visible.max - img_rect.min) / size).to_pos2(),
+    );
+    z.image_rect = Some(img_rect);
+    z.view_rect = Some(view);
+    z.visible = zoomed.then_some(visible_q);
+    paint_image(&painter, &tex, img_rect, photo.rotation, Color32::WHITE);
+
+    // Zoomed: the visible part at full resolution, drawn over the enlarged proxy.
+    let mut sharp = true;
+    if zoomed && let Some(full) = full_size {
+        // The visible part in the file's orientation and pixels (a pixel of margin).
+        let (a, b) = (
+            unrotate(visible_q.min.to_vec2(), photo.rotation),
+            unrotate(visible_q.max.to_vec2(), photo.rotation),
+        );
+        let (u0, u1) = (a.0.min(b.0), a.0.max(b.0));
+        let (v0, v1) = (a.1.min(b.1), a.1.max(b.1));
+        let x0 = (u0 * full.x).floor().max(0.0) as u32;
+        let y0 = (v0 * full.y).floor().max(0.0) as u32;
+        let x1 = ((u1 * full.x).ceil() + 1.0).min(full.x) as u32;
+        let y1 = ((v1 * full.y).ceil() + 1.0).min(full.y) as u32;
+        let wanted =
+            Region { x: x0, y: y0, w: x1.saturating_sub(x0).max(1), h: y1.saturating_sub(y0).max(1) };
+        if !resp.dragged()
+            && let Some(wait) = s.develop.want_region(wanted)
+        {
+            ui.ctx().request_repaint_after(wait);
+        }
+        match s.develop.region_for_view() {
+            Some((region, region_tex)) => {
+                // Its corners in display coordinates (0..1 of the photo as shown).
+                let p = |x: u32, y: u32| rotate((x as f32 / full.x, y as f32 / full.y), photo.rotation);
+                let (c0, c1) = (p(region.x, region.y), p(region.x + region.w, region.y + region.h));
+                let q = Rect::from_two_pos(egui::pos2(c0.0, c0.1), egui::pos2(c1.0, c1.1));
+                let r = Rect::from_min_max(
+                    img_rect.min + q.min.to_vec2() * size,
+                    img_rect.min + q.max.to_vec2() * size,
+                );
+                paint_image(&painter, region_tex, r, photo.rotation, Color32::WHITE);
+                sharp = region == wanted;
+            }
+            None => sharp = false,
+        }
+    }
+
     let corner = |text: &str, color: Color32| {
         painter.text(
             rect.left_bottom() + egui::vec2(14.0, -12.0),
@@ -547,6 +620,8 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         corner(e, theme::MISSING);
     } else if developed.is_none() {
         corner("Loading…", theme::TEXT_STRONG);
+    } else if zoomed && !sharp && s.develop.region_pending() {
+        corner("Rendering full resolution…", theme::TEXT_STRONG);
     }
     if s.develop.before {
         painter.text(
@@ -558,17 +633,46 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         );
     }
 
-    // White Balance Selector: click a neutral area.
-    let Some(r) = img_rect else { return };
-    if s.develop.picking_wb && resp.hover_pos().is_some_and(|p| r.contains(p)) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    let over_photo = resp.hover_pos().is_some_and(|p| img_rect.contains(p));
+    if s.develop.picking_wb {
+        // White Balance Selector: click a neutral area.
+        if over_photo {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
         if resp.clicked()
             && let Some(p) = resp.interact_pointer_pos()
+            && img_rect.contains(p)
         {
-            let q = (p - r.min) / r.size();
+            let q = (p - img_rect.min) / img_rect.size();
             let (x, y) = unrotate(q, photo.rotation);
             s.develop.pick(x, y);
         }
+        return;
+    }
+    // As in the Loupe: a click toggles between Fit and the zoom level, at that point.
+    if resp.clicked() && !photo.missing {
+        if zoomed {
+            app.zoom.zoomed = false;
+        } else if let Some(p) = resp.interact_pointer_pos() {
+            app.zoom.zoom_in_at_in(p, img_rect, view);
+        }
+    }
+    if zoomed {
+        let icon = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+        ui.ctx().set_cursor_icon(icon);
+    } else if over_photo && !photo.missing {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
+    }
+}
+
+/// A point (0..1) of the photo before the catalog's `rotation` clockwise quarter turns →
+/// the same point as displayed (the inverse of [`unrotate`]).
+fn rotate((u, v): (f32, f32), rotation: u8) -> (f32, f32) {
+    match rotation % 4 {
+        1 => (1.0 - v, u),
+        2 => (1.0 - u, 1.0 - v),
+        3 => (v, 1.0 - u),
+        _ => (u, v),
     }
 }
 
@@ -628,6 +732,17 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotate_and_unrotate_are_inverses() {
+        for r in 0..4 {
+            for q in [(0.1f32, 0.7f32), (0.9, 0.2), (0.0, 1.0)] {
+                let (x, y) = unrotate(egui::vec2(q.0, q.1), r);
+                let back = rotate((x, y), r);
+                assert!((back.0 - q.0).abs() < 1e-6 && (back.1 - q.1).abs() < 1e-6, "{r}: {q:?} -> {back:?}");
+            }
+        }
+    }
 
     #[test]
     fn unrotate_maps_display_corners_back() {

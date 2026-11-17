@@ -12,7 +12,9 @@ use catalog::{Catalog, FileKind, HistoryStep, PhotoRow};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use imaging::SourceKind;
-use imaging::develop::{DevelopSettings, ResolvedWb, WbPreset, WorkingImage, auto_tone, render_srgb8};
+use imaging::develop::{
+    DevelopSettings, Region, ResolvedWb, WbPreset, WorkingImage, auto_tone, render_region_srgb8, render_srgb8,
+};
 
 use crate::jobs::Histogram;
 
@@ -39,8 +41,19 @@ enum Request {
         clipping: bool,
         seq: u64,
     },
+    /// Render part of the full-size photo (1:1 zoom), loading it first if needed.
+    Region { photo_id: i64, view: RegionView, seq: u64 },
     /// Settings computed from the pixels.
     Adjust { photo_id: i64, op: Adjust, settings: DevelopSettings },
+}
+
+/// What a full-resolution region render shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionView {
+    pub settings: DevelopSettings,
+    pub clipping: bool,
+    /// Pixels of the full-size image, in file orientation.
+    pub region: Region,
 }
 
 /// Changes worked out from the photo's pixels.
@@ -77,6 +90,12 @@ enum Reply {
         wb: ResolvedWb,
         clipped: Clipped,
     },
+    Region {
+        photo_id: i64,
+        seq: u64,
+        view: RegionView,
+        image: egui::ColorImage,
+    },
     Adjusted {
         photo_id: i64,
         op: Adjust,
@@ -101,6 +120,8 @@ pub struct SourceInfo {
     /// Temp/Tint in Kelvin (RAW with a colour matrix), else relative.
     pub kelvin: bool,
     pub presets: &'static [WbPreset],
+    /// The full-size image's size (file orientation).
+    pub full_size: (u32, u32),
 }
 
 fn histogram(rgb: &[u8]) -> Box<Histogram> {
@@ -134,23 +155,65 @@ fn clipping(rgb: &mut [u8], paint: bool) -> Clipped {
     Clipped { shadows: dark as f32 / n, highlights: bright as f32 / n }
 }
 
+fn color_image(rgb: &image::RgbImage) -> egui::ColorImage {
+    egui::ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw())
+}
+
+/// A full-size image being loaded on its own thread (a RAW takes seconds), so renders of
+/// the proxy carry on meanwhile.
+type FullLoaded = (i64, Result<WorkingImage, String>);
+
 fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut current: Option<(i64, WorkingImage)> = None;
-    while let Ok(first) = rx.recv() {
-        // Take everything queued: the last load, the last render per slot, every adjustment.
+    // The current photo's file, the full-size image once loaded, and whether it's loading.
+    let mut source: Option<(i64, PathBuf, SourceKind)> = None;
+    let mut full: Option<(i64, WorkingImage)> = None;
+    let mut full_loading: Option<i64> = None;
+    let mut pending_region: Option<(i64, RegionView, u64)> = None;
+    let (full_tx, full_rx) = crossbeam_channel::unbounded::<FullLoaded>();
+    loop {
+        let first = crossbeam_channel::select! {
+            recv(rx) -> req => match req {
+                Ok(req) => Some(req),
+                Err(_) => return,
+            },
+            recv(full_rx) -> loaded => {
+                if let Ok((photo_id, result)) = loaded {
+                    full_loading = full_loading.filter(|id| *id != photo_id);
+                    match result {
+                        Ok(img) if source.as_ref().is_some_and(|s| s.0 == photo_id) => full = Some((photo_id, img)),
+                        Ok(_) => {}
+                        Err(error) => {
+                            pending_region = None;
+                            let _ = tx.send(Reply::Failed { photo_id, error });
+                        }
+                    }
+                }
+                None
+            },
+        };
+        // Take everything queued: the last load, the last render per slot and region,
+        // every adjustment.
         let mut load = None;
         let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, u64)> = HashMap::new();
         let mut adjusts = Vec::new();
-        for req in std::iter::once(first).chain(rx.try_iter()) {
+        for req in first.into_iter().chain(rx.try_iter()) {
             match req {
                 Request::Load { photo_id, path, kind, max_px } => load = Some((photo_id, path, kind, max_px)),
                 Request::Render { photo_id, slot, settings, clipping, seq } => {
                     renders.insert(slot, (photo_id, settings, clipping, seq));
                 }
+                Request::Region { photo_id, view, seq } => pending_region = Some((photo_id, view, seq)),
                 Request::Adjust { photo_id, op, settings } => adjusts.push((photo_id, op, settings)),
             }
         }
         if let Some((photo_id, path, kind, max_px)) = load {
+            if source.as_ref().is_none_or(|s| s.0 != photo_id) {
+                // Another photo: forget this one's full-size image and pending region.
+                full = None;
+                pending_region = pending_region.filter(|r| r.0 == photo_id);
+            }
+            source = Some((photo_id, path.clone(), kind));
             // A new photo, or this one at another size.
             let stale = current.as_ref().is_none_or(|(id, img)| {
                 *id != photo_id
@@ -170,7 +233,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 }
             }
             if let Some((_, img)) = current.as_ref().filter(|(id, _)| *id == photo_id) {
-                let info = SourceInfo { kelvin: img.kelvin(), presets: img.wb_presets() };
+                let info =
+                    SourceInfo { kelvin: img.kelvin(), presets: img.wb_presets(), full_size: img.full_size };
                 let _ = tx.send(Reply::Loaded { photo_id, info });
             }
         }
@@ -185,9 +249,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             let mut rgb = render_srgb8(img, &settings);
             let histogram = histogram(rgb.as_raw());
             let clipped = clipping(&mut rgb, paint);
-            let image =
-                egui::ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw());
             let wb = img.resolve_wb(&settings);
+            let image = color_image(&rgb);
             let _ = tx.send(Reply::Rendered { photo_id, slot, seq, image, histogram, wb, clipped });
         }
         for (photo_id, op, settings) in adjusts.into_iter().filter(|a| a.0 == *id) {
@@ -198,6 +261,40 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 Adjust::AutoTone => Some(auto_tone(img, &settings)),
             };
             let _ = tx.send(Reply::Adjusted { photo_id, op, settings });
+        }
+        // 1:1: render the region from the full-size image, loading that first.
+        if let Some((photo_id, view, seq)) = pending_region.take_if(|r| r.0 == *id) {
+            match &full {
+                Some((fid, full_img)) if *fid == photo_id => {
+                    let started = std::time::Instant::now();
+                    let mut rgb = render_region_srgb8(full_img, &view.settings, view.region);
+                    clipping(&mut rgb, view.clipping);
+                    log::debug!("develop: 1:1 region {:?} in {:.0?}", view.region, started.elapsed());
+                    let image = color_image(&rgb);
+                    let _ = tx.send(Reply::Region { photo_id, seq, view, image });
+                }
+                _ => {
+                    if full_loading != Some(photo_id)
+                        && let Some((_, path, kind)) = source.clone().filter(|s| s.0 == photo_id)
+                    {
+                        full_loading = Some(photo_id);
+                        let full_tx = full_tx.clone();
+                        let ctx = ctx.clone();
+                        std::thread::spawn(move || {
+                            let started = std::time::Instant::now();
+                            let result = WorkingImage::load(&path, kind, None).map(|(img, _)| img);
+                            log::debug!(
+                                "develop: full size of {} in {:.1?}",
+                                path.display(),
+                                started.elapsed()
+                            );
+                            let _ = full_tx.send((photo_id, result.map_err(|e| format!("{e:#}"))));
+                            ctx.request_repaint();
+                        });
+                    }
+                    pending_region = Some((photo_id, view, seq));
+                }
+            }
         }
         ctx.request_repaint();
     }
@@ -234,6 +331,14 @@ pub struct DevelopState {
     /// J: show clipped pixels; and how many there are in the current render.
     pub clipping: bool,
     pub clipped: Clipped,
+    /// 1:1 zoom: the full-resolution render of the visible region, and what it shows.
+    pub region: Option<(RegionView, egui::TextureHandle)>,
+    /// The region view last requested, its sequence number, and the newest one shown.
+    region_sent: Option<RegionView>,
+    region_seq: u64,
+    region_shown: u64,
+    /// When the shown settings last changed (regions wait until they settle).
+    changed_at: std::time::Instant,
     /// Copy Settings / Paste Settings.
     pub clipboard: Option<DevelopSettings>,
     pub history: Vec<HistoryStep>,
@@ -273,6 +378,11 @@ impl DevelopState {
             loaded_px: 0,
             clipping: false,
             clipped: Clipped::default(),
+            region: None,
+            region_sent: None,
+            region_seq: 0,
+            region_shown: 0,
+            changed_at: std::time::Instant::now(),
             clipboard: None,
             history: Vec::new(),
             redo: Vec::new(),
@@ -293,6 +403,8 @@ impl DevelopState {
         self.photo = Some(photo.id);
         self.info = None;
         self.textures.clear();
+        self.region = None;
+        self.region_sent = None;
         self.histogram = None;
         self.wb = None;
         self.error = None;
@@ -406,6 +518,20 @@ impl DevelopState {
                         None => self.error = Some("Pick a neutral, unclipped area".into()),
                     }
                 }
+                Reply::Region { photo_id, seq, view, image } if Some(photo_id) == self.photo => {
+                    if seq < self.region_shown {
+                        continue;
+                    }
+                    self.region_shown = seq;
+                    let opts = egui::TextureOptions::LINEAR;
+                    match &mut self.region {
+                        Some((v, t)) if t.size() == image.size => {
+                            t.set(image, opts);
+                            *v = view;
+                        }
+                        _ => self.region = Some((view, ctx.load_texture("develop_region", image, opts))),
+                    }
+                }
                 Reply::Failed { photo_id, error } if Some(photo_id) == self.photo => {
                     log::warn!("develop: {error}");
                     self.error = Some(error);
@@ -420,6 +546,7 @@ impl DevelopState {
     pub fn set_live(&mut self, settings: DevelopSettings) {
         if settings != self.settings {
             self.settings = settings;
+            self.changed_at = std::time::Instant::now();
             self.request_renders();
         }
     }
@@ -526,6 +653,45 @@ impl DevelopState {
     pub fn set_clipping(&mut self, on: bool) {
         self.clipping = on;
         self.request_renders();
+    }
+
+    /// What the center view shows: the settings (none for Before) and clipping.
+    fn shown_view(&self, region: Region) -> RegionView {
+        let settings = if self.before { DevelopSettings::default() } else { self.settings.clone() };
+        RegionView { settings, clipping: self.clipping, region }
+    }
+
+    /// 1:1 zoom shows `region` of the full-size image: ask for it once the settings have
+    /// settled (not on every step of a slider drag). Returns how long to wait before
+    /// asking again, if it's too early.
+    pub fn want_region(&mut self, region: Region) -> Option<std::time::Duration> {
+        const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+        let photo_id = self.photo?;
+        let view = self.shown_view(region);
+        if self.region_sent.as_ref() == Some(&view) {
+            return None;
+        }
+        let since = self.changed_at.elapsed();
+        if since < SETTLE {
+            return Some(SETTLE - since);
+        }
+        self.region_seq += 1;
+        self.region_sent = Some(view.clone());
+        let _ = self.tx.send(Request::Region { photo_id, view, seq: self.region_seq });
+        None
+    }
+
+    /// The full-resolution region to draw over the proxy, if it shows what the view
+    /// shows now (same settings and clipping; it may cover another part while panning).
+    pub fn region_for_view(&self) -> Option<(Region, &egui::TextureHandle)> {
+        let (v, t) = self.region.as_ref()?;
+        let now = self.shown_view(v.region);
+        (*v == now).then_some((v.region, t))
+    }
+
+    /// Is a 1:1 render on its way (or the full-size image loading)?
+    pub fn region_pending(&self) -> bool {
+        self.region_seq > self.region_shown
     }
 
     /// Show the Before slot too (rendered on demand).

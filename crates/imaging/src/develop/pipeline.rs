@@ -94,6 +94,28 @@ enum Input {
     Gains([f32; 3]),
 }
 
+/// A rectangle of an image, in pixels (file orientation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Region {
+    pub fn whole(img: &WorkingImage) -> Region {
+        Region { x: 0, y: 0, w: img.width(), h: img.height() }
+    }
+
+    /// This region clipped to `img`, at least one pixel.
+    pub fn clipped(self, img: &WorkingImage) -> Region {
+        let x = self.x.min(img.width() - 1);
+        let y = self.y.min(img.height() - 1);
+        Region { x, y, w: self.w.clamp(1, img.width() - x), h: self.h.clamp(1, img.height() - y) }
+    }
+}
+
 /// Everything per-pixel rendering needs, prepared once per render.
 struct Prepared {
     input: Input,
@@ -108,17 +130,20 @@ struct Prepared {
     shadows: f32,
     clarity: f32,
     texture: f32,
-    /// With any of them on: the exposure gain of every pixel (`gain` with the local
-    /// adjustments applied), computed in one pass before rendering.
+    /// With any of them on: the exposure gain of every pixel of `region` (`gain` with
+    /// the local adjustments applied), computed in one pass before rendering.
     gains: Option<Vec<f32>>,
-    width: usize,
+    /// The part of the image being rendered.
+    region: Region,
     /// Dehaze, −1..+1, and the haze map (also used for its colour when adding haze).
     dehaze: f32,
     haze: Option<HazeMap>,
 }
 
 impl Prepared {
-    fn new(img: &WorkingImage, s: &DevelopSettings) -> Prepared {
+    /// Prepare to render `region` of `img`. Local adjustments look at the whole image,
+    /// so a region renders exactly like that part of a full render.
+    fn new(img: &WorkingImage, s: &DevelopSettings, region: Region) -> Prepared {
         let wb = img.resolve_wb(s);
         let input = match &img.color {
             SourceColor::Camera(c) => Input::Camera { m: wb.multipliers, mat: c.cam_to_work },
@@ -150,17 +175,13 @@ impl Prepared {
             clarity: s.clarity / 100.0,
             gains: None,
             texture: s.texture / 100.0,
-            width: img.width() as usize,
+            region,
             dehaze: s.dehaze / 100.0,
             haze: None,
         };
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        let px = img.pixels.as_raw();
         if prep.dehaze != 0.0 {
-            let map = HazeMap::build(w, h, prep.dehaze.max(0.0), |x, y| {
-                let i = 3 * (y * w + x);
-                prep.linear([px[i], px[i + 1], px[i + 2]])
-            });
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let map = HazeMap::build(w, h, prep.dehaze.max(0.0), |x, y| prep.linear(input_at(img, x, y)));
             prep.haze = Some(map);
         }
         let tone = prep.highlights != 0.0 || prep.shadows != 0.0;
@@ -171,46 +192,69 @@ impl Prepared {
         prep
     }
 
-    /// The exposure gain of every pixel with Highlights / Shadows, Clarity and Texture
-    /// applied: maps of local brightness first, then one simple pass over the pixels.
+    /// The exposure gain of every pixel of the region with Highlights / Shadows, Clarity
+    /// and Texture applied: maps of local brightness first (from the whole image), then
+    /// one simple pass over the region's pixels.
     fn local_gains(&self, img: &WorkingImage) -> Vec<f32> {
         let (w, h) = (img.width() as usize, img.height() as usize);
-        // Luminance of every pixel (white balanced, before exposure), shared by the maps.
-        let lum: Vec<f32> = img
-            .pixels
-            .as_raw()
-            .par_chunks(3)
-            .map(|p| self.luminance(self.linear([p[0], p[1], p[2]])))
-            .collect();
+        // Rendering everything (the proxy, exports): every pixel's luminance once, shared by
+        // the maps and the detail pass. A region of a full-size image instead computes it
+        // where needed: the maps only sample a fraction of the pixels.
+        let whole = self.region == Region::whole(img);
+        let lum: Option<Vec<f32>> = whole.then(|| {
+            img.pixels
+                .as_raw()
+                .par_chunks(3)
+                .map(|p| self.luminance(self.linear([p[0], p[1], p[2]])))
+                .collect()
+        });
+        let lum_at = |x: usize, y: usize| match &lum {
+            Some(l) => l[y * w + x],
+            None => self.luminance(self.linear(input_at(img, x, y))),
+        };
         let tone = (self.highlights != 0.0 || self.shadows != 0.0).then(|| {
-            let mut map = BaseMap::build(w, h, TONE_MAP, |x, y| lum[y * w + x]);
+            let mut map = BaseMap::build(w, h, TONE_MAP, lum_at);
             // Brightness (stops from middle grey after exposure) → gain, per map cell.
             let offset = self.gain.log2() - MIDDLE_GREY.log2();
             let (hl, sh) = (self.highlights, self.shadows);
             map.transform(|v| tone_gain(v + offset, hl, sh).exp2());
             map
         });
-        let clarity = (self.clarity != 0.0).then(|| BaseMap::build(w, h, CLARITY_MAP, |x, y| lum[y * w + x]));
-        let ylog: Option<Vec<f32>> = (self.clarity != 0.0 || self.texture != 0.0)
-            .then(|| lum.par_iter().map(|v| fast_log2(v.max(1e-6))).collect());
-        drop(lum);
+        let clarity = (self.clarity != 0.0).then(|| BaseMap::build(w, h, CLARITY_MAP, lum_at));
+
+        // log2 luminance over the region, plus the margin Texture's blur reaches into.
+        let r = (w.max(h) as f32 / 1000.0).round().max(1.0) as usize;
+        let margin = if self.texture != 0.0 { 2 * r + 1 } else { 0 };
+        let reg = self.region;
+        let (ex0, ey0) = ((reg.x as usize).saturating_sub(margin), (reg.y as usize).saturating_sub(margin));
+        let ex1 = (reg.x as usize + reg.w as usize + margin).min(w);
+        let ey1 = (reg.y as usize + reg.h as usize + margin).min(h);
+        let (ew, eh) = (ex1 - ex0, ey1 - ey0);
+        let ylog: Option<Vec<f32>> = (self.clarity != 0.0 || self.texture != 0.0).then(|| {
+            (ey0..ey1)
+                .into_par_iter()
+                .flat_map_iter(|y| (ex0..ex1).map(move |x| fast_log2(lum_at(x, y).max(1e-6))))
+                .collect()
+        });
         // Texture: log luminance blurred twice (close to a Gaussian) over a few pixels; the
         // radius follows the image size so a preview and a full-size export agree.
         let texture = (self.texture != 0.0).then(|| {
-            let r = (w.max(h) as f32 / 1000.0).round().max(1.0) as usize;
             let ylog = ylog.as_deref().unwrap_or_default();
-            box_blur_par(&box_blur_par(ylog, w, h, r), w, h, r)
+            box_blur_par(&box_blur_par(ylog, ew, eh, r), ew, eh, r)
         });
         let grey = MIDDLE_GREY.log2();
-        let mut gains = vec![self.gain; w * h];
-        gains.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-            for (x, g) in row.iter_mut().enumerate() {
+        let (rx, ry, rw) = (reg.x as usize, reg.y as usize, reg.w as usize);
+        let mut gains = vec![self.gain; rw * reg.h as usize];
+        gains.par_chunks_mut(rw).enumerate().for_each(|(j, row)| {
+            let y = ry + j;
+            for (i, g) in row.iter_mut().enumerate() {
+                let x = rx + i;
                 if let Some(map) = &tone {
                     *g *= map.sample(x, y);
                 }
                 let Some(ylog) = &ylog else { continue };
-                let i = y * w + x;
-                let l = ylog[i];
+                let e = (y - ey0) * ew + (x - ex0);
+                let l = ylog[e];
                 let mut stops = 0.0;
                 if let Some(map) = &clarity {
                     let d = (l - map.sample(x, y)).clamp(-1.5, 1.5);
@@ -219,7 +263,7 @@ impl Prepared {
                     stops += self.clarity * 0.9 * d / (1.0 + rel * rel / 6.0);
                 }
                 if let Some(base) = &texture {
-                    let d = (l - base[i]).clamp(-1.0, 1.0);
+                    let d = (l - base[e]).clamp(-1.0, 1.0);
                     // Soft threshold: the smallest differences are mostly noise.
                     stops += self.texture * 1.2 * d * (d.abs() / (d.abs() + 0.04));
                 }
@@ -267,7 +311,10 @@ impl Prepared {
             };
         }
         let g = match &self.gains {
-            Some(gains) => gains[y * self.width + x],
+            Some(gains) => {
+                let r = &self.region;
+                gains[(y - r.y as usize) * r.w as usize + (x - r.x as usize)]
+            }
             None => self.gain,
         };
         let mut d =
@@ -316,30 +363,48 @@ impl SrgbEncoder {
     }
 }
 
-/// Run `pixel` over every pixel, a row per task: `out` has `channels` values per pixel.
+/// The input pixel at (x, y).
+#[inline]
+fn input_at(img: &WorkingImage, x: usize, y: usize) -> [f32; 3] {
+    let i = 3 * (y * img.width() as usize + x);
+    let px = img.pixels.as_raw();
+    [px[i], px[i + 1], px[i + 2]]
+}
+
+/// Run `pixel` over every pixel of `region`, a row per task: `out` has `channels` values
+/// per pixel; `pixel` gets image coordinates.
 fn render_rows<T: Send>(
     img: &WorkingImage,
+    region: Region,
     out: &mut [T],
     channels: usize,
     pixel: impl Fn(&mut [T], [f32; 3], usize, usize) + Sync,
 ) {
-    let w = img.width() as usize;
-    out.par_chunks_mut(channels * w).zip(img.pixels.as_raw().par_chunks(3 * w)).enumerate().for_each(
-        |(y, (dst, src))| {
-            for (x, (o, p)) in dst.chunks_mut(channels).zip(src.as_chunks::<3>().0).enumerate() {
-                pixel(o, *p, x, y);
-            }
-        },
-    );
+    let (w, rx, rw) = (img.width() as usize, region.x as usize, region.w as usize);
+    let src = img.pixels.as_raw();
+    out.par_chunks_mut(channels * rw).enumerate().for_each(|(j, dst)| {
+        let y = region.y as usize + j;
+        let row = &src[3 * (y * w + rx)..3 * (y * w + rx + rw)];
+        for (i, (o, p)) in dst.chunks_mut(channels).zip(row.as_chunks::<3>().0).enumerate() {
+            pixel(o, *p, rx + i, y);
+        }
+    });
 }
 
 /// Render for display: 8-bit sRGB.
 pub fn render_srgb8(img: &WorkingImage, s: &DevelopSettings) -> RgbImage {
-    let prep = Prepared::new(img, s);
+    render_region_srgb8(img, s, Region::whole(img))
+}
+
+/// Render part of the image for display (1:1 views of a full-size image): 8-bit sRGB,
+/// the region's size.
+pub fn render_region_srgb8(img: &WorkingImage, s: &DevelopSettings, region: Region) -> RgbImage {
+    let region = region.clipped(img);
+    let prep = Prepared::new(img, s, region);
     let enc = SrgbEncoder::new();
     let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
-    let mut out = RgbImage::new(img.width(), img.height());
-    render_rows(img, &mut out, 3, |o, p, x, y| {
+    let mut out = RgbImage::new(region.w, region.h);
+    render_rows(img, region, &mut out, 3, |o, p, x, y| {
         let l = matrix::apply(&to_srgb, prep.pixel(p, x, y));
         o.copy_from_slice(&l.map(|v| enc.encode(v)));
     });
@@ -348,9 +413,10 @@ pub fn render_srgb8(img: &WorkingImage, s: &DevelopSettings) -> RgbImage {
 
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
 pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<Rgb<u16>, Vec<u16>> {
-    let prep = Prepared::new(img, s);
+    let region = Region::whole(img);
+    let prep = Prepared::new(img, s, region);
     let mut out = ImageBuffer::<Rgb<u16>, Vec<u16>>::new(img.width(), img.height());
-    render_rows(img, &mut out, 3, |o, p, x, y| {
+    render_rows(img, region, &mut out, 3, |o, p, x, y| {
         o.copy_from_slice(&prep.pixel(p, x, y).map(|v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16));
     });
     out
@@ -373,7 +439,7 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
         blacks: 0.0,
         ..s.clone()
     };
-    let prep = Prepared::new(img, &neutral);
+    let prep = Prepared::new(img, &neutral, Region::whole(img));
     // Luminance in stops from middle grey, on a sample of pixels.
     let px = img.pixels.as_raw().as_chunks::<3>().0;
     let step = (px.len() / 200_000).max(1);

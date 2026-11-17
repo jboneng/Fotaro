@@ -12,6 +12,6 @@ mod wb;
 #[cfg(test)]
 mod tests;
 
-pub use pipeline::{auto_tone, render_linear16, render_srgb8};
+pub use pipeline::{Region, auto_tone, render_linear16, render_region_srgb8, render_srgb8};
 pub use settings::{DevelopSettings, PROCESS_VERSION, Slider, Treatment, WbPreset};
 pub use source::{ResolvedWb, SourceColor, WorkingImage};
