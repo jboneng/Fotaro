@@ -301,14 +301,21 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 fn histogram(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else {
+        paint_histogram(ui, None);
+        return;
+    };
+    paint_histogram(ui, s.active.and_then(|id| s.histograms.get(&id)).map(|h| &**h));
+    exposure_summary(app, ui);
+}
+
+/// The histogram graph (R, G, B overlaid), or an empty box.
+pub(super) fn paint_histogram(ui: &mut egui::Ui, h: Option<&crate::jobs::Histogram>) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 90.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(0x22, 0x22, 0x22));
-    let Some(s) = &mut app.session else { return };
-    let Some(id) = s.active else { return };
-
-    if let Some(h) = s.histograms.get(&id) {
+    if let Some(h) = h {
         // Ignore the extreme bins when scaling so clipped highlights don't flatten the curve.
         let peak = h.iter().flat_map(|c| c[1..255].iter()).copied().max().unwrap_or(1).max(1) as f32;
         let colors = [
@@ -333,8 +340,11 @@ fn histogram(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             }
         }
     }
+}
 
-    // Exposure summary under the histogram, as in LrC.
+/// The exposure summary under the histogram, as in LrC ("ISO 100  50 mm  f / 2.8  1/250").
+pub(super) fn exposure_summary(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
     if let Some(m) = s.active_metadata() {
         let mut parts = Vec::new();
         if let Some(iso) = m.iso {

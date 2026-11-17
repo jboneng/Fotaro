@@ -5,6 +5,8 @@
 //! `Ctrl` means Cmd on macOS.
 
 use catalog::Flag;
+
+use crate::app::Module;
 use eframe::egui::{self, Key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,14 +84,24 @@ pub enum Action {
     /// Shift+arrows: extend the selection (by this many photos).
     ExtendSelection(isize),
     CreateVirtualCopy,
+    LibraryModule,
+    DevelopModule,
+    BeforeAfter,
+    AutoTone,
+    AutoWhiteBalance,
+    WhiteBalanceSelector,
+    ClippingIndicators,
+    ResetSettings,
+    CopySettings,
+    PasteSettings,
+    Undo,
+    Redo,
 }
 
 /// Is the action wired up yet, or does it arrive in a later roadmap phase?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Available,
-    // Every shortcut is available today; kept for features announced before they land.
-    #[allow(dead_code)]
     Planned(&'static str),
 }
 
@@ -123,26 +135,71 @@ const fn ctrl_alt_shift(key: Key) -> Binding {
     Binding { key, ctrl: true, shift: true, alt: true }
 }
 
+/// Where a shortcut works: a key can mean different things in Library and Develop
+/// (`\` is the Filter bar in one and Before/After in the other, as in LrC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    All,
+    Library,
+    Develop,
+}
+
+impl Scope {
+    pub fn includes(self, module: Module) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Library => module == Module::Library,
+            Scope::Develop => module == Module::Develop,
+        }
+    }
+
+    #[cfg(test)]
+    fn overlaps(self, other: Scope) -> bool {
+        self == Scope::All || other == Scope::All || self == other
+    }
+}
+
 pub struct Shortcut {
     pub binding: Binding,
     pub action: Action,
     pub group: &'static str,
     pub description: &'static str,
     pub status: Status,
+    pub scope: Scope,
 }
 
 const fn s(binding: Binding, action: Action, group: &'static str, description: &'static str) -> Shortcut {
-    Shortcut { binding, action, group, description, status: Status::Available }
+    Shortcut { binding, action, group, description, status: Status::Available, scope: Scope::All }
 }
-#[allow(dead_code)]
-const fn planned(
+/// A Library-only shortcut.
+const fn lib(binding: Binding, action: Action, group: &'static str, description: &'static str) -> Shortcut {
+    Shortcut { binding, action, group, description, status: Status::Available, scope: Scope::Library }
+}
+/// A Develop-only shortcut.
+const fn dev(binding: Binding, action: Action, description: &'static str) -> Shortcut {
+    Shortcut {
+        binding,
+        action,
+        group: DEVELOP,
+        description,
+        status: Status::Available,
+        scope: Scope::Develop,
+    }
+}
+const fn dev_planned(
     binding: Binding,
     action: Action,
-    group: &'static str,
     description: &'static str,
     phase: &'static str,
 ) -> Shortcut {
-    Shortcut { binding, action, group, description, status: Status::Planned(phase) }
+    Shortcut {
+        binding,
+        action,
+        group: DEVELOP,
+        description,
+        status: Status::Planned(phase),
+        scope: Scope::Develop,
+    }
 }
 
 const VIEW: &str = "View";
@@ -150,6 +207,8 @@ const PANELS: &str = "Panels";
 const CULL: &str = "Rating & Flagging";
 const SELECT: &str = "Selection & Navigation";
 const ORG: &str = "Organizing";
+const MODULES: &str = "Modules";
+const DEVELOP: &str = "Develop";
 
 use Action as A;
 use Key as K;
@@ -165,7 +224,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(k(K::F), A::FullScreenPreview, VIEW, "Full-screen preview"),
     s(k(K::Escape), A::Escape, VIEW, "Exit full screen / back to Grid"),
     s(k(K::L), A::CycleLightsOut, VIEW, "Cycle Lights Out (dim / off / normal)"),
-    s(k(K::J), A::CycleGridStyle, VIEW, "Cycle Grid cell style"),
+    lib(k(K::J), A::CycleGridStyle, VIEW, "Cycle Grid cell style"),
     s(k(K::I), A::CycleInfoOverlay, VIEW, "Cycle Loupe info overlay"),
     s(k(K::Z), A::ZoomToggle, VIEW, "Toggle Loupe zoom (Fit / Navigator zoom level)"),
     s(ctrl(K::Equals), A::ZoomIn, VIEW, "Zoom in"),
@@ -175,7 +234,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(k(K::Tab), A::ToggleSidePanels, PANELS, "Hide / show side panels"),
     s(shift(K::Tab), A::ToggleAllPanels, PANELS, "Hide / show all panels"),
     s(k(K::T), A::ToggleToolbar, PANELS, "Hide / show toolbar"),
-    s(k(K::Backslash), A::ToggleFilterBar, PANELS, "Hide / show Library Filter bar"),
+    lib(k(K::Backslash), A::ToggleFilterBar, PANELS, "Hide / show Library Filter bar"),
     s(k(K::F5), A::ToggleTopPanel, PANELS, "Hide / show top panel"),
     s(k(K::F6), A::ToggleFilmstrip, PANELS, "Hide / show Filmstrip"),
     s(k(K::F7), A::ToggleLeftPanel, PANELS, "Hide / show left panels"),
@@ -283,6 +342,22 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl(K::E), A::EditIn, ORG, "Edit in the primary external editor"),
     s(ctrl_alt(K::E), A::EditInOther, ORG, "Edit in the secondary external editor"),
     s(ctrl(K::Slash), A::ShowShortcuts, ORG, "Show keyboard shortcuts"),
+    // Modules
+    s(k(K::D), A::DevelopModule, MODULES, "Develop module"),
+    s(ctrl_alt(K::Num1), A::LibraryModule, MODULES, "Library module"),
+    s(ctrl_alt(K::Num2), A::DevelopModule, MODULES, "Develop module"),
+    // Develop
+    dev(k(K::Backslash), A::BeforeAfter, "Show Before / After (the photo without adjustments)"),
+    dev_planned(ctrl(K::U), A::AutoTone, "Auto Tone", "Develop step 6"),
+    dev(ctrl_shift(K::U), A::AutoWhiteBalance, "Auto White Balance"),
+    dev(k(K::W), A::WhiteBalanceSelector, "White Balance Selector (click a neutral area)"),
+    dev_planned(k(K::J), A::ClippingIndicators, "Show clipping", "Develop step 6"),
+    dev(ctrl_shift(K::R), A::ResetSettings, "Reset all settings"),
+    dev(ctrl_shift(K::C), A::CopySettings, "Copy settings"),
+    dev(ctrl_shift(K::V), A::PasteSettings, "Paste settings"),
+    dev(ctrl(K::Z), A::Undo, "Undo"),
+    dev(ctrl(K::Y), A::Redo, "Redo"),
+    dev(ctrl_shift(K::Z), A::Redo, "Redo"),
 ];
 
 pub fn key_name(key: Key) -> &'static str {
@@ -375,7 +450,7 @@ fn is_digit(key: Key) -> bool {
 
 /// Take this frame's shortcut presses out of the input queue (so widgets don't
 /// also react, e.g. Tab moving focus). Does nothing while a text field has focus.
-pub fn take_actions(ctx: &egui::Context) -> Vec<&'static Shortcut> {
+pub fn take_actions(ctx: &egui::Context, module: Module) -> Vec<&'static Shortcut> {
     if ctx.egui_wants_keyboard_input() {
         return Vec::new();
     }
@@ -385,7 +460,7 @@ pub fn take_actions(ctx: &egui::Context) -> Vec<&'static Shortcut> {
             let egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } = ev else {
                 return true;
             };
-            match resolve(*key, *physical_key, *modifiers) {
+            match resolve(*key, *physical_key, *modifiers, module) {
                 Some(s) => {
                     log::debug!("shortcut {}: {}", s.binding.label(), s.description);
                     hits.push(s);
@@ -399,11 +474,11 @@ pub fn take_actions(ctx: &egui::Context) -> Vec<&'static Shortcut> {
 }
 
 /// The shortcut for a key press: exact logical matches win over the physical fallback.
-fn resolve(key: Key, physical: Option<Key>, m: egui::Modifiers) -> Option<&'static Shortcut> {
-    SHORTCUTS
-        .iter()
+fn resolve(key: Key, physical: Option<Key>, m: egui::Modifiers, module: Module) -> Option<&'static Shortcut> {
+    let active = || SHORTCUTS.iter().filter(move |s| s.scope.includes(module));
+    active()
         .find(|s| s.binding.key == key && s.binding.modifiers_match(m))
-        .or_else(|| SHORTCUTS.iter().find(|s| s.binding.matches(key, physical, m)))
+        .or_else(|| active().find(|s| s.binding.matches(key, physical, m)))
 }
 
 /// Markdown reference, written to `docs/SHORTCUTS.md` (kept in sync by a test).
@@ -413,7 +488,8 @@ pub fn markdown() -> String {
         "# Keyboard shortcuts\n\n\
          Generated from `crates/app/src/ui/shortcuts.rs` — do not edit by hand.\n\
          Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.\n\n\
-         `Ctrl` is `Cmd` on macOS. These follow Lightroom Classic's Library module.\n",
+         `Ctrl` is `Cmd` on macOS. These follow Lightroom Classic's Library and Develop modules.\n\
+         Shortcuts work in both modules unless marked (Library) or listed under Develop.\n",
     );
     let mut group = "";
     for s in SHORTCUTS {
@@ -426,7 +502,8 @@ pub fn markdown() -> String {
             Status::Planned(phase) => format!("planned ({phase})"),
         };
         let label = s.binding.label_with("Ctrl").replace('\\', "\\\\").replace('|', "\\|");
-        out.push_str(&format!("| `{label}` | {} | {status} |\n", s.description));
+        let only = if s.scope == Scope::Library { " (Library)" } else { "" };
+        out.push_str(&format!("| `{label}` | {}{only} | {status} |\n", s.description));
     }
     out.push_str(
         "\n## Auto Advance\n\n\
@@ -443,20 +520,32 @@ pub fn markdown() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
-    fn no_binding_is_used_twice() {
-        let mut seen = HashSet::new();
-        for s in SHORTCUTS {
-            let b = s.binding;
-            assert!(
-                seen.insert((b.key, b.ctrl, b.shift, b.alt)),
-                "duplicate binding {} ({})",
-                b.label(),
-                s.description
-            );
+    fn no_binding_is_used_twice_in_a_module() {
+        for (i, a) in SHORTCUTS.iter().enumerate() {
+            for b in &SHORTCUTS[i + 1..] {
+                assert!(
+                    a.binding != b.binding || !a.scope.overlaps(b.scope),
+                    "duplicate binding {} ({} / {})",
+                    a.binding.label(),
+                    a.description,
+                    b.description
+                );
+            }
         }
+    }
+
+    #[test]
+    fn keys_follow_the_module() {
+        let none = egui::Modifiers::NONE;
+        let lib = resolve(Key::Backslash, None, none, Module::Library).unwrap();
+        assert_eq!(lib.action, Action::ToggleFilterBar);
+        let dev = resolve(Key::Backslash, None, none, Module::Develop).unwrap();
+        assert_eq!(dev.action, Action::BeforeAfter);
+        // Rating works in both.
+        assert!(resolve(Key::Num3, None, none, Module::Develop).is_some());
+        assert!(resolve(Key::W, None, none, Module::Library).is_none());
     }
 
     #[test]
@@ -473,12 +562,12 @@ mod tests {
     #[test]
     fn arrow_keys_win_over_numpad_physical_keys() {
         // Windows reports Right arrow (and numpad arrows) with physical key Num6.
-        let s = resolve(Key::ArrowRight, Some(Key::Num6), egui::Modifiers::NONE).unwrap();
+        let s = resolve(Key::ArrowRight, Some(Key::Num6), egui::Modifiers::NONE, Module::Library).unwrap();
         assert_eq!(s.action, Action::Next);
-        let s = resolve(Key::ArrowLeft, Some(Key::Num4), egui::Modifiers::NONE).unwrap();
+        let s = resolve(Key::ArrowLeft, Some(Key::Num4), egui::Modifiers::NONE, Module::Library).unwrap();
         assert_eq!(s.action, Action::Previous);
         let shift = egui::Modifiers { shift: true, ..Default::default() };
-        let s = resolve(Key::Exclamationmark, Some(Key::Num1), shift).unwrap();
+        let s = resolve(Key::Exclamationmark, Some(Key::Num1), shift, Module::Library).unwrap();
         assert_eq!(s.action, Action::SetRating { stars: 1, advance: true });
     }
 

@@ -18,7 +18,7 @@ use eframe::egui::{self, Align, Align2, Color32, Layout, RichText};
 
 use super::shortcuts::{Action, SHORTCUTS, Status};
 use super::{sidebars, theme, views};
-use crate::app::{Command, Dialog, Lights, PhotoLibraryApp, View};
+use crate::app::{Command, Dialog, Lights, Module, PhotoLibraryApp, View};
 use catalog::Flag;
 
 const TOAST_TIME: Duration = Duration::from_millis(1400);
@@ -84,12 +84,45 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.separator();
             menu_cmd(ui, app, "Exit", true, Command::Quit);
         });
+        let develop = app.module == Module::Develop;
         ui.menu_button("Edit", |ui| {
+            if develop {
+                let (undo, redo) = app
+                    .session
+                    .as_ref()
+                    .map_or((false, false), |s| (s.develop.can_undo(), s.develop.can_redo()));
+                for (text, action, enabled) in [("Undo", Action::Undo, undo), ("Redo", Action::Redo, redo)] {
+                    let mut button = egui::Button::new(text);
+                    if let Some(sc) = shortcut_for(action) {
+                        button = button.shortcut_text(sc);
+                    }
+                    if ui.add_enabled(enabled, button).clicked() {
+                        app.run(Command::Action(action));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+            }
             menu_action(ui, app, "Select All", Action::SelectAll);
             menu_action(ui, app, "Select None", Action::SelectNone);
             ui.separator();
             menu_cmd(ui, app, "External Editing Settings…", true, Command::OpenEditSettings);
         });
+        if develop {
+            // LrC's Develop module menu.
+            ui.menu_button("Settings", |ui| {
+                menu_action(ui, app, "Reset", Action::ResetSettings);
+                ui.separator();
+                menu_action(ui, app, "Copy Settings", Action::CopySettings);
+                menu_action(ui, app, "Paste Settings", Action::PasteSettings);
+                ui.separator();
+                menu_action(ui, app, "Auto Tone", Action::AutoTone);
+                menu_action(ui, app, "Auto White Balance", Action::AutoWhiteBalance);
+                menu_action(ui, app, "White Balance Selector", Action::WhiteBalanceSelector);
+                ui.separator();
+                menu_action(ui, app, "Show Before / After", Action::BeforeAfter);
+            });
+        }
         ui.menu_button("Library", |ui| {
             let sync = folder_source.map_or(Command::Planned("", ""), Command::SyncFolder);
             menu_cmd(ui, app, "Synchronize Folder…", folder_source.is_some(), sync);
@@ -329,8 +362,27 @@ fn top_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(18.0);
-            // Only the Library module exists; editing happens in external apps.
-            ui.label(RichText::new("Library").size(19.0).color(theme::MODULE_ACTIVE));
+            // LrC's module picker: the active module bright, the others dim; click to switch.
+            let has_catalog = app.session.is_some();
+            let modules = [
+                (Module::Develop, "Develop", Action::DevelopModule),
+                (Module::Library, "Library", Action::LibraryModule),
+            ];
+            for (i, (module, name, action)) in modules.into_iter().enumerate() {
+                if i > 0 {
+                    ui.label(RichText::new("|").size(17.0).color(theme::TEXT_WEAK.gamma_multiply(0.6)));
+                }
+                let active = app.module == module;
+                let color = if active { theme::MODULE_ACTIVE } else { theme::TEXT_WEAK };
+                let label =
+                    egui::Label::new(RichText::new(name).size(19.0).color(color)).sense(egui::Sense::click());
+                let resp = ui.add_enabled(has_catalog, label);
+                let resp = resp
+                    .on_hover_text(shortcut_for(action).map_or(name.to_owned(), |k| format!("{name} ({k})")));
+                if resp.clicked() && !active {
+                    app.run(Command::Action(action));
+                }
+            }
         });
     });
 }
@@ -433,7 +485,12 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         .default_size(250.0)
         .size_range(190.0..=460.0)
         .frame(panel_frame(theme::PANEL))
-        .show_collapsible(ui, &mut show, |ui| timed("left panels", || sidebars::left(app, ui)))
+        .show_collapsible(ui, &mut show, |ui| {
+            timed("left panels", || match app.module {
+                Module::Library => sidebars::left(app, ui),
+                Module::Develop => super::develop::left(app, ui),
+            })
+        })
     {
         app.panel_rects.push(r.response.rect);
     }
@@ -445,14 +502,20 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         .default_size(270.0)
         .size_range(210.0..=460.0)
         .frame(panel_frame(theme::PANEL))
-        .show_collapsible(ui, &mut show, |ui| timed("right panels", || sidebars::right(app, ui)))
+        .show_collapsible(ui, &mut show, |ui| {
+            timed("right panels", || match app.module {
+                Module::Library => sidebars::right(app, ui),
+                Module::Develop => super::develop::right(app, ui),
+            })
+        })
     {
         app.panel_rects.push(r.response.rect);
     }
     app.ui.show_right = show;
 
     let central = egui::CentralPanel::default().frame(panel_frame(theme::CENTER)).show(ui, |ui| {
-        if app.view == View::Grid && app.ui.show_filter_bar {
+        let develop = app.module == Module::Develop;
+        if !develop && app.view == View::Grid && app.ui.show_filter_bar {
             let r = egui::Panel::top("filter_bar")
                 .exact_size(super::filter_bar::height(&app.ui.filter))
                 .frame(panel_frame(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 0)))
@@ -463,10 +526,14 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let r = egui::Panel::bottom("toolbar")
                 .exact_size(30.0)
                 .frame(panel_frame(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 0)))
-                .show(ui, |ui| views::toolbar(app, ui));
+                .show(
+                    ui,
+                    |ui| if develop { super::develop::toolbar(app, ui) } else { views::toolbar(app, ui) },
+                );
             app.panel_rects.push(r.response.rect);
         }
         match app.view {
+            _ if develop => super::develop::center(app, ui),
             View::Grid => timed("grid", || views::grid(app, ui)),
             View::Loupe => views::loupe(app, ui),
             View::Compare => views::compare(app, ui),

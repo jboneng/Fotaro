@@ -3,7 +3,8 @@
 Generated from `crates/app/src/ui/shortcuts.rs` — do not edit by hand.
 Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 
-`Ctrl` is `Cmd` on macOS. These follow Lightroom Classic's Library module.
+`Ctrl` is `Cmd` on macOS. These follow Lightroom Classic's Library and Develop modules.
+Shortcuts work in both modules unless marked (Library) or listed under Develop.
 
 ## View
 
@@ -18,7 +19,7 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `F` | Full-screen preview | ✅ |
 | `Esc` | Exit full screen / back to Grid | ✅ |
 | `L` | Cycle Lights Out (dim / off / normal) | ✅ |
-| `J` | Cycle Grid cell style | ✅ |
+| `J` | Cycle Grid cell style (Library) | ✅ |
 | `I` | Cycle Loupe info overlay | ✅ |
 | `Z` | Toggle Loupe zoom (Fit / Navigator zoom level) | ✅ |
 | `Ctrl+=` | Zoom in | ✅ |
@@ -32,7 +33,7 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `Tab` | Hide / show side panels | ✅ |
 | `Shift+Tab` | Hide / show all panels | ✅ |
 | `T` | Hide / show toolbar | ✅ |
-| `\\` | Hide / show Library Filter bar | ✅ |
+| `\\` | Hide / show Library Filter bar (Library) | ✅ |
 | `F5` | Hide / show top panel | ✅ |
 | `F6` | Hide / show Filmstrip | ✅ |
 | `F7` | Hide / show left panels | ✅ |
@@ -127,6 +128,30 @@ Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
 | `Ctrl+E` | Edit in the primary external editor | ✅ |
 | `Ctrl+Alt+E` | Edit in the secondary external editor | ✅ |
 | `Ctrl+/` | Show keyboard shortcuts | ✅ |
+
+## Modules
+
+| Shortcut | Action | Status |
+|---|---|---|
+| `D` | Develop module | ✅ |
+| `Ctrl+Alt+1` | Library module | ✅ |
+| `Ctrl+Alt+2` | Develop module | ✅ |
+
+## Develop
+
+| Shortcut | Action | Status |
+|---|---|---|
+| `\\` | Show Before / After (the photo without adjustments) | ✅ |
+| `Ctrl+U` | Auto Tone | planned (Develop step 6) |
+| `Ctrl+Shift+U` | Auto White Balance | ✅ |
+| `W` | White Balance Selector (click a neutral area) | ✅ |
+| `J` | Show clipping | planned (Develop step 6) |
+| `Ctrl+Shift+R` | Reset all settings | ✅ |
+| `Ctrl+Shift+C` | Copy settings | ✅ |
+| `Ctrl+Shift+V` | Paste settings | ✅ |
+| `Ctrl+Z` | Undo | ✅ |
+| `Ctrl+Y` | Redo | ✅ |
+| `Ctrl+Shift+Z` | Redo | ✅ |
 
 ## Auto Advance
 

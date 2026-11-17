@@ -493,3 +493,9 @@ match Adobe's exactly.
       `photolibrary:Develop` in sidecars (read at sync / Read Metadata; never cleared by a sidecar
       without it, since other apps may drop our property; left out of exports), copies inherit
       the settings of the photo they are made from.
+- [x] 5. Develop module: module picker (D, G/E/C/N, Ctrl+Alt+1/2), render thread (latest
+      settings win while dragging), Basic panel with LrC-style sliders (double-click resets;
+      Temp/Tint back to As Shot), WB presets and Selector (W), Treatment, histogram, History
+      (click to go back; Ctrl+Z / Ctrl+Y), Before / After (\), Copy / Paste, Reset, Settings
+      menu. Shortcuts are per module. Highlights, Shadows, Texture, Clarity, Dehaze and Auto
+      are shown disabled until steps 6-7. Checked in the app with the D750 sample.

@@ -16,6 +16,14 @@ use crate::textures::TextureCache;
 use crate::ui::panels::SectionStack;
 use crate::ui::shortcuts::{Action, SHORTCUTS, Status};
 
+/// The module shown (LrC's module picker): Library, or Develop for the active photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Module {
+    #[default]
+    Library,
+    Develop,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
     #[default]
@@ -156,6 +164,9 @@ pub struct UiState {
     pub show_filter_bar: bool,
     pub left: SectionStack,
     pub right: SectionStack,
+    /// The Develop module's panels (sections open independently of Library's).
+    pub dev_left: SectionStack,
+    pub dev_right: SectionStack,
     pub include_subfolders: bool,
     pub thumb_size: f32,
     pub grid_style: GridStyle,
@@ -191,6 +202,8 @@ impl Default for UiState {
             show_filter_bar: true,
             left: SectionStack::default(),
             right: SectionStack::default(),
+            dev_left: SectionStack::default(),
+            dev_right: SectionStack::default(),
             include_subfolders: true,
             thumb_size: 170.0,
             grid_style: GridStyle::Compact,
@@ -338,6 +351,10 @@ pub enum Command {
     QuickCollectionAdd(Vec<i64>),
     Reveal(PathBuf),
     SetLights(Lights),
+    /// Develop: save the shown settings as a History step (named, or after what changed).
+    DevelopCommit(Option<String>),
+    /// Develop: go back to a History step.
+    DevelopRevert(i64),
     /// A not-yet-implemented feature; shows when it arrives.
     Planned(&'static str, &'static str),
     Quit,
@@ -466,6 +483,8 @@ pub struct Session {
     pub viewing: Option<(i64, PhotoRow)>,
     /// The active unit's members, for the version strip: (cell photo id, meta_gen, members).
     strip: Option<(i64, u64, Vec<catalog::Member>)>,
+    /// The Develop module (its render thread runs while the catalog is open).
+    pub develop: crate::develop::DevelopState,
 }
 
 impl Session {
@@ -513,6 +532,7 @@ impl Session {
             reload_due: None,
             viewing: None,
             strip: None,
+            develop: crate::develop::DevelopState::new(ctx),
         };
         s.refresh_tree()?;
         s.reload_photos()?;
@@ -1054,6 +1074,7 @@ pub struct PhotoLibraryApp {
     pub ui: UiState,
     last_catalog: Option<PathBuf>,
     pub session: Option<Session>,
+    pub module: Module,
     pub view: View,
     pub lights: Lights,
     pub fullscreen: bool,
@@ -1096,6 +1117,7 @@ impl PhotoLibraryApp {
             ui: settings.ui,
             last_catalog: None,
             session: None,
+            module: Module::Library,
             view: View::Grid,
             lights: Lights::On,
             fullscreen: false,
@@ -1218,12 +1240,18 @@ impl PhotoLibraryApp {
         }
         let for_n = |n: usize| if n > 1 { format!(" for {n} Photos") } else { String::new() };
         match action {
-            Action::GridView => self.view = View::Grid,
+            Action::GridView => {
+                self.leave_develop();
+                self.view = View::Grid;
+            }
             Action::LoupeView => {
+                self.leave_develop();
                 if self.session.as_ref().is_some_and(|s| s.active.is_some()) {
                     self.view = View::Loupe;
                 }
             }
+            // Space in Develop is the hand tool in LrC; there is nothing to toggle.
+            Action::ToggleLoupe if self.module == Module::Develop => {}
             Action::ToggleLoupe => {
                 self.view = if self.view == View::Grid { View::Loupe } else { View::Grid };
                 if let Some(s) = &mut self.session {
@@ -1240,6 +1268,10 @@ impl PhotoLibraryApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                 } else if self.lights != Lights::On {
                     self.lights = Lights::On;
+                } else if self.module == Module::Develop {
+                    if let Some(s) = &mut self.session {
+                        s.develop.picking_wb = false;
+                    }
                 } else {
                     self.view = View::Grid;
                 }
@@ -1516,8 +1548,28 @@ impl PhotoLibraryApp {
                 }
             }
             // Planned actions are handled above via their Status.
-            Action::CompareView => self.enter_compare(),
+            Action::CompareView => {
+                self.leave_develop();
+                self.enter_compare();
+            }
+            Action::LibraryModule => self.leave_develop(),
+            Action::DevelopModule => self.enter_develop(),
+            Action::BeforeAfter
+            | Action::AutoTone
+            | Action::AutoWhiteBalance
+            | Action::WhiteBalanceSelector
+            | Action::ClippingIndicators
+            | Action::ResetSettings
+            | Action::CopySettings
+            | Action::PasteSettings
+            | Action::Undo
+            | Action::Redo => {
+                if self.module == Module::Develop {
+                    self.develop_action(action);
+                }
+            }
             Action::SurveyView => {
+                self.leave_develop();
                 if self.session.as_ref().is_some_and(|s| !s.selected.is_empty()) {
                     self.compare = None;
                     self.view = View::Survey;
@@ -1753,6 +1805,82 @@ impl PhotoLibraryApp {
 
     /// After any catalog metadata edit: flag the photos as needing saving (the grid
     /// badge), refresh cached panel contents, and write sidecars if auto-write is on.
+    /// Run a Develop operation that may save settings; a saved photo's sidecar then
+    /// needs writing, as for any metadata change.
+    fn develop_op(
+        &mut self,
+        f: impl FnOnce(&mut crate::develop::DevelopState, &mut Catalog) -> Result<crate::develop::Changed>,
+    ) {
+        let Some(s) = &mut self.session else { return };
+        match f(&mut s.develop, &mut s.catalog) {
+            Ok(Some(id)) => self.metadata_changed(&[id]),
+            Ok(None) => {}
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Each frame in Develop: follow the active photo and take the renders that arrived.
+    fn develop_frame(&mut self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        self.develop_op(|d, catalog| d.poll(&ctx, catalog));
+        let photo = self.session.as_ref().and_then(|s| s.active_photo().cloned());
+        match photo {
+            Some(p) => self.develop_op(|d, catalog| d.show(catalog, &p)),
+            None => self.leave_develop(),
+        }
+    }
+
+    /// D: develop the active photo (LrC shows it alone, so the view becomes the Loupe).
+    fn enter_develop(&mut self) {
+        if self.session.as_ref().and_then(|s| s.active_photo()).is_none() {
+            self.notify("Select a photo to develop");
+            return;
+        }
+        self.module = Module::Develop;
+        self.view = View::Loupe;
+        self.compare = None;
+        self.zoom.zoomed = false;
+    }
+
+    /// Back to the Library (G, E, C, N, Ctrl+Alt+1, the module picker), saving any
+    /// change still pending.
+    fn leave_develop(&mut self) {
+        if self.module != Module::Develop {
+            return;
+        }
+        self.module = Module::Library;
+        self.develop_op(|d, catalog| {
+            d.picking_wb = false;
+            d.commit(catalog, None)
+        });
+    }
+
+    fn develop_action(&mut self, action: Action) {
+        use imaging::develop::{DevelopSettings, WbPreset};
+        let Some(s) = &mut self.session else { return };
+        let d = &mut s.develop;
+        match action {
+            Action::BeforeAfter => d.set_before(!d.before),
+            Action::WhiteBalanceSelector => d.picking_wb = !d.picking_wb,
+            Action::CopySettings => {
+                d.clipboard = Some(d.settings.clone());
+                self.notify("Copied settings");
+            }
+            Action::AutoWhiteBalance => self.develop_op(|d, c| {
+                let s = DevelopSettings { wb: WbPreset::Auto, ..d.settings.clone() };
+                d.apply(c, s, "White Balance: Auto")
+            }),
+            Action::ResetSettings => self.develop_op(|d, c| d.apply(c, DevelopSettings::default(), "Reset")),
+            Action::PasteSettings => match d.clipboard.clone() {
+                Some(clip) => self.develop_op(|d, c| d.apply(c, clip, "Paste Settings")),
+                None => self.notify("Copy settings from a photo first"),
+            },
+            Action::Undo => self.develop_op(|d, c| d.undo(c)),
+            Action::Redo => self.develop_op(|d, c| d.redo(c)),
+            _ => {}
+        }
+    }
+
     fn metadata_changed(&mut self, ids: &[i64]) {
         let Some(s) = &mut self.session else { return };
         s.meta_gen += 1;
@@ -1922,6 +2050,8 @@ impl PhotoLibraryApp {
             Command::Reveal(path) => crate::platform::reveal(&path),
             Command::SetLights(l) => self.lights = l,
             Command::Planned(what, phase) => self.notify(format!("{what} arrives in {phase}")),
+            Command::DevelopCommit(label) => self.develop_op(|d, c| d.commit(c, label)),
+            Command::DevelopRevert(step) => self.develop_op(|d, c| d.revert_to(c, step)),
             Command::RemoveFolder(id) => {
                 if let Some(s) = &self.session
                     && let Some(f) = s.folders.iter().find(|f| f.id == id)
@@ -2485,8 +2615,11 @@ impl eframe::App for PhotoLibraryApp {
                 s.scroll_to_active = true;
             }
         }
+        if self.module == Module::Develop {
+            self.develop_frame(&ctx);
+        }
 
-        for sc in crate::ui::shortcuts::take_actions(&ctx) {
+        for sc in crate::ui::shortcuts::take_actions(&ctx, self.module) {
             self.commands.push(Command::Action(sc.action));
         }
 
