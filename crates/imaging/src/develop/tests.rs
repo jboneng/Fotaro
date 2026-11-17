@@ -278,3 +278,73 @@ fn curve_settings_round_trip_and_name_their_history_steps() {
     let legacy = DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap();
     assert!(legacy.curve.is_default());
 }
+
+/// Render one pixel of a flat patch of an sRGB colour.
+fn patch(rgb: [u8; 3], s: &DevelopSettings) -> [u8; 3] {
+    render_srgb8(&rendered(&RgbImage::from_pixel(4, 4, Rgb(rgb))), s).get_pixel(0, 0).0
+}
+
+fn with_hsl(f: impl FnOnce(&mut Hsl)) -> DevelopSettings {
+    let mut s = DevelopSettings::default();
+    f(&mut s.hsl);
+    s
+}
+
+const RED: [u8; 3] = [200, 40, 40];
+const BLUE: [u8; 3] = [40, 70, 200];
+const GREEN: [u8; 3] = [50, 170, 60];
+
+#[test]
+fn hsl_saturation_and_luminance_affect_only_their_colour() {
+    let desat_red = with_hsl(|h| h.saturation[0] = -100.0);
+    let r = patch(RED, &desat_red);
+    assert!(r[0].abs_diff(r[1]) <= 4 && r[1].abs_diff(r[2]) <= 4, "red turns grey: {r:?}");
+    let b = patch(BLUE, &desat_red);
+    assert!(b.iter().zip(BLUE).all(|(x, y)| x.abs_diff(y) <= 2), "blue stays: {b:?}");
+
+    let dark_blue = with_hsl(|h| h.luminance[5] = -100.0);
+    let b = patch(BLUE, &dark_blue);
+    let lum = |p: [u8; 3]| 0.3 * f32::from(p[0]) + 0.59 * f32::from(p[1]) + 0.11 * f32::from(p[2]);
+    assert!(lum(b) < lum(BLUE) - 15.0, "blue darkens: {b:?}");
+    let r = patch(RED, &dark_blue);
+    assert!(r.iter().zip(RED).all(|(x, y)| x.abs_diff(y) <= 2), "red stays: {r:?}");
+    // Greys have no hue: untouched.
+    let g = patch([120, 120, 120], &dark_blue);
+    assert!(g.iter().all(|v| v.abs_diff(120) <= 1), "{g:?}");
+}
+
+#[test]
+fn hsl_hue_moves_towards_the_neighbour() {
+    let r = patch(RED, &with_hsl(|h| h.hue[0] = 100.0));
+    assert!(r[1] > RED[1] + 20, "red +100 turns orange: {r:?}");
+    let r = patch(RED, &with_hsl(|h| h.hue[0] = -100.0));
+    assert!(r[2] > RED[2] + 20, "red -100 turns magenta: {r:?}");
+}
+
+#[test]
+fn bw_mix_sets_how_light_each_colour_turns() {
+    let mut s = DevelopSettings { treatment: Treatment::BlackAndWhite, ..Default::default() };
+    let plain_red = patch(RED, &s)[0];
+    let plain_green = patch(GREEN, &s)[0];
+    s.bw_mix[0] = 80.0;
+    let r = patch(RED, &s);
+    assert!(r[0] == r[1] && r[1] == r[2], "still grey: {r:?}");
+    assert!(r[0] > plain_red + 20, "red lighter: {} vs {plain_red}", r[0]);
+    assert!(patch(GREEN, &s)[0].abs_diff(plain_green) <= 2, "green unchanged");
+    // In Color, the B&W Mix does nothing (and HSL does nothing in Black & White).
+    let colour = DevelopSettings { bw_mix: s.bw_mix, ..Default::default() };
+    assert!(patch(RED, &colour).iter().zip(RED).all(|(x, y)| x.abs_diff(y) <= 2));
+}
+
+#[test]
+fn hsl_settings_round_trip_and_name_history_steps() {
+    let old = DevelopSettings::default();
+    let s = with_hsl(|h| h.saturation[5] = -30.0);
+    assert_eq!(DevelopSettings::from_json(&s.to_json()), Some(s.clone()));
+    assert_ne!(s.stable_hash(), old.stable_hash());
+    assert_eq!(s.describe_change(&old, true), "Saturation: Blue -30");
+    let mut m = old.clone();
+    m.bw_mix[1] = 15.0;
+    assert_eq!(m.describe_change(&old, true), "B&W Mix: Orange +15");
+    assert!(DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap().hsl.is_default());
+}

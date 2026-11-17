@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::curve::ToneCurve;
+use super::hsl::{COLORS, Hsl, HslGroup};
 
 /// Bumped when the renderer changes how existing settings look.
 pub const PROCESS_VERSION: u32 = 1;
@@ -96,6 +97,10 @@ pub struct DevelopSettings {
     pub saturation: f32,
     /// The Tone Curve panel.
     pub curve: ToneCurve,
+    /// The HSL / Color panel.
+    pub hsl: Hsl,
+    /// Black & White Mix (the HSL panel in Black & White), −100..+100 per colour range.
+    pub bw_mix: [f32; 8],
 }
 
 impl Default for DevelopSettings {
@@ -118,6 +123,8 @@ impl Default for DevelopSettings {
             vibrance: 0.0,
             saturation: 0.0,
             curve: ToneCurve::default(),
+            hsl: Hsl::default(),
+            bw_mix: [0.0; 8],
         }
     }
 }
@@ -143,6 +150,10 @@ pub enum Slider {
     CurveLights,
     CurveDarks,
     CurveShadows,
+    /// HSL: a group's slider for a colour range (index into [`COLORS`]).
+    Hsl(HslGroup, u8),
+    /// B&W Mix for a colour range.
+    BwMix(u8),
 }
 
 impl Slider {
@@ -174,6 +185,7 @@ impl Slider {
             Self::CurveLights => "Lights",
             Self::CurveDarks => "Darks",
             Self::CurveShadows => "Shadows",
+            Self::Hsl(_, i) | Self::BwMix(i) => COLORS[usize::from(i) % 8],
         }
     }
 
@@ -210,6 +222,8 @@ impl Slider {
             Self::CurveLights => s.curve.lights,
             Self::CurveDarks => s.curve.darks,
             Self::CurveShadows => s.curve.shadows,
+            Self::Hsl(g, i) => s.hsl.get(g)[usize::from(i) % 8],
+            Self::BwMix(i) => s.bw_mix[usize::from(i) % 8],
         }
     }
 
@@ -235,6 +249,8 @@ impl Slider {
             Self::CurveLights => &mut s.curve.lights,
             Self::CurveDarks => &mut s.curve.darks,
             Self::CurveShadows => &mut s.curve.shadows,
+            Self::Hsl(g, i) => &mut s.hsl.get_mut(g)[usize::from(i) % 8],
+            Self::BwMix(i) => &mut s.bw_mix[usize::from(i) % 8],
         };
         *field = v;
     }
@@ -312,6 +328,18 @@ impl DevelopSettings {
                 }
             }
         }
+        // Likewise HSL and B&W Mix.
+        if !self.hsl.is_default() {
+            for v in self.hsl.hue.iter().chain(&self.hsl.saturation).chain(&self.hsl.luminance) {
+                eat(v.to_bits());
+            }
+        }
+        if self.bw_mix.iter().any(|v| *v != 0.0) {
+            eat(0xb_a1);
+            for v in &self.bw_mix {
+                eat(v.to_bits());
+            }
+        }
         h
     }
 
@@ -333,6 +361,21 @@ impl DevelopSettings {
                 [] if c.splits != o.splits => "Tone Curve: Split Points".into(),
                 [] => "Tone Curve: Point Curve".into(),
                 _ => "Tone Curve".into(),
+            };
+        }
+        if self.hsl != old.hsl || self.bw_mix != old.bw_mix {
+            let all = HslGroup::ALL
+                .into_iter()
+                .flat_map(|g| (0..8).map(move |i| Slider::Hsl(g, i)))
+                .chain((0..8).map(Slider::BwMix));
+            let changed: Vec<Slider> = all.filter(|s| s.get(self) != s.get(old)).collect();
+            return match changed.as_slice() {
+                [s @ Slider::Hsl(g, _)] => {
+                    format!("{}: {} {}", g.label(), s.label(), s.format(s.get(self) - s.get(old), kelvin))
+                }
+                [s] => format!("B&W Mix: {} {}", s.label(), s.format(s.get(self) - s.get(old), kelvin)),
+                _ if self.hsl != old.hsl => "HSL".into(),
+                _ => "B&W Mix".into(),
             };
         }
         let changed: Vec<Slider> = Slider::WB

@@ -3,6 +3,7 @@
 
 mod curve;
 mod dehaze;
+mod hsl;
 mod local;
 mod matrix;
 mod pipeline;
@@ -14,6 +15,7 @@ mod wb;
 mod tests;
 
 pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, ToneCurve};
+pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use pipeline::{Region, auto_tone, render_linear16, render_region_srgb8, render_srgb8};
 pub use settings::{DevelopSettings, PROCESS_VERSION, Slider, Treatment, WbPreset};
 pub use source::{ResolvedWb, SourceColor, WorkingImage};

@@ -14,7 +14,8 @@ use catalog::PhotoRow;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Vec2};
 use imaging::PreviewSize;
 use imaging::develop::{
-    CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Region, Slider, ToneCurve, Treatment, WbPreset,
+    CurveChannel, CurveFns, DEFAULT_SPLITS, HslGroup, POINT_PRESETS, Region, SWATCHES, Slider, ToneCurve,
+    Treatment, WbPreset,
 };
 
 use super::panels::Side;
@@ -25,8 +26,7 @@ use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::Slot;
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
-const PLANNED_RIGHT: &[&str] =
-    &["HSL / Color", "Color Grading", "Detail", "Lens Corrections", "Transform", "Effects"];
+const PLANNED_RIGHT: &[&str] = &["Color Grading", "Detail", "Lens Corrections", "Transform", "Effects"];
 const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
@@ -148,6 +148,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 });
                 stack.section(ui, Side::Right, "Basic", RIGHT, true, |ui| basic(app, ui));
                 stack.section(ui, Side::Right, "Tone Curve", RIGHT, false, |ui| tone_curve(app, ui));
+                stack.section(ui, Side::Right, "HSL / Color", RIGHT, false, |ui| hsl_panel(app, ui));
                 for title in PLANNED_RIGHT {
                     stack.section(ui, Side::Right, title, RIGHT, false, |ui| {
                         ui.label(weak("Comes in a later version."));
@@ -1014,6 +1015,100 @@ fn tone_curve(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             }
             if moved.done {
                 done = Some(None);
+            }
+        }
+    }
+
+    if st != d.settings {
+        d.set_live(st);
+    }
+    if let Some(label) = done {
+        app.run(Command::DevelopCommit(label));
+    }
+}
+
+/// A colour range's swatch for painting a slider track: linear sRGB, scaled by
+/// `brightness`, mixed towards grey by `1 - saturation`.
+fn swatch(i: usize, brightness: f32, saturation: f32) -> Color32 {
+    let c = SWATCHES[i % 8];
+    let grey = 0.5;
+    let enc = |v: f32| {
+        let v = ((grey + (v - grey) * saturation) * brightness).clamp(0.0, 1.0);
+        let e = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        (e * 255.0).round() as u8
+    };
+    Color32::from_rgb(enc(c[0]), enc(c[1]), enc(c[2]))
+}
+
+/// LrC's HSL / Color panel (Hue, Saturation, Luminance or All), or in Black & White its
+/// B&W Mix.
+fn hsl_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
+    let d = &mut s.develop;
+    if d.photo.is_none() {
+        ui.label(weak("Select a photo to develop."));
+        return;
+    }
+    let mut st = d.settings.clone();
+    let mut done: Option<Option<String>> = None;
+    let mut row = |ui: &mut egui::Ui,
+                   st: &mut imaging::develop::DevelopSettings,
+                   slider: Slider,
+                   gradient: [Color32; 2]| {
+        let spec = Spec {
+            slider,
+            range: (-100.0, 100.0),
+            default: 0.0,
+            log: false,
+            gradient: Some(gradient),
+            kelvin: false,
+        };
+        let mut v = slider.get(st);
+        let moved = slider_row(ui, &spec, &mut v);
+        if moved.changed {
+            slider.set(st, v);
+        }
+        if moved.done {
+            done = Some(None);
+        }
+    };
+
+    if st.treatment == Treatment::BlackAndWhite {
+        sub_header(ui, "Black & White Mix", |_| {});
+        for i in 0..8u8 {
+            let c = usize::from(i);
+            row(ui, &mut st, Slider::BwMix(i), [swatch(c, 0.25, 1.0), swatch(c, 1.0, 1.0)]);
+        }
+    } else {
+        ui.horizontal(|ui| {
+            for (tab, name) in [
+                (Some(HslGroup::Hue), "Hue"),
+                (Some(HslGroup::Saturation), "Saturation"),
+                (Some(HslGroup::Luminance), "Luminance"),
+                (None, "All"),
+            ] {
+                if ui.selectable_label(d.hsl_tab == tab, name).clicked() {
+                    d.hsl_tab = tab;
+                }
+            }
+        });
+        let groups: Vec<HslGroup> = match d.hsl_tab {
+            Some(g) => vec![g],
+            None => HslGroup::ALL.to_vec(),
+        };
+        for g in groups {
+            if d.hsl_tab.is_none() {
+                sub_header(ui, g.label(), |_| {});
+            }
+            for i in 0..8u8 {
+                let c = usize::from(i);
+                let gradient = match g {
+                    // From the previous range's colour to the next one's.
+                    HslGroup::Hue => [swatch(c + 7, 1.0, 1.0), swatch(c + 1, 1.0, 1.0)],
+                    HslGroup::Saturation => [swatch(c, 1.0, 0.0), swatch(c, 1.0, 1.0)],
+                    HslGroup::Luminance => [swatch(c, 0.2, 1.0), swatch(c, 1.0, 0.6)],
+                };
+                row(ui, &mut st, Slider::Hsl(g, i), gradient);
             }
         }
     }

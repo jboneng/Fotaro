@@ -541,3 +541,14 @@ All nine steps of the Basic panel plan are done.
       Strong Contrast presets). Monotone cubic splines (no overshoot). Applied after the
       Basic tone on perceptual values, folded into the per-channel tone tables (no per-pixel
       cost). Stored in the settings JSON (`curve`); older settings load with a neutral curve.
+
+## Develop: HSL / Color
+- [x] Hue, Saturation, Luminance for eight ranges (Red, Orange, Yellow, Green, Aqua, Blue,
+      Purple, Magenta) on Hue / Saturation / Luminance / All tabs, with tinted slider tracks.
+      Worked in OkLCh (perceptual): ranges centred on reference colours' hues and eased between
+      neighbours; hue +100 goes three quarters of the way to the next range; neutrals are left
+      alone. In Black & White the panel is the B&W Mix (how light each colour turns). About
+      25 ms per proxy render when on (Oklab per pixel); nothing when everything is at 0.
+- [x] Fix found while checking it: a render requested before the photo's load reached the
+      worker in another batch was dropped, leaving "Loading…" forever (timing-dependent,
+      since step 5). Requests now wait for their photo.

@@ -11,6 +11,7 @@ use rayon::prelude::*;
 
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
+use super::hsl::HslAdjust;
 use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
 use super::matrix::{self, Mat3f};
 use super::settings::{DevelopSettings, Treatment};
@@ -145,6 +146,8 @@ struct Prepared {
     vibrance: f32,
     saturation: f32,
     bw: bool,
+    /// HSL (colour) or B&W Mix (black & white), when either changes something.
+    hsl: Option<HslAdjust>,
     luma: [f32; 3],
     /// Highlights / Shadows, Clarity, Texture: −1..+1.
     highlights: f32,
@@ -190,6 +193,11 @@ impl Prepared {
             vibrance: s.vibrance / 100.0,
             saturation: s.saturation / 100.0,
             bw: s.treatment == Treatment::BlackAndWhite,
+            hsl: if s.treatment == Treatment::BlackAndWhite {
+                HslAdjust::bw_mix(&s.bw_mix)
+            } else {
+                HslAdjust::color(&s.hsl)
+            },
             luma: matrix::work_luma(),
             highlights: s.highlights / 100.0,
             shadows: s.shadows / 100.0,
@@ -343,9 +351,16 @@ impl Prepared {
             lookup(&self.luts[1], lin[1] * g),
             lookup(&self.luts[2], lin[2] * g),
         ];
+        // HSL in colour; in Black & White the B&W Mix decides how light each colour turns.
+        if let Some(hsl) = &self.hsl
+            && !self.bw
+        {
+            d = hsl.apply(d);
+        }
         let y = self.luminance(d);
         if self.bw {
-            return [y; 3];
+            let grey = self.hsl.as_ref().map_or(y, |m| m.grey(d, y)).min(1.0);
+            return [grey; 3];
         }
         if self.vibrance != 0.0 || self.saturation != 0.0 {
             let (hi, lo) = (d[0].max(d[1]).max(d[2]), d[0].min(d[1]).min(d[2]));
