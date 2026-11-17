@@ -341,6 +341,11 @@ pub struct DevelopState {
     changed_at: std::time::Instant,
     /// Copy Settings / Paste Settings.
     pub clipboard: Option<DevelopSettings>,
+    /// Tone Curve panel: point curve (else parametric), the channel edited, and the
+    /// point being dragged.
+    pub curve_point_mode: bool,
+    pub curve_channel: imaging::develop::CurveChannel,
+    pub curve_drag: Option<usize>,
     pub history: Vec<HistoryStep>,
     /// Steps undone (Ctrl+Z, or clicking an earlier History step), newest last.
     redo: Vec<(String, Option<String>)>,
@@ -384,6 +389,9 @@ impl DevelopState {
             region_shown: 0,
             changed_at: std::time::Instant::now(),
             clipboard: None,
+            curve_point_mode: false,
+            curve_channel: imaging::develop::CurveChannel::Rgb,
+            curve_drag: None,
             history: Vec::new(),
             redo: Vec::new(),
         }

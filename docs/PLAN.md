@@ -525,3 +525,19 @@ match Adobe's exactly.
       the whole image; Texture uses the region plus a margin); tested.
 
 All nine steps of the Basic panel plan are done.
+
+### Fixes after the Basic panel (2026-11-17)
+- [x] Symbol shortcuts typed with AltGr (Ctrl+Alt on Windows) match their plain binding
+      (`\` on Nordic layouts). Injected key events can't reproduce AltGr; to confirm by hand.
+- [x] "Building Previews" counted all background jobs (reading GPS too): only preview builds
+      count now, and "done" never passes the total.
+- [x] Develop settings changed by a sidecar (Read Metadata, sync) reload the photo's previews,
+      and the Develop module if it shows that photo.
+
+## Develop: Tone Curve
+- [x] Parametric curve (Highlights, Lights, Darks, Shadows; three split points to drag under
+      the graph, double-click resets one) and point curves (RGB, Red, Green, Blue: click to
+      add, drag, drag off or double-click to remove, right-click to reset; Linear / Medium /
+      Strong Contrast presets). Monotone cubic splines (no overshoot). Applied after the
+      Basic tone on perceptual values, folded into the per-channel tone tables (no per-pixel
+      cost). Stored in the settings JSON (`curve`); older settings load with a neutral curve.

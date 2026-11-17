@@ -232,3 +232,49 @@ fn a_region_renders_like_that_part_of_the_whole() {
     let edge = render_region_srgb8(&img, &s, Region { x: 380, y: 290, w: 100, h: 100 });
     assert_eq!((edge.width(), edge.height()), (20, 10));
 }
+
+fn grey(v: u8) -> WorkingImage {
+    rendered(&RgbImage::from_pixel(4, 4, Rgb([v, v, v])))
+}
+
+fn with_curve(curve: ToneCurve) -> DevelopSettings {
+    DevelopSettings { curve, ..Default::default() }
+}
+
+#[test]
+fn parametric_curve_moves_its_tones() {
+    let (dark, light) = (grey(40), grey(215));
+    let shadows = with_curve(ToneCurve { shadows: 100.0, ..Default::default() });
+    let px = |img: &WorkingImage, s: &DevelopSettings| render_srgb8(img, s).get_pixel(0, 0)[1];
+    assert!(px(&dark, &shadows) > 50, "shadows +100 lifts dark tones");
+    assert!(px(&light, &shadows).abs_diff(215) <= 2, "and leaves light ones");
+    let highlights = with_curve(ToneCurve { highlights: -100.0, ..Default::default() });
+    assert!(px(&light, &highlights) < 205);
+    assert!(px(&dark, &highlights).abs_diff(40) <= 2);
+}
+
+#[test]
+fn point_curves_raise_midtones_and_tint_channels() {
+    let mid = grey(128);
+    let lift = with_curve(ToneCurve { rgb: vec![[0.0, 0.0], [0.5, 0.65], [1.0, 1.0]], ..Default::default() });
+    let p = render_srgb8(&mid, &lift).get_pixel(0, 0).0;
+    assert!(p[1] > 150 && p[0] == p[1] && p[1] == p[2], "{p:?}");
+    let red = with_curve(ToneCurve { red: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]], ..Default::default() });
+    let p = render_srgb8(&mid, &red).get_pixel(0, 0).0;
+    // Curves act on the working space's (ProPhoto) channels, so sRGB green moves a little too.
+    assert!(p[0] > p[1] + 30 && p[0] > p[2] + 30 && p[1].abs_diff(128) <= 10, "a red tint: {p:?}");
+}
+
+#[test]
+fn curve_settings_round_trip_and_name_their_history_steps() {
+    let old = DevelopSettings::default();
+    let s = with_curve(ToneCurve { darks: -20.0, ..Default::default() });
+    assert_eq!(DevelopSettings::from_json(&s.to_json()), Some(s.clone()));
+    assert_ne!(s.stable_hash(), old.stable_hash());
+    assert_eq!(s.describe_change(&old, true), "Tone Curve: Darks -20");
+    let p = with_curve(ToneCurve { rgb: POINT_PRESETS[1].1.to_vec(), ..Default::default() });
+    assert_eq!(p.describe_change(&old, true), "Tone Curve: Point Curve");
+    // Settings saved before the Tone Curve existed still load, with a neutral curve.
+    let legacy = DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap();
+    assert!(legacy.curve.is_default());
+}

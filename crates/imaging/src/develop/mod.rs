@@ -1,6 +1,7 @@
 //! Develop: non-destructive adjustments (LrC's Basic panel), rendered from the original
 //! file's pixels. The catalog stores [`DevelopSettings`]; nothing is written to the photo.
 
+mod curve;
 mod dehaze;
 mod local;
 mod matrix;
@@ -12,6 +13,7 @@ mod wb;
 #[cfg(test)]
 mod tests;
 
+pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, ToneCurve};
 pub use pipeline::{Region, auto_tone, render_linear16, render_region_srgb8, render_srgb8};
 pub use settings::{DevelopSettings, PROCESS_VERSION, Slider, Treatment, WbPreset};
 pub use source::{ResolvedWb, SourceColor, WorkingImage};

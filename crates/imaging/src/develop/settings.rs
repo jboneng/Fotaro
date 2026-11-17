@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::curve::ToneCurve;
+
 /// Bumped when the renderer changes how existing settings look.
 pub const PROCESS_VERSION: u32 = 1;
 
@@ -92,6 +94,8 @@ pub struct DevelopSettings {
     pub dehaze: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// The Tone Curve panel.
+    pub curve: ToneCurve,
 }
 
 impl Default for DevelopSettings {
@@ -113,6 +117,7 @@ impl Default for DevelopSettings {
             dehaze: 0.0,
             vibrance: 0.0,
             saturation: 0.0,
+            curve: ToneCurve::default(),
         }
     }
 }
@@ -133,6 +138,11 @@ pub enum Slider {
     Dehaze,
     Vibrance,
     Saturation,
+    /// Tone Curve (parametric) regions.
+    CurveHighlights,
+    CurveLights,
+    CurveDarks,
+    CurveShadows,
 }
 
 impl Slider {
@@ -141,6 +151,9 @@ impl Slider {
         [Self::Exposure, Self::Contrast, Self::Highlights, Self::Shadows, Self::Whites, Self::Blacks];
     pub const PRESENCE: [Slider; 5] =
         [Self::Texture, Self::Clarity, Self::Dehaze, Self::Vibrance, Self::Saturation];
+    /// The Tone Curve panel's region sliders, in LrC's order.
+    pub const CURVE: [Slider; 4] =
+        [Self::CurveHighlights, Self::CurveLights, Self::CurveDarks, Self::CurveShadows];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -157,6 +170,10 @@ impl Slider {
             Self::Dehaze => "Dehaze",
             Self::Vibrance => "Vibrance",
             Self::Saturation => "Saturation",
+            Self::CurveHighlights => "Highlights",
+            Self::CurveLights => "Lights",
+            Self::CurveDarks => "Darks",
+            Self::CurveShadows => "Shadows",
         }
     }
 
@@ -189,6 +206,10 @@ impl Slider {
             Self::Dehaze => s.dehaze,
             Self::Vibrance => s.vibrance,
             Self::Saturation => s.saturation,
+            Self::CurveHighlights => s.curve.highlights,
+            Self::CurveLights => s.curve.lights,
+            Self::CurveDarks => s.curve.darks,
+            Self::CurveShadows => s.curve.shadows,
         }
     }
 
@@ -210,6 +231,10 @@ impl Slider {
             Self::Dehaze => &mut s.dehaze,
             Self::Vibrance => &mut s.vibrance,
             Self::Saturation => &mut s.saturation,
+            Self::CurveHighlights => &mut s.curve.highlights,
+            Self::CurveLights => &mut s.curve.lights,
+            Self::CurveDarks => &mut s.curve.darks,
+            Self::CurveShadows => &mut s.curve.shadows,
         };
         *field = v;
     }
@@ -273,6 +298,20 @@ impl DevelopSettings {
         ] {
             eat(v.to_bits());
         }
+        // The Tone Curve only when it does something, so photos edited before it existed
+        // keep their preview keys.
+        let c = &self.curve;
+        if !c.is_default() {
+            for v in [c.highlights, c.lights, c.darks, c.shadows].iter().chain(&c.splits) {
+                eat(v.to_bits());
+            }
+            for points in [&c.rgb, &c.red, &c.green, &c.blue] {
+                eat(points.len() as u32);
+                for p in points.iter().flatten() {
+                    eat(p.to_bits());
+                }
+            }
+        }
         h
     }
 
@@ -283,6 +322,17 @@ impl DevelopSettings {
             return match self.treatment {
                 Treatment::Color => "Treatment: Color".into(),
                 Treatment::BlackAndWhite => "Treatment: Black & White".into(),
+            };
+        }
+        if self.curve != old.curve {
+            let (c, o) = (&self.curve, &old.curve);
+            let regions: Vec<Slider> =
+                Slider::CURVE.into_iter().filter(|s| s.get(self) != s.get(old)).collect();
+            return match regions.as_slice() {
+                [s] => format!("Tone Curve: {} {}", s.label(), s.format(s.get(self) - s.get(old), kelvin)),
+                [] if c.splits != o.splits => "Tone Curve: Split Points".into(),
+                [] => "Tone Curve: Point Curve".into(),
+                _ => "Tone Curve".into(),
             };
         }
         let changed: Vec<Slider> = Slider::WB

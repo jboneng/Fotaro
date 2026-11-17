@@ -9,6 +9,7 @@
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 
+use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
 use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
 use super::matrix::{self, Mat3f};
@@ -75,6 +76,25 @@ fn tone_lut(p: &ToneParams) -> Vec<f32> {
         .collect()
 }
 
+/// The tone table with the Tone Curve applied, per channel. Curves work on perceptual
+/// values; the parametric part is kept from ever going down (its regions overlap).
+fn channel_luts(tone: Vec<f32>, curve: &ToneCurve) -> [Vec<f32>; 3] {
+    if curve.is_default() {
+        return [tone.clone(), tone.clone(), tone];
+    }
+    let f = CurveFns::new(curve);
+    let mut floor = 0.0f32;
+    let master: Vec<f32> = tone
+        .iter()
+        .map(|d| {
+            let p = curve.parametric(d.max(0.0).powf(1.0 / GAMMA)).max(floor);
+            floor = p;
+            f.master_after_parametric(p)
+        })
+        .collect();
+    std::array::from_fn(|c| master.iter().map(|m| f.channel(c, *m).clamp(0.0, 1.0).powf(GAMMA)).collect())
+}
+
 #[inline]
 fn lookup(lut: &[f32], e: f32) -> f32 {
     let f = e.max(0.0).sqrt() * ((LUT_SIZE - 1) as f32 / LUT_MAX_SQRT);
@@ -120,7 +140,8 @@ impl Region {
 struct Prepared {
     input: Input,
     gain: f32,
-    lut: Vec<f32>,
+    /// Tone, then Tone Curve, per channel (R, G, B): scene-linear → display-linear.
+    luts: [Vec<f32>; 3],
     vibrance: f32,
     saturation: f32,
     bw: bool,
@@ -165,7 +186,7 @@ impl Prepared {
         let mut prep = Prepared {
             input,
             gain: 2f32.powf(ev),
-            lut: tone_lut(&tp),
+            luts: channel_luts(tone_lut(&tp), &s.curve),
             vibrance: s.vibrance / 100.0,
             saturation: s.saturation / 100.0,
             bw: s.treatment == Treatment::BlackAndWhite,
@@ -317,8 +338,11 @@ impl Prepared {
             }
             None => self.gain,
         };
-        let mut d =
-            [lookup(&self.lut, lin[0] * g), lookup(&self.lut, lin[1] * g), lookup(&self.lut, lin[2] * g)];
+        let mut d = [
+            lookup(&self.luts[0], lin[0] * g),
+            lookup(&self.luts[1], lin[1] * g),
+            lookup(&self.luts[2], lin[2] * g),
+        ];
         let y = self.luminance(d);
         if self.bw {
             return [y; 3];

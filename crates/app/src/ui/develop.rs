@@ -13,7 +13,9 @@
 use catalog::PhotoRow;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Vec2};
 use imaging::PreviewSize;
-use imaging::develop::{Region, Slider, Treatment, WbPreset};
+use imaging::develop::{
+    CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Region, Slider, ToneCurve, Treatment, WbPreset,
+};
 
 use super::panels::Side;
 use super::shortcuts::Action;
@@ -24,7 +26,7 @@ use crate::develop::Slot;
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
 const PLANNED_RIGHT: &[&str] =
-    &["Tone Curve", "HSL / Color", "Color Grading", "Detail", "Lens Corrections", "Transform", "Effects"];
+    &["HSL / Color", "Color Grading", "Detail", "Lens Corrections", "Transform", "Effects"];
 const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
@@ -145,6 +147,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     super::sidebars::exposure_summary(app, ui);
                 });
                 stack.section(ui, Side::Right, "Basic", RIGHT, true, |ui| basic(app, ui));
+                stack.section(ui, Side::Right, "Tone Curve", RIGHT, false, |ui| tone_curve(app, ui));
                 for title in PLANNED_RIGHT {
                     stack.section(ui, Side::Right, title, RIGHT, false, |ui| {
                         ui.label(weak("Comes in a later version."));
@@ -203,7 +206,7 @@ const VALUE_W: f32 = 48.0;
 fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
     let mut out = Moved::default();
     let enabled = ui.is_enabled();
-    let id = ui.scope_id().with(("dev_slider", spec.slider.label()));
+    let id = ui.scope_id().with(("dev_slider", spec.slider));
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 21.0), Sense::hover());
     let label_rect = Rect::from_min_size(rect.min, egui::vec2(LABEL_W, rect.height()));
     let value_rect = Rect::from_min_max(egui::pos2(rect.right() - VALUE_W, rect.top() + 1.0), rect.max);
@@ -727,6 +730,300 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+/// Distance (points) within which a press picks up a curve point.
+const POINT_GRAB: f32 = 9.0;
+
+/// LrC's Tone Curve panel: the curve over the histogram; Parametric (region sliders and
+/// split points) or Point (RGB / Red / Green / Blue curves, presets).
+fn tone_curve(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
+    let d = &mut s.develop;
+    if d.photo.is_none() {
+        ui.label(weak("Select a photo to develop."));
+        return;
+    }
+    let mut st = d.settings.clone();
+    let mut done: Option<Option<String>> = None;
+
+    // Mode, and in Point mode the channel and the presets.
+    ui.horizontal(|ui| {
+        if ui.selectable_label(!d.curve_point_mode, "Parametric").clicked() {
+            d.curve_point_mode = false;
+        }
+        if ui.selectable_label(d.curve_point_mode, "Point").clicked() {
+            d.curve_point_mode = true;
+        }
+        if d.curve_point_mode {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("curve_channel")
+                    .selected_text(d.curve_channel.label())
+                    .width(64.0)
+                    .show_ui(ui, |ui| {
+                        for c in CurveChannel::ALL {
+                            ui.selectable_value(&mut d.curve_channel, c, c.label());
+                        }
+                    });
+            });
+        }
+    });
+    let (point_mode, ch) = (d.curve_point_mode, d.curve_channel);
+
+    // The graph.
+    let w = ui.available_width();
+    // Square on a narrow panel; capped so the region sliders stay in view on wide ones.
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, w.min(260.0)), Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(0x22, 0x22, 0x22));
+    if let Some(h) = &d.histogram {
+        // Luminance-ish: the channels' average, faint, behind the curve.
+        let bins: Vec<f32> = (0..256).map(|i| (h[0][i] + h[1][i] + h[2][i]) as f32 / 3.0).collect();
+        let peak = bins[1..255].iter().copied().fold(1.0, f32::max);
+        for (i, v) in bins.iter().enumerate() {
+            let x = rect.left() + rect.width() * i as f32 / 255.0;
+            let y = rect.bottom() - rect.height() * (v / peak).min(1.0) * 0.9;
+            painter.line_segment(
+                [egui::pos2(x, rect.bottom()), egui::pos2(x, y)],
+                egui::Stroke::new(rect.width() / 255.0 + 0.5, Color32::from_gray(0x38)),
+            );
+        }
+    }
+    let grid = egui::Stroke::new(1.0, Color32::from_gray(0x30));
+    for k in 1..4 {
+        let t = k as f32 / 4.0;
+        painter.vline(rect.left() + t * rect.width(), rect.y_range(), grid);
+        painter.hline(rect.x_range(), rect.top() + t * rect.height(), grid);
+    }
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_top()],
+        egui::Stroke::new(1.0, Color32::from_gray(0x44)),
+    );
+    if !point_mode {
+        for split in st.curve.splits {
+            let x = rect.left() + split / 100.0 * rect.width();
+            painter.vline(x, rect.y_range(), egui::Stroke::new(1.0, Color32::from_gray(0x4a)));
+        }
+    }
+
+    let to_screen =
+        |x: f32, y: f32| egui::pos2(rect.left() + x * rect.width(), rect.bottom() - y * rect.height());
+    let from_screen =
+        |p: egui::Pos2| ((p.x - rect.left()) / rect.width(), (rect.bottom() - p.y) / rect.height());
+    let curve_at = |curve: &ToneCurve, x: f32| {
+        let f = CurveFns::new(curve);
+        match (point_mode, ch) {
+            (false, _) => f.master(x),
+            (true, CurveChannel::Rgb) => f.master_after_parametric(x),
+            (true, CurveChannel::Red) => f.channel(0, x),
+            (true, CurveChannel::Green) => f.channel(1, x),
+            (true, CurveChannel::Blue) => f.channel(2, x),
+        }
+    };
+
+    if point_mode {
+        let near = |pts: &[[f32; 2]], p: egui::Pos2| {
+            pts.iter()
+                .enumerate()
+                .map(|(i, q)| (i, to_screen(q[0], q[1]).distance(p)))
+                .filter(|(_, dist)| *dist <= POINT_GRAB)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+        let press = ui.input(|i| i.pointer.press_origin());
+        let pointer = resp.interact_pointer_pos();
+        // Press on a point to drag it; elsewhere, a new point on the curve to drag.
+        if resp.drag_started()
+            && let Some(p) = press
+        {
+            let mut pts = st.curve.points_or_linear(ch);
+            d.curve_drag = near(&pts, p).or_else(|| {
+                let x = from_screen(p).0.clamp(0.0, 1.0);
+                let point = [x, curve_at(&st.curve, x)];
+                let at = pts.partition_point(|q| q[0] < x);
+                (at > 0 && at < pts.len()).then(|| {
+                    pts.insert(at, point);
+                    at
+                })
+            });
+            *st.curve.points_mut(ch) = pts;
+        }
+        if let (Some(i), Some(p)) = (d.curve_drag, pointer)
+            && resp.dragged()
+        {
+            let mut pts = st.curve.points_or_linear(ch);
+            let n = pts.len();
+            let end = i == 0 || i == n - 1;
+            if !end && (p.y < rect.top() - 30.0 || p.y > rect.bottom() + 30.0) {
+                // Dragged off the graph: the point goes (as in LrC).
+                pts.remove(i);
+                d.curve_drag = None;
+            } else if i < n {
+                let (x, y) = from_screen(p);
+                let lo = if i == 0 { 0.0 } else { pts[i - 1][0] + 0.01 };
+                let hi = if i == n - 1 { 1.0 } else { pts[i + 1][0] - 0.01 };
+                pts[i] = [x.clamp(lo, hi.max(lo)), y.clamp(0.0, 1.0)];
+            }
+            *st.curve.points_mut(ch) = pts;
+        }
+        if resp.drag_stopped() {
+            d.curve_drag = None;
+            done = Some(None);
+        }
+        // Click: add a point on the curve; double-click a point: remove it.
+        if let Some(p) = pointer {
+            let mut pts = st.curve.points_or_linear(ch);
+            if resp.double_clicked() {
+                if let Some(i) = near(&pts, p).filter(|i| *i != 0 && *i != pts.len() - 1) {
+                    pts.remove(i);
+                    *st.curve.points_mut(ch) = pts;
+                    done = Some(None);
+                }
+            } else if resp.clicked() && near(&pts, p).is_none() {
+                let x = from_screen(p).0.clamp(0.0, 1.0);
+                let at = pts.partition_point(|q| q[0] < x);
+                if at > 0 && at < pts.len() {
+                    pts.insert(at, [x, curve_at(&st.curve, x)]);
+                    *st.curve.points_mut(ch) = pts;
+                    done = Some(None);
+                }
+            }
+        }
+        if resp.hover_pos().is_some_and(|p| near(&st.curve.points_or_linear(ch), p).is_some()) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+    }
+
+    // The curve, and its points in Point mode.
+    let color = match (point_mode, ch) {
+        (true, CurveChannel::Red) => Color32::from_rgb(0xe0, 0x50, 0x50),
+        (true, CurveChannel::Green) => Color32::from_rgb(0x50, 0xc0, 0x50),
+        (true, CurveChannel::Blue) => Color32::from_rgb(0x60, 0x80, 0xf0),
+        _ => theme::TEXT_STRONG,
+    };
+    let f = CurveFns::new(&st.curve);
+    let line: Vec<egui::Pos2> = (0..=128)
+        .map(|i| {
+            let x = i as f32 / 128.0;
+            let y = match (point_mode, ch) {
+                (false, _) => f.master(x),
+                (true, CurveChannel::Rgb) => f.master_after_parametric(x),
+                (true, CurveChannel::Red) => f.channel(0, x),
+                (true, CurveChannel::Green) => f.channel(1, x),
+                (true, CurveChannel::Blue) => f.channel(2, x),
+            };
+            to_screen(x, y)
+        })
+        .collect();
+    painter.add(egui::Shape::line(line, egui::Stroke::new(1.5, color)));
+    if point_mode {
+        for (i, q) in st.curve.points_or_linear(ch).iter().enumerate() {
+            let fill = if d.curve_drag == Some(i) { color } else { Color32::from_gray(0x22) };
+            painter.circle(to_screen(q[0], q[1]), 3.5, fill, egui::Stroke::new(1.5, color));
+        }
+    }
+    resp.context_menu(|ui| {
+        if point_mode && ui.button(format!("Reset {} Curve", ch.label())).clicked() {
+            st.curve.points_mut(ch).clear();
+            done = Some(None);
+            ui.close();
+        }
+        if ui.button("Reset Point Curves").clicked() {
+            CurveChannel::ALL.iter().for_each(|c| st.curve.points_mut(*c).clear());
+            done = Some(None);
+            ui.close();
+        }
+        if ui.button("Reset Parametric Curve").clicked() {
+            st.curve = ToneCurve {
+                rgb: st.curve.rgb.clone(),
+                red: st.curve.red.clone(),
+                green: st.curve.green.clone(),
+                blue: st.curve.blue.clone(),
+                ..Default::default()
+            };
+            done = Some(None);
+            ui.close();
+        }
+    });
+
+    if point_mode {
+        // LrC's Point Curve menu (for the RGB curve).
+        ui.horizontal(|ui| {
+            ui.label(weak("Point Curve:"));
+            let current = POINT_PRESETS
+                .iter()
+                .find(|(_, p)| st.curve.points_or_linear(CurveChannel::Rgb) == p.to_vec())
+                .map_or("Custom", |(name, _)| *name);
+            egui::ComboBox::from_id_salt("curve_preset").selected_text(current).width(120.0).show_ui(
+                ui,
+                |ui| {
+                    for (name, points) in POINT_PRESETS {
+                        if ui.selectable_label(current == name, name).clicked() {
+                            st.curve.rgb = if name == "Linear" { Vec::new() } else { points.to_vec() };
+                            done = Some(None);
+                        }
+                    }
+                },
+            );
+        });
+    } else {
+        // Split points: drag the triangles under the graph.
+        let (strip, _) = ui.allocate_exact_size(egui::vec2(w, 14.0), Sense::hover());
+        let mut splits = st.curve.splits;
+        for k in 0..3 {
+            let x = strip.left() + splits[k] / 100.0 * strip.width();
+            let hit = Rect::from_center_size(egui::pos2(x, strip.center().y), egui::vec2(14.0, 14.0));
+            let r = ui.interact(hit, ui.scope_id().with(("curve_split", k)), Sense::click_and_drag());
+            if r.dragged()
+                && let Some(p) = r.interact_pointer_pos()
+            {
+                splits[k] = ((p.x - strip.left()) / strip.width() * 100.0).round();
+                splits = ToneCurve::clamp_splits(splits);
+            }
+            if r.drag_stopped() {
+                done = Some(None);
+            }
+            if r.double_clicked() {
+                splits[k] = DEFAULT_SPLITS[k];
+                done = Some(None);
+            }
+            let c = if r.hovered() || r.dragged() { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
+            let tip = egui::pos2(x, strip.top() + 2.0);
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![tip, tip + egui::vec2(5.0, 9.0), tip + egui::vec2(-5.0, 9.0)],
+                c,
+                egui::Stroke::NONE,
+            ));
+            r.on_hover_text("Drag to move where the regions meet; double-click to reset");
+        }
+        st.curve.splits = splits;
+        ui.add_space(2.0);
+        for slider in Slider::CURVE {
+            let spec = Spec {
+                slider,
+                range: (-100.0, 100.0),
+                default: 0.0,
+                log: false,
+                gradient: None,
+                kelvin: false,
+            };
+            let mut v = slider.get(&st);
+            let moved = slider_row(ui, &spec, &mut v);
+            if moved.changed {
+                slider.set(&mut st, v);
+            }
+            if moved.done {
+                done = Some(None);
+            }
+        }
+    }
+
+    if st != d.settings {
+        d.set_live(st);
+    }
+    if let Some(label) = done {
+        app.run(Command::DevelopCommit(label));
+    }
 }
 
 #[cfg(test)]
