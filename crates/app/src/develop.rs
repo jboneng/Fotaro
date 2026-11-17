@@ -171,6 +171,10 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut full_loading: Option<i64> = None;
     let mut pending_region: Option<(i64, RegionView, u64)> = None;
     let (full_tx, full_rx) = crossbeam_channel::unbounded::<FullLoaded>();
+    // Requests wait here until their photo is loaded: a render may arrive before (or in
+    // another batch than) the load it needs.
+    let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, u64)> = HashMap::new();
+    let mut adjusts: Vec<(i64, Adjust, DevelopSettings)> = Vec::new();
     loop {
         let first = crossbeam_channel::select! {
             recv(rx) -> req => match req {
@@ -195,8 +199,6 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         // Take everything queued: the last load, the last render per slot and region,
         // every adjustment.
         let mut load = None;
-        let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, u64)> = HashMap::new();
-        let mut adjusts = Vec::new();
         for req in first.into_iter().chain(rx.try_iter()) {
             match req {
                 Request::Load { photo_id, path, kind, max_px } => load = Some((photo_id, path, kind, max_px)),
@@ -238,12 +240,18 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 let _ = tx.send(Reply::Loaded { photo_id, info });
             }
         }
+        // Only the photo being developed matters now.
+        let wanted = source.as_ref().map(|s| s.0);
+        renders.retain(|_, r| Some(r.0) == wanted);
+        adjusts.retain(|a| Some(a.0) == wanted);
         let Some((id, img)) = &current else {
             ctx.request_repaint();
             continue;
         };
         for slot in [Slot::Current, Slot::Before] {
-            let Some((photo_id, settings, paint, seq)) = renders.remove(&slot).filter(|r| r.0 == *id) else {
+            let Some((photo_id, settings, paint, seq)) =
+                renders.get(&slot).is_some_and(|r| r.0 == *id).then(|| renders.remove(&slot)).flatten()
+            else {
                 continue;
             };
             let mut rgb = render_srgb8(img, &settings);
@@ -253,7 +261,10 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             let image = color_image(&rgb);
             let _ = tx.send(Reply::Rendered { photo_id, slot, seq, image, histogram, wb, clipped });
         }
-        for (photo_id, op, settings) in adjusts.into_iter().filter(|a| a.0 == *id) {
+        let (ready, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut adjusts).into_iter().partition(|a| a.0 == *id);
+        adjusts = waiting;
+        for (photo_id, op, settings) in ready {
             let settings = match op {
                 Adjust::PickWb { x, y } => {
                     img.picked_multipliers(x, y).map(|m| img.settings_with_multipliers(&settings, m))
@@ -346,6 +357,8 @@ pub struct DevelopState {
     pub curve_point_mode: bool,
     pub curve_channel: imaging::develop::CurveChannel,
     pub curve_drag: Option<usize>,
+    /// HSL / Color panel: the group shown (`None`: All).
+    pub hsl_tab: Option<imaging::develop::HslGroup>,
     pub history: Vec<HistoryStep>,
     /// Steps undone (Ctrl+Z, or clicking an earlier History step), newest last.
     redo: Vec<(String, Option<String>)>,
@@ -392,6 +405,7 @@ impl DevelopState {
             curve_point_mode: false,
             curve_channel: imaging::develop::CurveChannel::Rgb,
             curve_drag: None,
+            hsl_tab: None,
             history: Vec::new(),
             redo: Vec::new(),
         }
@@ -420,8 +434,7 @@ impl DevelopState {
         self.shown.clear();
         self.picking_wb = false;
         self.redo.clear();
-        self.adopt(catalog.develop_settings(photo.id)?.as_deref());
-        self.history = catalog.develop_history(photo.id)?;
+        // Load first: the renders asked for next need the photo.
         if photo.missing {
             self.error = Some("The file could not be found.".into());
         } else {
@@ -430,8 +443,9 @@ impl DevelopState {
             let max_px = self.view_px;
             let _ =
                 self.tx.send(Request::Load { photo_id: photo.id, path: photo.path.clone(), kind, max_px });
-            self.request_renders();
         }
+        self.adopt(catalog.develop_settings(photo.id)?.as_deref());
+        self.history = catalog.develop_history(photo.id)?;
         Ok(changed)
     }
 
