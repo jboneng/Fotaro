@@ -1,6 +1,6 @@
 //! Virtual copies (LrC Photo ▸ Create Virtual Copy, Ctrl+'): more photos of the same
 //! file, each with its own keywords, IPTC fields and collections. A copy starts with its
-//! master's keywords, IPTC fields and rotation, and is a member of its picture (role
+//! master's keywords, IPTC fields, rotation and Develop settings, and is a member of its picture (role
 //! Copy), sharing the stack's rating, flag and label. Only the master writes an XMP
 //! sidecar.
 
@@ -41,6 +41,12 @@ impl Catalog {
         tx.execute(
             "INSERT INTO photo_keywords (photo_id, keyword_id) SELECT ?2, keyword_id FROM photo_keywords WHERE photo_id = ?1",
             params![master, copy],
+        )?;
+        // Develop settings of the photo it was made from (LrC copies them; that's what
+        // virtual copies are mostly for). History starts afresh.
+        tx.execute(
+            "INSERT INTO develop (photo_id, settings, updated_at) SELECT ?2, settings, updated_at FROM develop WHERE photo_id = ?1",
+            params![photo_id, copy],
         )?;
 
         // A member of the master's picture, and what the unit shows (you make a copy to

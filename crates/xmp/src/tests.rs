@@ -168,6 +168,7 @@ fn new_documents_round_trip() {
         caption: Some("Line 1\nLine 2".into()),
         creator: Some("Me".into()),
         copyright: Some("© 2026".into()),
+        develop: Some(r#"{"exposure":1.0}"#.into()),
     };
     doc.apply(&data);
     assert_eq!(XmpDoc::parse(&doc.to_xml()).unwrap().data(), data);
@@ -209,4 +210,21 @@ fn sidecar_files_are_updated_in_place_and_garbage_is_left_alone() {
     std::fs::write(tmp.path().join("bad.xmp"), "<not xmp").unwrap();
     assert!(write_sidecar(&broken, true, &data, |_| true).is_err());
     assert_eq!(std::fs::read_to_string(tmp.path().join("bad.xmp")).unwrap(), "<not xmp");
+}
+
+#[test]
+fn develop_settings_round_trip_and_keep_lightroom_settings() {
+    let json = r#"{"exposure":0.35,"wb":"Tungsten","note":"a < b & \"c\""}"#;
+    let mut doc = XmpDoc::parse(LRC).unwrap();
+    doc.apply(&XmpData { develop: Some(json.into()), ..Default::default() });
+    let xml = doc.to_xml();
+    assert!(xml.contains("crs:Exposure2012=\"+0.35\""), "LrC's settings stay: {xml}");
+    let back = XmpDoc::parse(&xml).unwrap().data();
+    assert_eq!(back.develop.as_deref(), Some(json));
+    assert_eq!(back.rating, Some(4));
+
+    // An empty value removes it.
+    let mut doc = XmpDoc::parse(&xml).unwrap();
+    doc.apply(&XmpData { develop: Some(String::new()), ..Default::default() });
+    assert_eq!(XmpDoc::parse(&doc.to_xml()).unwrap().data().develop, None);
 }

@@ -164,6 +164,7 @@ fn gather(conn: &Connection, photo_id: i64) -> Result<Gathered> {
             caption: some_or_empty(caption),
             creator: some_or_empty(creator),
             copyright: some_or_empty(copyright),
+            develop: Some(crate::develop::load(conn, photo_id)?.unwrap_or_default()),
         },
         user_turns,
         file_turns,
@@ -205,6 +206,13 @@ pub(crate) fn apply_xmp(conn: &Connection, photo_id: i64, d: &XmpData, file_turn
         params![i64::from(code_from_turns(user_turns)), photo_id],
     )?;
     set_photo_keyword_paths(conn, photo_id, d.keywords.as_deref().unwrap_or_default())?;
+    // Develop settings are taken when the sidecar has them, but never cleared because it
+    // doesn't: another app rewriting the sidecar may drop our property.
+    if let Some(json) = d.develop.as_deref().filter(|j| !j.trim().is_empty())
+        && crate::develop::load(conn, photo_id)?.as_deref() != Some(json)
+    {
+        crate::develop::change(conn, photo_id, Some(json), "Read Metadata from File")?;
+    }
     conn.execute(
         "UPDATE photos SET title = ?1, caption = ?2, creator = ?3, copyright = ?4, metadata_dirty = 0
           WHERE id = ?5",

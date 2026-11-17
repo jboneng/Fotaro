@@ -458,7 +458,7 @@ match Adobe's exactly.
   Tungsten, Fluorescent, Flash, Custom; Temp, Tint; eyedropper); Exposure, Contrast,
   Highlights, Shadows, Whites, Blacks, Auto; Texture, Clarity, Dehaze; Vibrance, Saturation.
 - **Storage**: the catalog (`develop` + `develop_history`, schema v7) is the source of truth;
-  settings are also written to the XMP sidecar under our own `pldev:` namespace (LrC and
+  settings are also written to the XMP sidecar as `photolibrary:Develop` (JSON, in the app's own namespace; LrC and
   darktable ignore it). No `crs:` fields: our numbers don't mean what Adobe's do.
 - **Reach**: edited photos get re-rendered thumbnails and previews (the settings hash is part
   of the preview key) and Export applies the edits. Unedited photos keep the camera's
@@ -489,3 +489,7 @@ match Adobe's exactly.
 - [x] 3. `imaging::develop`: settings, Kelvin/tint WB, working image, global pipeline. A 2560 px
       proxy renders in ~22 ms. RAW base look tuned against the camera JPEG of a D750 sample
       from raw.pixls.us (`testdata/web/`); our own RAW samples are film scans.
+- [x] 4. Catalog v7 (`develop`, `develop_history` with an "Import" first step, revert to a step),
+      `photolibrary:Develop` in sidecars (read at sync / Read Metadata; never cleared by a sidecar
+      without it, since other apps may drop our property; left out of exports), copies inherit
+      the settings of the photo they are made from.

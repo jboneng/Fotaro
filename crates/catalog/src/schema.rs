@@ -323,6 +323,22 @@ pub(crate) const MIGRATIONS: &[&str] = &[
            AND NOT EXISTS (SELECT 1 FROM pictures WHERE group_id = OLD.group_id);
     END;
     "#,
+    // v7: Develop settings (JSON from the imaging crate) and their history.
+    r#"
+    CREATE TABLE develop (
+        photo_id   INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+        settings   TEXT    NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE develop_history (
+        id         INTEGER PRIMARY KEY,
+        photo_id   INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        label      TEXT    NOT NULL,
+        settings   TEXT,   -- NULL: no settings (as imported)
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX develop_history_photo ON develop_history(photo_id, id);
+    "#,
 ];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;

@@ -57,6 +57,9 @@ pub struct XmpData {
     pub caption: Option<String>,
     pub creator: Option<String>,
     pub copyright: Option<String>,
+    /// This app's Develop settings (JSON) as `photolibrary:Develop`. Our own property:
+    /// LrC's `crs:` settings mean something else to its renderer.
+    pub develop: Option<String>,
 }
 
 type Scope = Vec<(String, String)>;
@@ -329,6 +332,7 @@ impl XmpDoc {
             caption: text(ns::DC, "description"),
             creator: self.get(ns::DC, "creator").map(|v| v.join("; ")).filter(|v| !v.trim().is_empty()),
             copyright: text(ns::DC, "rights"),
+            develop: text(ns::PHOTOLIBRARY, "Develop"),
         }
     }
 
@@ -367,6 +371,9 @@ impl XmpDoc {
             if let Some(v) = value {
                 self.set(ns::DC, local, nonempty(v).then(|| Value::Alt(v.clone())));
             }
+        }
+        if let Some(d) = &data.develop {
+            self.set(ns::PHOTOLIBRARY, "Develop", nonempty(d).then(|| Value::Simple(d.clone())));
         }
         if let Some(c) = &data.creator {
             self.set(ns::DC, "creator", nonempty(c).then(|| Value::Seq(vec![c.clone()])));

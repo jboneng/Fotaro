@@ -137,9 +137,11 @@ pub fn export_path(
 }
 
 impl Catalog {
-    /// The photo's catalog metadata as XMP fields (no orientation).
+    /// The photo's catalog metadata as XMP fields for exported files: no orientation,
+    /// and no Develop settings (an export's pixels already have them).
     pub fn xmp_data(&self, photo_id: i64) -> Result<XmpData> {
-        crate::xmp_sync::gather_data(&self.conn, photo_id)
+        let data = crate::xmp_sync::gather_data(&self.conn, photo_id)?;
+        Ok(XmpData { develop: None, ..data })
     }
 
     /// Add files this app wrote (exports, later Edit In results) as photos of their own:
@@ -208,6 +210,7 @@ mod tests {
             caption: Some(String::new()),
             creator: Some("Jo".into()),
             copyright: Some("(c) Jo".into()),
+            develop: Some("{}".into()),
         };
         let c = MetadataLevel::CopyrightOnly.filter(&d);
         assert_eq!(c, XmpData { copyright: Some("(c) Jo".into()), ..Default::default() });
@@ -215,6 +218,7 @@ mod tests {
         assert_eq!(c.creator.as_deref(), Some("Jo"));
         assert!(c.keywords.is_none());
         let all = MetadataLevel::All.filter(&d);
+        assert_eq!(all.develop, None, "exports never carry Develop settings");
         assert_eq!((all.rating, all.pick, all.orientation, all.caption.clone()), (Some(3), None, None, None));
         let xml = xmp_packet(&all);
         assert!(xml.contains("Oslo") && xml.contains("Places|Oslo") && xml.contains("(c) Jo"), "{xml}");

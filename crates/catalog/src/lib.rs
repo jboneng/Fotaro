@@ -2,6 +2,7 @@
 
 mod catalog;
 mod collections;
+mod develop;
 pub mod export;
 mod folders;
 pub mod import;
@@ -19,6 +20,7 @@ pub use catalog::{
     Source,
 };
 pub use collections::{Collection, CollectionKind};
+pub use develop::HistoryStep;
 pub use export::{ExistingFiles, MetadataLevel, export_path, write_sidecar, xmp_packet};
 pub use folders::{Relocated, validate_folder_name};
 pub use import::{
