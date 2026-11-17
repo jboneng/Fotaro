@@ -1862,6 +1862,8 @@ impl PhotoLibraryApp {
         match action {
             Action::BeforeAfter => d.set_before(!d.before),
             Action::WhiteBalanceSelector => d.picking_wb = !d.picking_wb,
+            Action::AutoTone => d.auto_tone(),
+            Action::ClippingIndicators => d.set_clipping(!d.clipping),
             Action::CopySettings => {
                 d.clipboard = Some(d.settings.clone());
                 self.notify("Copied settings");

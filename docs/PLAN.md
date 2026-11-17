@@ -499,3 +499,7 @@ match Adobe's exactly.
       (click to go back; Ctrl+Z / Ctrl+Y), Before / After (\), Copy / Paste, Reset, Settings
       menu. Shortcuts are per module. Highlights, Shadows, Texture, Clarity, Dehaze and Auto
       are shown disabled until steps 6-7. Checked in the app with the D750 sample.
+- [x] 6. Highlights / Shadows from an edge-preserving brightness map (self-guided filter at
+      ~384 px, gain per map cell; ~40 ms per proxy render with them on), Auto Tone (Ctrl+U,
+      the Auto button) from luminance percentiles, clipping overlay (J; red / blue) and the
+      histogram's clipping triangles (click to toggle). Auto WB and the WB Selector came in step 5.

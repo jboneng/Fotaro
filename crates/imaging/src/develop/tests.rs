@@ -111,3 +111,47 @@ fn slider_labels() {
     assert_eq!(Slider::Temp.format(5500.0, true), "5500");
     assert_eq!(Slider::Shadows.format(-12.0, false), "-12");
 }
+
+/// A left-dark / right-bright image (a window in a dim room).
+fn dim_room() -> RgbImage {
+    ImageBuffer::from_fn(200, 100, |x, y| {
+        let v = if x < 100 { 25 + ((x + y) % 3) as u8 } else { 235 - ((x + y) % 3) as u8 };
+        Rgb([v, v, v])
+    })
+}
+
+fn half_mean(img: &RgbImage, left: bool) -> f32 {
+    let xs = if left { 10..90 } else { 110..190 };
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in 10..90 {
+        for x in xs.clone() {
+            sum += f32::from(img.get_pixel(x, y)[1]);
+            n += 1.0;
+        }
+    }
+    sum / n
+}
+
+#[test]
+fn shadows_lift_dark_areas_and_highlights_pull_bright_ones() {
+    let img = rendered(&dim_room());
+    let base = render_srgb8(&img, &DevelopSettings::default());
+    let lifted = render_srgb8(&img, &DevelopSettings { shadows: 80.0, ..Default::default() });
+    assert!(half_mean(&lifted, true) > half_mean(&base, true) + 15.0, "shadows lift the dark side");
+    assert!((half_mean(&lifted, false) - half_mean(&base, false)).abs() < 6.0, "bright side stays");
+    let pulled = render_srgb8(&img, &DevelopSettings { highlights: -80.0, ..Default::default() });
+    assert!(half_mean(&pulled, false) < half_mean(&base, false) - 15.0, "highlights darken the bright side");
+    assert!((half_mean(&pulled, true) - half_mean(&base, true)).abs() < 6.0, "dark side stays");
+}
+
+#[test]
+fn auto_tone_brightens_a_dark_photo() {
+    let dark: RgbImage = ImageBuffer::from_fn(64, 64, |x, y| {
+        let v = 8 + ((x * 3 + y) % 30) as u8;
+        Rgb([v, v, v])
+    });
+    let s = auto_tone(&rendered(&dark), &DevelopSettings { vibrance: 10.0, ..Default::default() });
+    assert!(s.exposure > 1.0, "{s:?}");
+    assert_eq!(s.vibrance, 10.0, "other settings are kept");
+}

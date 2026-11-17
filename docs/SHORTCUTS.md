@@ -142,10 +142,10 @@ Shortcuts work in both modules unless marked (Library) or listed under Develop.
 | Shortcut | Action | Status |
 |---|---|---|
 | `\\` | Show Before / After (the photo without adjustments) | ✅ |
-| `Ctrl+U` | Auto Tone | planned (Develop step 6) |
+| `Ctrl+U` | Auto Tone | ✅ |
 | `Ctrl+Shift+U` | Auto White Balance | ✅ |
 | `W` | White Balance Selector (click a neutral area) | ✅ |
-| `J` | Show clipping | planned (Develop step 6) |
+| `J` | Show clipping (shadows blue, highlights red) | ✅ |
 | `Ctrl+Shift+R` | Reset all settings | ✅ |
 | `Ctrl+Shift+C` | Copy settings | ✅ |
 | `Ctrl+Shift+V` | Paste settings | ✅ |

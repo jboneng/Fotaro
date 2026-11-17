@@ -102,6 +102,8 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Available,
+    // Every shortcut is available today; kept for features announced before they land.
+    #[allow(dead_code)]
     Planned(&'static str),
 }
 
@@ -186,6 +188,7 @@ const fn dev(binding: Binding, action: Action, description: &'static str) -> Sho
         scope: Scope::Develop,
     }
 }
+#[allow(dead_code)]
 const fn dev_planned(
     binding: Binding,
     action: Action,
@@ -348,10 +351,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
     s(ctrl_alt(K::Num2), A::DevelopModule, MODULES, "Develop module"),
     // Develop
     dev(k(K::Backslash), A::BeforeAfter, "Show Before / After (the photo without adjustments)"),
-    dev_planned(ctrl(K::U), A::AutoTone, "Auto Tone", "Develop step 6"),
+    dev(ctrl(K::U), A::AutoTone, "Auto Tone"),
     dev(ctrl_shift(K::U), A::AutoWhiteBalance, "Auto White Balance"),
     dev(k(K::W), A::WhiteBalanceSelector, "White Balance Selector (click a neutral area)"),
-    dev_planned(k(K::J), A::ClippingIndicators, "Show clipping", "Develop step 6"),
+    dev(k(K::J), A::ClippingIndicators, "Show clipping (shadows blue, highlights red)"),
     dev(ctrl_shift(K::R), A::ResetSettings, "Reset all settings"),
     dev(ctrl_shift(K::C), A::CopySettings, "Copy settings"),
     dev(ctrl_shift(K::V), A::PasteSettings, "Paste settings"),

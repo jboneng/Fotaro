@@ -12,7 +12,7 @@ use catalog::{Catalog, FileKind, HistoryStep, PhotoRow};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use imaging::SourceKind;
-use imaging::develop::{DevelopSettings, ResolvedWb, WbPreset, WorkingImage, render_srgb8};
+use imaging::develop::{DevelopSettings, ResolvedWb, WbPreset, WorkingImage, auto_tone, render_srgb8};
 
 use crate::jobs::Histogram;
 
@@ -36,15 +36,36 @@ enum Request {
         photo_id: i64,
         slot: Slot,
         settings: DevelopSettings,
+        /// Paint clipped pixels (J): highlights red, shadows blue.
+        clipping: bool,
         seq: u64,
     },
-    /// White Balance Selector: neutralize the point (x, y), 0..1 of the unrotated image.
-    Pick {
+    /// Settings computed from the pixels.
+    Adjust {
         photo_id: i64,
-        x: f32,
-        y: f32,
+        op: Adjust,
         settings: DevelopSettings,
     },
+}
+
+/// Changes worked out from the photo's pixels.
+#[derive(Debug, Clone, Copy)]
+enum Adjust {
+    /// White Balance Selector: neutralize the point (x, y), 0..1 of the unrotated image.
+    PickWb {
+        x: f32,
+        y: f32,
+    },
+    AutoTone,
+}
+
+impl Adjust {
+    fn label(self) -> &'static str {
+        match self {
+            Adjust::PickWb { .. } => "White Balance: Custom",
+            Adjust::AutoTone => "Auto Settings",
+        }
+    }
 }
 
 enum Reply {
@@ -59,15 +80,24 @@ enum Reply {
         image: egui::ColorImage,
         histogram: Box<Histogram>,
         wb: ResolvedWb,
+        clipped: Clipped,
     },
-    Picked {
+    Adjusted {
         photo_id: i64,
+        op: Adjust,
         settings: Option<DevelopSettings>,
     },
     Failed {
         photo_id: i64,
         error: String,
     },
+}
+
+/// Share of pixels clipped to black (all channels 0) and to white (any channel 255).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Clipped {
+    pub shadows: f32,
+    pub highlights: f32,
 }
 
 /// What the Basic panel needs to know about the photo's source.
@@ -88,20 +118,41 @@ fn histogram(rgb: &[u8]) -> Box<Histogram> {
     h
 }
 
+/// Count clipped pixels; with `paint`, mark them as LrC does (blue / red).
+fn clipping(rgb: &mut [u8], paint: bool) -> Clipped {
+    let (mut dark, mut bright) = (0usize, 0usize);
+    let px = rgb.as_chunks_mut::<3>().0;
+    let n = px.len().max(1) as f32;
+    for p in px {
+        if p.iter().all(|v| *v == 0) {
+            dark += 1;
+            if paint {
+                *p = [30, 90, 255];
+            }
+        } else if p.contains(&255) {
+            bright += 1;
+            if paint {
+                *p = [255, 30, 30];
+            }
+        }
+    }
+    Clipped { shadows: dark as f32 / n, highlights: bright as f32 / n }
+}
+
 fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut current: Option<(i64, WorkingImage)> = None;
     while let Ok(first) = rx.recv() {
-        // Take everything queued: the last load, the last render per slot, every pick.
+        // Take everything queued: the last load, the last render per slot, every adjustment.
         let mut load = None;
-        let mut renders: HashMap<Slot, (i64, DevelopSettings, u64)> = HashMap::new();
-        let mut picks = Vec::new();
+        let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, u64)> = HashMap::new();
+        let mut adjusts = Vec::new();
         for req in std::iter::once(first).chain(rx.try_iter()) {
             match req {
                 Request::Load { photo_id, path, kind } => load = Some((photo_id, path, kind)),
-                Request::Render { photo_id, slot, settings, seq } => {
-                    renders.insert(slot, (photo_id, settings, seq));
+                Request::Render { photo_id, slot, settings, clipping, seq } => {
+                    renders.insert(slot, (photo_id, settings, clipping, seq));
                 }
-                Request::Pick { photo_id, x, y, settings } => picks.push((photo_id, x, y, settings)),
+                Request::Adjust { photo_id, op, settings } => adjusts.push((photo_id, op, settings)),
             }
         }
         if let Some((photo_id, path, kind)) = load {
@@ -128,25 +179,25 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             continue;
         };
         for slot in [Slot::Current, Slot::Before] {
-            let Some((photo_id, settings, seq)) = renders.remove(&slot).filter(|r| r.0 == *id) else {
+            let Some((photo_id, settings, paint, seq)) = renders.remove(&slot).filter(|r| r.0 == *id) else {
                 continue;
             };
-            let rgb = render_srgb8(img, &settings);
+            let mut rgb = render_srgb8(img, &settings);
+            let histogram = histogram(rgb.as_raw());
+            let clipped = clipping(&mut rgb, paint);
             let image =
                 egui::ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw());
-            let reply = Reply::Rendered {
-                photo_id,
-                slot,
-                seq,
-                image,
-                histogram: histogram(rgb.as_raw()),
-                wb: img.resolve_wb(&settings),
-            };
-            let _ = tx.send(reply);
+            let wb = img.resolve_wb(&settings);
+            let _ = tx.send(Reply::Rendered { photo_id, slot, seq, image, histogram, wb, clipped });
         }
-        for (photo_id, x, y, settings) in picks.into_iter().filter(|p| p.0 == *id) {
-            let picked = img.picked_multipliers(x, y).map(|m| img.settings_with_multipliers(&settings, m));
-            let _ = tx.send(Reply::Picked { photo_id, settings: picked });
+        for (photo_id, op, settings) in adjusts.into_iter().filter(|a| a.0 == *id) {
+            let settings = match op {
+                Adjust::PickWb { x, y } => {
+                    img.picked_multipliers(x, y).map(|m| img.settings_with_multipliers(&settings, m))
+                }
+                Adjust::AutoTone => Some(auto_tone(img, &settings)),
+            };
+            let _ = tx.send(Reply::Adjusted { photo_id, op, settings });
         }
         ctx.request_repaint();
     }
@@ -169,13 +220,16 @@ pub struct DevelopState {
     pub wb: Option<ResolvedWb>,
     pub error: Option<String>,
     /// Settings (and their sequence number) last sent per slot; the numbers drop outdated renders.
-    sent: HashMap<Slot, (DevelopSettings, u64)>,
+    sent: HashMap<Slot, (DevelopSettings, bool, u64)>,
     seq: u64,
     shown: HashMap<Slot, u64>,
     /// `\`: show the photo before any adjustments.
     pub before: bool,
     /// W: the White Balance Selector is active (click the photo to pick).
     pub picking_wb: bool,
+    /// J: show clipped pixels; and how many there are in the current render.
+    pub clipping: bool,
+    pub clipped: Clipped,
     /// Copy Settings / Paste Settings.
     pub clipboard: Option<DevelopSettings>,
     pub history: Vec<HistoryStep>,
@@ -211,6 +265,8 @@ impl DevelopState {
             shown: HashMap::new(),
             before: false,
             picking_wb: false,
+            clipping: false,
+            clipped: Clipped::default(),
             clipboard: None,
             history: Vec::new(),
             redo: Vec::new(),
@@ -261,17 +317,18 @@ impl DevelopState {
     /// Ask for renders of whatever changed since the last request.
     pub fn request_renders(&mut self) {
         let Some(photo_id) = self.photo else { return };
+        let clipping = self.clipping;
         let mut wanted = vec![(Slot::Current, self.settings.clone())];
         if self.before {
             wanted.push((Slot::Before, DevelopSettings::default()));
         }
         for (slot, settings) in wanted {
-            if self.sent.get(&slot).is_some_and(|(s, _)| *s == settings) {
+            if self.sent.get(&slot).is_some_and(|(s, c, _)| *s == settings && *c == clipping) {
                 continue;
             }
             self.seq += 1;
-            self.sent.insert(slot, (settings.clone(), self.seq));
-            let _ = self.tx.send(Request::Render { photo_id, slot, settings, seq: self.seq });
+            self.sent.insert(slot, (settings.clone(), clipping, self.seq));
+            let _ = self.tx.send(Request::Render { photo_id, slot, settings, clipping, seq: self.seq });
         }
     }
 
@@ -279,16 +336,17 @@ impl DevelopState {
     pub fn rendering(&self) -> bool {
         self.sent
             .get(&Slot::Current)
-            .is_some_and(|(_, sent)| self.shown.get(&Slot::Current).copied().unwrap_or(0) < *sent)
+            .is_some_and(|(_, _, sent)| self.shown.get(&Slot::Current).copied().unwrap_or(0) < *sent)
     }
 
-    /// Handle the worker's replies. A picked white balance is saved right away.
+    /// Handle the worker's replies. Adjustments (picked white balance, Auto) are saved
+    /// right away.
     pub fn poll(&mut self, ctx: &egui::Context, catalog: &mut Catalog) -> Result<Changed> {
         let mut changed = None;
         for reply in self.rx.try_iter().collect::<Vec<_>>() {
             match reply {
                 Reply::Loaded { photo_id, info } if Some(photo_id) == self.photo => self.info = Some(info),
-                Reply::Rendered { photo_id, slot, seq, image, histogram, wb }
+                Reply::Rendered { photo_id, slot, seq, image, histogram, wb, clipped }
                     if Some(photo_id) == self.photo =>
                 {
                     if self.shown.get(&slot).is_some_and(|s| *s > seq) {
@@ -306,16 +364,18 @@ impl DevelopState {
                     if slot == Slot::Current {
                         self.histogram = Some(histogram);
                         self.wb = Some(wb);
+                        self.clipped = clipped;
                     }
                 }
-                Reply::Picked { photo_id, settings } if Some(photo_id) == self.photo => match settings {
-                    Some(s) => {
-                        self.settings = s;
-                        self.request_renders();
-                        changed = changed.or(self.commit(catalog, Some("White Balance: Custom".into()))?);
+                Reply::Adjusted { photo_id, op, settings } if Some(photo_id) == self.photo => {
+                    match settings {
+                        Some(s) => {
+                            self.set_live(s);
+                            changed = changed.or(self.commit(catalog, Some(op.label().into()))?);
+                        }
+                        None => self.error = Some("Pick a neutral, unclipped area".into()),
                     }
-                    None => self.error = Some("Pick a neutral, unclipped area".into()),
-                },
+                }
                 Reply::Failed { photo_id, error } if Some(photo_id) == self.photo => {
                     log::warn!("develop: {error}");
                     self.error = Some(error);
@@ -421,7 +481,21 @@ impl DevelopState {
     pub fn pick(&mut self, x: f32, y: f32) {
         let Some(photo_id) = self.photo else { return };
         self.picking_wb = false;
-        let _ = self.tx.send(Request::Pick { photo_id, x, y, settings: self.settings.clone() });
+        let op = Adjust::PickWb { x, y };
+        let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
+    }
+
+    /// Auto (Tone), from the photo's pixels; saved when the worker answers.
+    pub fn auto_tone(&mut self) {
+        let Some(photo_id) = self.photo else { return };
+        let op = Adjust::AutoTone;
+        let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
+    }
+
+    /// J: show clipped pixels.
+    pub fn set_clipping(&mut self, on: bool) {
+        self.clipping = on;
+        self.request_renders();
     }
 
     /// Show the Before slot too (rendered on demand).

@@ -1,12 +1,14 @@
 //! Rendering a [`WorkingImage`] with [`DevelopSettings`].
 //!
-//! Per pixel: white balance (and the camera matrix) → exposure → tone curve (whites,
-//! blacks, contrast, highlight shoulder; plus the base rendering for RAW files) →
-//! vibrance / saturation → B&W → output. Values are linear until the output encoding.
+//! Per pixel: white balance (and the camera matrix) → exposure → Highlights / Shadows (a
+//! gain from the local brightness map, see [`super::local`]) → tone curve (whites, blacks,
+//! contrast, highlight shoulder; plus the base rendering for RAW files) → vibrance /
+//! saturation → B&W → output. Values are linear until the output encoding.
 
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 
+use super::local::{BaseMap, tone_gain};
 use super::matrix::{self, Mat3f};
 use super::settings::{DevelopSettings, Treatment};
 use super::source::{SourceColor, WorkingImage};
@@ -21,6 +23,7 @@ const RAW_SHOULDER: f32 = 0.9;
 /// Perceptual value of 18% grey, the contrast pivot.
 const PIVOT: f32 = 0.459;
 const GAMMA: f32 = 2.2;
+const MIDDLE_GREY: f32 = 0.18;
 /// Raw values (0..1 of the sensor range) above which a channel counts as clipping.
 const CLIP_START: f32 = 0.92;
 
@@ -98,16 +101,17 @@ struct Prepared {
     saturation: f32,
     bw: bool,
     luma: [f32; 3],
+    /// Highlights / Shadows, −1..+1, and their gain map (from local brightness).
+    highlights: f32,
+    shadows: f32,
+    local: Option<BaseMap>,
 }
 
 impl Prepared {
     fn new(img: &WorkingImage, s: &DevelopSettings) -> Prepared {
         let wb = img.resolve_wb(s);
         let input = match &img.color {
-            SourceColor::Camera(c) => {
-                let m = wb.multipliers;
-                Input::Camera { m, mat: c.cam_to_work }
-            }
+            SourceColor::Camera(c) => Input::Camera { m: wb.multipliers, mat: c.cam_to_work },
             _ => Input::Gains(wb.multipliers),
         };
         let scene = img.scene_referred();
@@ -117,12 +121,13 @@ impl Prepared {
             RAW_SHOULDER
         } else {
             // Rendered images keep their tones unless pushed past white.
-            1.0 - 0.25 * (s.exposure.max(0.0) + 0.5 * whites.max(0.0)).min(1.0)
+            1.0 - 0.25
+                * (s.exposure.max(0.0) + 0.5 * whites.max(0.0) - 0.5 * s.highlights.min(0.0) / 100.0).min(1.0)
         };
         let base = if scene { RAW_BASE_CONTRAST } else { 0.0 };
         let tp =
             ToneParams { contrast: (base + s.contrast / 100.0).clamp(-1.0, 1.0), whites, blacks, shoulder };
-        Prepared {
+        let mut prep = Prepared {
             input,
             gain: 2f32.powf(ev),
             lut: tone_lut(&tp),
@@ -130,13 +135,35 @@ impl Prepared {
             saturation: s.saturation / 100.0,
             bw: s.treatment == Treatment::BlackAndWhite,
             luma: matrix::work_luma(),
+            highlights: s.highlights / 100.0,
+            shadows: s.shadows / 100.0,
+            local: None,
+        };
+        if prep.highlights != 0.0 || prep.shadows != 0.0 {
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let px = img.pixels.as_raw();
+            let mut map = BaseMap::build(w, h, |x, y| {
+                let i = 3 * (y * w + x);
+                prep.luminance(prep.linear([px[i], px[i + 1], px[i + 2]]))
+            });
+            // Brightness (stops from middle grey after exposure) → gain, per map cell.
+            let offset = prep.gain.log2() - MIDDLE_GREY.log2();
+            let (hl, sh) = (prep.highlights, prep.shadows);
+            map.transform(|v| tone_gain(v + offset, hl, sh).exp2());
+            prep.local = Some(map);
         }
+        prep
     }
 
-    /// One input pixel → display-referred linear working-space RGB, 0..1.
     #[inline]
-    fn pixel(&self, p: [f32; 3]) -> [f32; 3] {
-        let lin = match &self.input {
+    fn luminance(&self, lin: [f32; 3]) -> f32 {
+        (self.luma[0] * lin[0] + self.luma[1] * lin[1] + self.luma[2] * lin[2]).max(0.0)
+    }
+
+    /// An input pixel → scene-linear working-space RGB (white balanced, before exposure).
+    #[inline]
+    fn linear(&self, p: [f32; 3]) -> [f32; 3] {
+        match &self.input {
             Input::Camera { m, mat } => {
                 let mut q = [p[0] * m[0], p[1] * m[1], p[2] * m[2]];
                 // Where the sensor clipped, the colour is unknown: fade to neutral at the
@@ -151,11 +178,20 @@ impl Prepared {
                 matrix::apply(mat, q)
             }
             Input::Gains(m) => [p[0] * m[0], p[1] * m[1], p[2] * m[2]],
+        }
+    }
+
+    /// Input pixel `p` at (x, y) → display-referred linear working-space RGB, 0..1.
+    #[inline]
+    fn pixel(&self, p: [f32; 3], x: usize, y: usize) -> [f32; 3] {
+        let lin = self.linear(p);
+        let g = match &self.local {
+            Some(gains) => self.gain * gains.sample(x, y),
+            None => self.gain,
         };
-        let g = self.gain;
         let mut d =
             [lookup(&self.lut, lin[0] * g), lookup(&self.lut, lin[1] * g), lookup(&self.lut, lin[2] * g)];
-        let y = self.luma[0] * d[0] + self.luma[1] * d[1] + self.luma[2] * d[2];
+        let y = self.luminance(d);
         if self.bw {
             return [y; 3];
         }
@@ -199,37 +235,102 @@ impl SrgbEncoder {
     }
 }
 
+/// Run `pixel` over every pixel, a row per task: `out` has `channels` values per pixel.
+fn render_rows<T: Send>(
+    img: &WorkingImage,
+    out: &mut [T],
+    channels: usize,
+    pixel: impl Fn(&mut [T], [f32; 3], usize, usize) + Sync,
+) {
+    let w = img.width() as usize;
+    out.par_chunks_mut(channels * w).zip(img.pixels.as_raw().par_chunks(3 * w)).enumerate().for_each(
+        |(y, (dst, src))| {
+            for (x, (o, p)) in dst.chunks_mut(channels).zip(src.as_chunks::<3>().0).enumerate() {
+                pixel(o, *p, x, y);
+            }
+        },
+    );
+}
+
 /// Render for display: 8-bit sRGB.
 pub fn render_srgb8(img: &WorkingImage, s: &DevelopSettings) -> RgbImage {
     let prep = Prepared::new(img, s);
     let enc = SrgbEncoder::new();
     let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
-    let (w, h) = (img.width(), img.height());
-    let mut out = RgbImage::new(w, h);
-    out.as_mut().par_chunks_mut(3 * w as usize).zip(img.pixels.as_raw().par_chunks(3 * w as usize)).for_each(
-        |(dst, src)| {
-            for (o, p) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<3>().0) {
-                let d = prep.pixel(*p);
-                let l = matrix::apply(&to_srgb, d);
-                *o = l.map(|v| enc.encode(v));
-            }
-        },
-    );
+    let mut out = RgbImage::new(img.width(), img.height());
+    render_rows(img, &mut out, 3, |o, p, x, y| {
+        let l = matrix::apply(&to_srgb, prep.pixel(p, x, y));
+        o.copy_from_slice(&l.map(|v| enc.encode(v)));
+    });
     out
 }
 
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
 pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<Rgb<u16>, Vec<u16>> {
     let prep = Prepared::new(img, s);
-    let (w, h) = (img.width(), img.height());
-    let mut out = ImageBuffer::<Rgb<u16>, Vec<u16>>::new(w, h);
-    out.as_mut().par_chunks_mut(3 * w as usize).zip(img.pixels.as_raw().par_chunks(3 * w as usize)).for_each(
-        |(dst, src)| {
-            for (o, p) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<3>().0) {
-                let d = prep.pixel(*p);
-                *o = d.map(|v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16);
-            }
-        },
-    );
+    let mut out = ImageBuffer::<Rgb<u16>, Vec<u16>>::new(img.width(), img.height());
+    render_rows(img, &mut out, 3, |o, p, x, y| {
+        o.copy_from_slice(&prep.pixel(p, x, y).map(|v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16));
+    });
     out
+}
+
+/// Percentile (0..1) of sorted values.
+fn percentile(sorted: &[f32], q: f32) -> f32 {
+    sorted[((sorted.len() - 1) as f32 * q).round() as usize]
+}
+
+/// LrC's Auto (Tone): Exposure, Contrast, Highlights, Shadows, Whites and Blacks chosen
+/// from the photo's brightness, keeping everything else.
+pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
+    let neutral = DevelopSettings {
+        exposure: 0.0,
+        contrast: 0.0,
+        highlights: 0.0,
+        shadows: 0.0,
+        whites: 0.0,
+        blacks: 0.0,
+        ..s.clone()
+    };
+    let prep = Prepared::new(img, &neutral);
+    // Luminance in stops from middle grey, on a sample of pixels.
+    let px = img.pixels.as_raw().as_chunks::<3>().0;
+    let step = (px.len() / 200_000).max(1);
+    let mut stops: Vec<f32> = px
+        .par_iter()
+        .step_by(step)
+        .map(|p| prep.luminance(prep.linear(*p)) * prep.gain)
+        .filter(|y| *y > 1e-6)
+        .map(|y| (y / MIDDLE_GREY).log2())
+        .collect();
+    if stops.len() < 100 {
+        return s.clone();
+    }
+    stops.par_sort_unstable_by(f32::total_cmp);
+    let (lo, p10, median, p90, hi) = (
+        percentile(&stops, 0.005),
+        percentile(&stops, 0.1),
+        percentile(&stops, 0.5),
+        percentile(&stops, 0.9),
+        percentile(&stops, 0.995),
+    );
+    // Bring the middle of the photo near middle grey (a little under: most scenes have
+    // more shadow than highlight).
+    let exposure = ((-0.3 - median) * 0.85).clamp(-4.0, 4.0);
+    let (lo, hi) = (lo + exposure, hi + exposure);
+    // White is about 2.5 stops above middle grey.
+    let highlights = if hi > 2.0 { -((hi - 2.0) * 40.0).min(80.0) } else { 0.0 };
+    let whites = if hi < 1.5 { ((1.5 - hi) * 25.0).min(40.0) } else { 0.0 };
+    let shadows = if lo < -6.0 { ((-6.0 - lo) * 15.0).min(60.0) } else { 0.0 };
+    let blacks = if lo > -5.0 { -((lo + 5.0) * 12.0).min(30.0) } else { 0.0 };
+    let contrast = ((5.0 - (p90 - p10)) * 8.0).clamp(-20.0, 30.0);
+    DevelopSettings {
+        exposure: (exposure * 20.0).round() / 20.0,
+        contrast: contrast.round(),
+        highlights: highlights.round(),
+        shadows: shadows.round(),
+        whites: whites.round(),
+        blacks: blacks.round(),
+        ..s.clone()
+    }
 }

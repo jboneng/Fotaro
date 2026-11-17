@@ -146,7 +146,10 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 let mut stack = std::mem::take(&mut app.ui.dev_right);
                 stack.section(ui, Side::Right, "Histogram", RIGHT, true, |ui| {
                     let h = app.session.as_ref().and_then(|s| s.develop.histogram.as_deref());
+                    let top = ui.cursor().min;
                     super::sidebars::paint_histogram(ui, h);
+                    let hist = Rect::from_min_max(top, egui::pos2(ui.max_rect().right(), ui.cursor().min.y));
+                    clipping_triangles(app, ui, hist);
                     super::sidebars::exposure_summary(app, ui);
                 });
                 stack.section(ui, Side::Right, "Basic", RIGHT, true, |ui| basic(app, ui));
@@ -425,18 +428,15 @@ fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         }
     }
 
+    let mut auto = false;
     sub_header(ui, "Tone", |ui| {
-        ui.add_enabled(false, egui::Button::new("Auto"))
-            .on_disabled_hover_text("Auto Tone (Ctrl+U) comes with Highlights and Shadows");
+        auto = ui.button("Auto").on_hover_text("Auto Tone (Ctrl+U)").clicked();
     });
     for slider in Slider::TONE.into_iter().chain(Slider::PRESENCE) {
         if slider == Slider::Texture {
             sub_header(ui, "Presence", |_| {});
         }
-        let available = !matches!(
-            slider,
-            Slider::Highlights | Slider::Shadows | Slider::Texture | Slider::Clarity | Slider::Dehaze
-        );
+        let available = !matches!(slider, Slider::Texture | Slider::Clarity | Slider::Dehaze);
         let spec = Spec {
             slider,
             range: slider.range(kelvin),
@@ -473,6 +473,50 @@ fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
+    }
+    if auto {
+        app.run(Command::Action(Action::AutoTone));
+    }
+}
+
+/// LrC's clipping triangles in the histogram's top corners: lit (blue / red) when the
+/// render has clipped shadows / highlights; click to toggle showing them (J).
+fn clipping_triangles(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, hist: Rect) {
+    let Some(s) = &app.session else { return };
+    let (on, c) = (s.develop.clipping, s.develop.clipped);
+    let size = 9.0;
+    let corners = [
+        (hist.left_top() + egui::vec2(4.0, 4.0), true, c.shadows, Color32::from_rgb(70, 130, 255)),
+        (
+            hist.right_top() + egui::vec2(-4.0 - size, 4.0),
+            false,
+            c.highlights,
+            Color32::from_rgb(255, 70, 70),
+        ),
+    ];
+    let mut toggle = false;
+    for (min, left, share, lit) in corners {
+        let r = Rect::from_min_size(min, egui::vec2(size, size));
+        let resp = ui.interact(r, ui.scope_id().with(("clip", left)), Sense::click());
+        let clipped = share > 0.0001;
+        let color = if clipped { lit } else { theme::TEXT_WEAK.gamma_multiply(0.6) };
+        let pts = if left {
+            vec![r.left_top(), r.right_top(), r.left_bottom()]
+        } else {
+            vec![r.left_top(), r.right_top(), r.right_bottom()]
+        };
+        let stroke = if on { egui::Stroke::new(1.0, Color32::WHITE) } else { egui::Stroke::NONE };
+        ui.painter().add(egui::Shape::convex_polygon(pts, color, stroke));
+        let what = if left { "Shadow" } else { "Highlight" };
+        if resp
+            .on_hover_text(format!("{what} clipping: {:.2}% of the photo. Click to show (J)", share * 100.0))
+            .clicked()
+        {
+            toggle = true;
+        }
+    }
+    if toggle {
+        app.run(Command::Action(Action::ClippingIndicators));
     }
 }
 
