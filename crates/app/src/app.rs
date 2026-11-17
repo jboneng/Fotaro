@@ -676,6 +676,26 @@ impl Session {
         }
     }
 
+    /// A photo's Develop settings changed in the catalog: take them into its row and
+    /// load its thumbnail and preview again (they are rebuilt with the new settings).
+    /// The old images stay on screen until the new ones arrive.
+    pub fn develop_changed(&mut self, id: i64) -> Result<()> {
+        let json = self.catalog.develop_settings(id)?;
+        self.update_rows(&[id], |p| p.develop = json.clone());
+        self.full.invalidate(id);
+        let row = self
+            .index_of
+            .get(&id)
+            .map(|&i| self.photos[i].clone())
+            .or_else(|| self.viewing.as_ref().map(|(_, m)| m.clone()).filter(|m| m.id == id));
+        if let Some(row) = row.filter(|r| !r.missing) {
+            for size in [PreviewSize::Thumb, PreviewSize::Standard] {
+                self.jobs.submit_visible(Job::Load { photo: PhotoRef::from(&row), size });
+            }
+        }
+        Ok(())
+    }
+
     pub fn source_label(&self) -> String {
         match self.source {
             Source::AllPhotographs => "Catalog : All Photographs".into(),
@@ -1805,15 +1825,20 @@ impl PhotoLibraryApp {
 
     /// After any catalog metadata edit: flag the photos as needing saving (the grid
     /// badge), refresh cached panel contents, and write sidecars if auto-write is on.
-    /// Run a Develop operation that may save settings; a saved photo's sidecar then
-    /// needs writing, as for any metadata change.
+    /// Run a Develop operation that may save settings; a saved photo's previews are then
+    /// rebuilt, and its sidecar needs writing, as for any metadata change.
     fn develop_op(
         &mut self,
         f: impl FnOnce(&mut crate::develop::DevelopState, &mut Catalog) -> Result<crate::develop::Changed>,
     ) {
         let Some(s) = &mut self.session else { return };
         match f(&mut s.develop, &mut s.catalog) {
-            Ok(Some(id)) => self.metadata_changed(&[id]),
+            Ok(Some(id)) => {
+                if let Err(e) = s.develop_changed(id) {
+                    self.error = Some(format!("{e:#}"));
+                }
+                self.metadata_changed(&[id]);
+            }
             Ok(None) => {}
             Err(e) => self.error = Some(format!("{e:#}")),
         }

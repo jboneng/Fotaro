@@ -23,22 +23,45 @@ use imaging::{PreviewCache, PreviewSize, SourceKind};
 #[derive(Debug, Clone)]
 pub struct PhotoRef {
     pub id: i64,
-    /// Whose previews these are on disk: the master's for a virtual copy (same file).
+    /// Whose previews these are on disk: the master's for a virtual copy (same file);
+    /// for a developed photo, its own, under its negated id (see [`preview_key`]).
     pub cache_id: i64,
     pub path: PathBuf,
     pub kind: FileKind,
     pub fingerprint: u64,
+    /// Develop settings the previews show, if the photo has any.
+    pub develop: Option<imaging::develop::DevelopSettings>,
+}
+
+/// A photo's Develop settings from their stored JSON, if they change anything.
+pub fn develop_settings(json: Option<&str>) -> Option<imaging::develop::DevelopSettings> {
+    json.and_then(imaging::develop::DevelopSettings::from_json).filter(|s| !s.is_default())
+}
+
+/// Where a photo's previews live in the cache: (cache id, fingerprint). Unedited photos
+/// share their master's (`master_id`) previews of the file; a developed photo has its own,
+/// under its negated id, so an edited master and its unedited virtual copy don't overwrite
+/// each other's, and resetting the edit finds the plain previews still there.
+pub fn preview_key(
+    id: i64,
+    master_id: i64,
+    size: u64,
+    mtime_ms: i64,
+    develop: Option<&imaging::develop::DevelopSettings>,
+) -> (i64, u64) {
+    let file = imaging::fingerprint(size, mtime_ms);
+    match develop {
+        Some(s) => (-id, imaging::developed_fingerprint(file, s)),
+        None => (master_id, file),
+    }
 }
 
 impl From<&PhotoRow> for PhotoRef {
     fn from(p: &PhotoRow) -> Self {
-        PhotoRef {
-            id: p.id,
-            cache_id: p.master_id,
-            path: p.path.clone(),
-            kind: p.kind,
-            fingerprint: imaging::fingerprint(p.size_bytes, p.mtime_ms),
-        }
+        let develop = develop_settings(p.develop.as_deref());
+        let (cache_id, fingerprint) =
+            preview_key(p.id, p.master_id, p.size_bytes, p.mtime_ms, develop.as_ref());
+        PhotoRef { id: p.id, cache_id, path: p.path.clone(), kind: p.kind, fingerprint, develop }
     }
 }
 
@@ -148,7 +171,13 @@ pub type Histogram = [[u32; 256]; 3];
 /// scaled down only if it exceeds the GPU's maximum texture size.
 fn load_full(shared: &Shared, photo: &PhotoRef) -> Result<egui::ColorImage> {
     let started = std::time::Instant::now();
-    let path = shared.cache.full(photo.cache_id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
+    let path = shared.cache.full(
+        photo.cache_id,
+        photo.fingerprint,
+        &photo.path,
+        source_kind(photo.kind),
+        photo.develop.as_ref(),
+    )?;
     let mut img = image::open(&path)?;
     // Read now, not at startup: before the first frame egui reports a 2048 px default.
     let max_side = shared.ctx.input(|i| i.max_texture_side) as u32;
@@ -503,8 +532,13 @@ fn ensure_previews(shared: &Shared, cat: &Catalog, photo: &PhotoRef) -> Result<(
     }
     let result = (|| {
         anyhow::ensure!(photo.path.exists(), "file is missing");
-        let built =
-            shared.cache.build(photo.cache_id, photo.fingerprint, &photo.path, source_kind(photo.kind))?;
+        let built = shared.cache.build(
+            photo.cache_id,
+            photo.fingerprint,
+            &photo.path,
+            source_kind(photo.kind),
+            photo.develop.as_ref(),
+        )?;
         // Sync normally stored metadata already; only fill it in if that failed, so
         // preview workers (many threads) rarely contend for the SQLite write lock.
         if cat.metadata(photo.id)?.is_none() {
@@ -562,6 +596,7 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
         Job::PurgePreviews { photo_ids } => {
             for id in photo_ids {
                 shared.cache.remove(id);
+                shared.cache.remove(-id); // its developed previews (see `preview_key`)
             }
         }
         Job::WriteXmp { photo_ids, quiet } => run_xmp(shared, cat, photo_ids, false, quiet),
@@ -678,9 +713,17 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
             // Previews written after this moment are kept whatever the snapshot says.
             let snapshot = std::time::SystemTime::now();
             let current: std::collections::HashMap<i64, u64> = match cat.photo_versions() {
-                Ok(v) => {
-                    v.into_iter().map(|(id, size, mtime)| (id, imaging::fingerprint(size, mtime))).collect()
-                }
+                // Every photo's plain previews (kept for an edited master's virtual copies,
+                // and for when an edit is reset), and its developed ones if it has settings.
+                Ok(v) => v
+                    .into_iter()
+                    .flat_map(|(id, size, mtime, json)| {
+                        let plain = (id, imaging::fingerprint(size, mtime));
+                        let developed = develop_settings(json.as_deref())
+                            .map(|s| preview_key(id, id, size, mtime, Some(&s)));
+                        std::iter::once(plain).chain(developed)
+                    })
+                    .collect(),
                 Err(e) => {
                     log::warn!("skipping preview cleanup: {e:#}");
                     return;
@@ -858,7 +901,14 @@ mod tests {
     use super::*;
 
     fn photo(id: i64) -> PhotoRef {
-        PhotoRef { id, cache_id: id, path: PathBuf::new(), kind: FileKind::Image, fingerprint: 0 }
+        PhotoRef {
+            id,
+            cache_id: id,
+            path: PathBuf::new(),
+            kind: FileKind::Image,
+            fingerprint: 0,
+            develop: None,
+        }
     }
 
     /// The Import button's path end to end: scan a "card", import through the job
@@ -970,5 +1020,28 @@ mod tests {
         lanes.background.push_back(Job::BuildPreviews { photo: photo(1) });
         assert!(lanes.pop(false).is_none());
         assert!(lanes.pop(true).is_some());
+    }
+}
+
+#[cfg(test)]
+mod preview_key_tests {
+    use super::*;
+
+    #[test]
+    fn developed_photos_get_their_own_previews() {
+        let s = imaging::develop::DevelopSettings { exposure: 1.0, ..Default::default() };
+        // An unedited virtual copy (id 8) shares the master's (id 3) previews of the file.
+        let copy = preview_key(8, 3, 100, 5, None);
+        assert_eq!(copy, (3, imaging::fingerprint(100, 5)));
+        // The edited master gets its own key, so the copy's previews stay as they are.
+        let master = preview_key(3, 3, 100, 5, Some(&s));
+        assert_eq!(master.0, -3);
+        assert_ne!(master.1, copy.1);
+        // Other settings, another fingerprint.
+        let other = imaging::develop::DevelopSettings { exposure: 0.5, ..Default::default() };
+        assert_ne!(preview_key(3, 3, 100, 5, Some(&other)).1, master.1);
+        // Default settings (a reset) count as none.
+        assert!(develop_settings(Some(&imaging::develop::DevelopSettings::default().to_json())).is_none());
+        assert!(develop_settings(Some(&s.to_json())).is_some());
     }
 }

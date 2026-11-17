@@ -16,8 +16,8 @@ mod virtual_copies;
 mod xmp_sync;
 
 pub use catalog::{
-    CATALOG_EXTENSION, Catalog, Flag, Folder, GpsPosition, PhotoMetadata, PhotoRow, SortKey, SortOrder,
-    Source,
+    CATALOG_EXTENSION, Catalog, Flag, Folder, GpsPosition, PhotoMetadata, PhotoRow, PhotoVersion, SortKey,
+    SortOrder, Source,
 };
 pub use collections::{Collection, CollectionKind};
 pub use develop::HistoryStep;

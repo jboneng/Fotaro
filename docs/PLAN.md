@@ -510,3 +510,10 @@ match Adobe's exactly.
       Speed: local adjustments are computed into one gain-per-pixel buffer before the main
       pass, with fast log2/exp2; and the proxy now follows the view size instead of a fixed
       2560 px. At a 1280 px view: plain render ~7 ms, all local effects at once ~50 ms.
+- [x] 8. Edited photos' thumbnails, standard and 1:1 previews are rendered with their
+      settings, stored under the photo's negated id with the settings hash in the fingerprint
+      (an edited master and its unedited virtual copy each keep theirs; a reset finds the plain
+      previews still there); the orphan purge knows both. After each saved change the photo's
+      thumbnail and preview reload (the old ones stay up until then). ± badge in Grid cells.
+      Export develops the photo at full size (16-bit through the colour conversion, also for
+      8-bit files). Checked in the app: B&W + Auto showed in Grid, filmstrip and Navigator.

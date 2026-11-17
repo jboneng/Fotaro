@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use image::{DynamicImage, RgbImage};
 
 use crate::decode::{SourceKind, decode, decode_full};
+use crate::develop::{DevelopSettings, WorkingImage, render_srgb8};
 
 /// Full-size (1:1) previews are large; like LrC, discard ones unused for this long.
 const FULL_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
@@ -62,6 +63,34 @@ pub fn fingerprint(size: u64, mtime_ms: i64) -> u64 {
     h
 }
 
+/// The photo as previews show it: the camera's rendering (`decode`), or developed. `None`
+/// for `max_px`: full size.
+fn render(
+    source: &Path,
+    kind: SourceKind,
+    max_px: Option<u32>,
+    develop: Option<&DevelopSettings>,
+) -> Result<(RgbImage, Metadata)> {
+    match (develop, max_px) {
+        (Some(s), _) => {
+            let (img, meta) = WorkingImage::load(source, kind, max_px)?;
+            Ok((render_srgb8(&img, s), meta))
+        }
+        (None, Some(px)) => decode(source, kind, px),
+        (None, None) => decode_full(source, kind),
+    }
+}
+
+/// The fingerprint of a developed photo's previews: the file's, mixed with the settings.
+pub fn developed_fingerprint(file: u64, settings: &DevelopSettings) -> u64 {
+    let mut h = file;
+    for b in settings.stable_hash().to_le_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
 pub struct BuiltPreviews {
     pub thumb: PathBuf,
     pub standard: PathBuf,
@@ -98,14 +127,16 @@ impl PreviewCache {
     }
 
     /// Decode the source once and write both preview sizes, removing stale versions.
+    /// With `develop`, the previews show the photo as developed.
     pub fn build(
         &self,
         photo_id: i64,
         fingerprint: u64,
         source: &Path,
         kind: SourceKind,
+        develop: Option<&DevelopSettings>,
     ) -> Result<BuiltPreviews> {
-        let (standard, metadata) = decode(source, kind, PreviewSize::Standard.max_px())?;
+        let (standard, metadata) = render(source, kind, Some(PreviewSize::Standard.max_px()), develop)?;
         let thumb = DynamicImage::ImageRgb8(standard.clone())
             .thumbnail(PreviewSize::Thumb.max_px(), PreviewSize::Thumb.max_px())
             .into_rgb8();
@@ -134,7 +165,14 @@ impl PreviewCache {
 
     /// The full-resolution preview for this file version, building it if needed.
     /// Cache hits are "touched" so [`Self::purge_orphans`] keeps previews in use.
-    pub fn full(&self, photo_id: i64, fingerprint: u64, source: &Path, kind: SourceKind) -> Result<PathBuf> {
+    pub fn full(
+        &self,
+        photo_id: i64,
+        fingerprint: u64,
+        source: &Path,
+        kind: SourceKind,
+        develop: Option<&DevelopSettings>,
+    ) -> Result<PathBuf> {
         if let Some(path) = self.get(photo_id, PreviewSize::Full, fingerprint) {
             let touched = std::fs::File::options()
                 .write(true)
@@ -145,7 +183,7 @@ impl PreviewCache {
             }
             return Ok(path);
         }
-        let (img, _) = decode_full(source, kind)?;
+        let (img, _) = render(source, kind, None, develop)?;
         std::fs::create_dir_all(self.bucket(photo_id))?;
         self.write(photo_id, PreviewSize::Full, fingerprint, &img)
     }
@@ -284,10 +322,10 @@ mod tests {
         RgbImage::from_pixel(3000, 2000, Rgb([10, 20, 30])).save(&src).unwrap();
         let cache = PreviewCache::new(tmp.path().join("previews"));
 
-        let p = cache.full(5, 9, &src, SourceKind::Image).unwrap();
+        let p = cache.full(5, 9, &src, SourceKind::Image, None).unwrap();
         let img = image::open(&p).unwrap();
         assert_eq!((img.width(), img.height()), (3000, 2000));
-        assert_eq!(cache.full(5, 9, &src, SourceKind::Image).unwrap(), p, "cached");
+        assert_eq!(cache.full(5, 9, &src, SourceKind::Image, None).unwrap(), p, "cached");
 
         let now = std::time::SystemTime::now();
         let old = now - FULL_MAX_AGE - std::time::Duration::from_secs(60);
@@ -312,7 +350,7 @@ mod tests {
         RgbImage::from_pixel(3000, 2000, Rgb([200, 100, 50])).save(&src).unwrap();
         let cache = PreviewCache::new(tmp.path().join("previews"));
 
-        let v1 = cache.build(7, 1, &src, SourceKind::Image).unwrap();
+        let v1 = cache.build(7, 1, &src, SourceKind::Image, None).unwrap();
         let t = image::open(&v1.thumb).unwrap();
         let s = image::open(&v1.standard).unwrap();
         assert_eq!((t.width(), t.height()), (256, 171));
@@ -320,7 +358,7 @@ mod tests {
         assert!(cache.has_all(7, 1));
         assert_eq!(v1.metadata.width, Some(3000));
 
-        cache.build(7, 2, &src, SourceKind::Image).unwrap();
+        cache.build(7, 2, &src, SourceKind::Image, None).unwrap();
         assert!(cache.has_all(7, 2));
         assert!(!v1.thumb.exists() && !v1.standard.exists(), "stale previews must be removed");
         assert!(cache.get(7, PreviewSize::Thumb, 1).is_none());

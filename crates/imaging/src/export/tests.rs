@@ -137,7 +137,7 @@ fn rendering_applies_rotation_and_size() {
     RgbImage::from_pixel(400, 200, image::Rgb([200, 10, 10])).save(&src).unwrap();
     let mut o = opts(ResizeMode::LongEdge);
     o.edge = 100;
-    let (img, _) = render(&src, SourceKind::Image, 1, &o, None).unwrap();
+    let (img, _) = render(&src, SourceKind::Image, 1, &o, None, None).unwrap();
     assert_eq!((img.width(), img.height()), (50, 100), "turned upright, then sized");
 
     let out = tmp.path().join("a.jpg");
@@ -177,18 +177,18 @@ fn rendering_keeps_16_bit_sources_and_converts_colour_spaces() {
     scan.save(&src).unwrap();
 
     let mut o = ImageOptions { format: FileFormat::Tiff, sixteen_bit: true, ..Default::default() };
-    let (img, _) = render(&src, SourceKind::Image, 0, &o, None).unwrap();
+    let (img, _) = render(&src, SourceKind::Image, 0, &o, None, None).unwrap();
     let DynamicImage::ImageRgb16(px) = &img else { panic!("expected 16 bits, got {:?}", img.color()) };
     assert_eq!(px.get_pixel(0, 0).0, [60_000, 3_000, 3_000], "untagged sRGB stays as is");
 
     o.color_space = ColorSpace::ProPhotoRgb;
-    let (img, _) = render(&src, SourceKind::Image, 0, &o, None).unwrap();
+    let (img, _) = render(&src, SourceKind::Image, 0, &o, None, None).unwrap();
     let p = img.as_rgb16().unwrap().get_pixel(0, 0).0;
     assert!(p[0] < 60_000 && p[1] > 3_000, "a saturated sRGB red is less saturated in ProPhoto: {p:?}");
 
     o.sixteen_bit = false;
     o.color_space = ColorSpace::AdobeRgb;
-    let (img, _) = render(&src, SourceKind::Image, 0, &o, None).unwrap();
+    let (img, _) = render(&src, SourceKind::Image, 0, &o, None, None).unwrap();
     assert!(matches!(img, DynamicImage::ImageRgb8(_)));
     let bytes = encode(&img, &o, &EmbeddedMetadata::default()).unwrap();
     let icc = lcms2::Profile::new_icc(&e_tiff_icc(&bytes).expect("ICC in the TIFF")).unwrap();
@@ -304,4 +304,21 @@ fn watermarks_draw_in_their_corner() {
     wm.apply(&mut img, None, ColorSpace::Srgb).unwrap();
     assert_eq!(lit(&img, 0, 400, 0, 200), 200 * 100, "a 200×100 white logo in the middle");
     assert_eq!(img.as_rgb8().unwrap().get_pixel(200, 100).0, [255; 3]);
+}
+
+#[test]
+fn develop_settings_are_applied_to_exports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("grey.png");
+    image::RgbImage::from_pixel(40, 20, image::Rgb([100, 100, 100])).save(&src).unwrap();
+    let o = ImageOptions::default();
+    let (plain, _) = render(&src, SourceKind::Image, 0, &o, None, None).unwrap();
+    let s = crate::develop::DevelopSettings { exposure: 1.0, ..Default::default() };
+    let (bright, _) = render(&src, SourceKind::Image, 0, &o, None, Some(&s)).unwrap();
+    let (p, b) = (plain.to_rgb8().get_pixel(5, 5)[1], bright.to_rgb8().get_pixel(5, 5)[1]);
+    assert!((p as i16 - 100).abs() <= 2, "unedited export keeps the pixels: {p}");
+    assert!(b > 125, "+1 EV brightens the export: {b}");
+    // Default settings render like the original (within rounding).
+    let (same, _) = render(&src, SourceKind::Image, 0, &o, None, Some(&Default::default())).unwrap();
+    assert!((same.to_rgb8().get_pixel(5, 5)[1] as i16 - p as i16).abs() <= 2);
 }

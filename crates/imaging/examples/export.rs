@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
         opts.format = FileFormat::Tiff;
     }
     let t = Instant::now();
-    let (img, meta) = render(src, kind, 0, &opts, None)?;
+    let (img, meta) = render(src, kind, 0, &opts, None, None)?;
     println!("render {}x{} in {:.0?}", img.width(), img.height(), t.elapsed());
     let embedded =
         EmbeddedMetadata { camera: Some(meta), copyright: Some("test".into()), ..Default::default() };

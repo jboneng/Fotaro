@@ -16,7 +16,7 @@ use image::{DynamicImage, RgbImage};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::decode::{SourceKind, decode_for_export};
+use crate::decode::{SourceKind, SourceSpace, decode_for_export};
 use crate::metadata::{Gps, Metadata};
 
 mod effects;
@@ -214,16 +214,34 @@ pub struct EmbeddedMetadata {
 /// rotation), resized, sharpened and watermarked per `opts`. `copyright` is the photo's
 /// copyright, for the simple copyright watermark. Returns 8-bit RGB, or 16-bit when
 /// [`ImageOptions::sixteen`], and the file's metadata.
+///
+/// With `develop`, the photo is developed at full size first (LrC exports apply the
+/// Develop settings).
 pub fn render(
     path: &Path,
     kind: SourceKind,
     turns: u8,
     opts: &ImageOptions,
     copyright: Option<&str>,
+    develop: Option<&crate::develop::DevelopSettings>,
 ) -> Result<(DynamicImage, Metadata)> {
     let sixteen = opts.sixteen();
-    let (img, source, meta) = decode_for_export(path, kind, sixteen)?;
-    let img = space::to_target(img, source, opts.color_space, sixteen);
+    let img = match develop {
+        Some(s) => {
+            let (working, meta) = crate::develop::WorkingImage::load(path, kind, None)?;
+            let linear = DynamicImage::ImageRgb16(crate::develop::render_linear16(&working, s));
+            // Linear data needs 16 bits through the colour conversion, whatever the output
+            // depth: 8-bit linear would band in the shadows.
+            let img = space::to_target(linear, SourceSpace::LinearProPhoto, opts.color_space, true);
+            let img = if sixteen { img } else { DynamicImage::ImageRgb8(img.into_rgb8()) };
+            (img, meta)
+        }
+        None => {
+            let (img, source, meta) = decode_for_export(path, kind, sixteen)?;
+            (space::to_target(img, source, opts.color_space, sixteen), meta)
+        }
+    };
+    let (img, meta) = img;
     let img = match turns % 4 {
         1 => img.rotate90(),
         2 => img.rotate180(),

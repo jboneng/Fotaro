@@ -74,7 +74,13 @@ pub struct PhotoRow {
     pub virtual_copy: Option<String>,
     /// The master photo (itself, unless this is a virtual copy): copies share its previews.
     pub master_id: i64,
+    /// Develop settings (JSON, see the imaging crate), if the photo has any.
+    pub develop: Option<String>,
 }
+
+/// What a photo's previews are computed from: (photo id, file size, file mtime in ms,
+/// Develop settings JSON). See [`Catalog::photo_versions`].
+pub type PhotoVersion = (i64, u64, i64, Option<String>);
 
 /// Camera/exposure metadata stored per photo. `capture_time` is "naive local"
 /// seconds (camera wall-clock time encoded as if UTC).
@@ -243,10 +249,11 @@ pub(crate) const PHOTO_COLUMNS: &str = "p.id, fo.path, f.name, f.kind, f.size, f
           ELSE (SELECT COUNT(*) FROM pictures g WHERE g.group_id = pi.group_id) END,
      EXISTS (SELECT 1 FROM quick_collection q WHERE q.photo_id = p.id),
      CASE WHEN p.virtual_of IS NULL THEN NULL ELSE coalesce(p.copy_name, 'Copy') END,
-     coalesce(p.virtual_of, p.id)";
+     coalesce(p.virtual_of, p.id),
+     (SELECT d.settings FROM develop d WHERE d.photo_id = p.id)";
 
 /// How many columns [`PHOTO_COLUMNS`] has (queries add their own after them).
-pub(crate) const PHOTO_COLUMN_COUNT: usize = 21;
+pub(crate) const PHOTO_COLUMN_COUNT: usize = 22;
 
 /// `photos.orientation` holds the catalog rotation as an EXIF/XMP orientation code
 /// (1 = none, 6 = 90° CW, 3 = 180°, 8 = 90° CCW), the form XMP sidecars will use.
@@ -293,6 +300,7 @@ pub(crate) fn photo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhotoRow> {
         in_quick_collection: r.get(18)?,
         virtual_copy: r.get(19)?,
         master_id: r.get(20)?,
+        develop: r.get(21)?,
     })
 }
 
@@ -634,13 +642,15 @@ impl Catalog {
         Ok(self.conn.query_row(&sql, [photo_id], photo_row).optional()?)
     }
 
-    /// (photo id, file size, file mtime in ms) for every photo: what preview fingerprints
-    /// are computed from, without touching the disk.
-    pub fn photo_versions(&self) -> Result<Vec<(i64, u64, i64)>> {
+    /// (photo id, file size, file mtime in ms, Develop settings) for every photo: what
+    /// preview fingerprints are computed from, without touching the disk.
+    pub fn photo_versions(&self) -> Result<Vec<PhotoVersion>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, f.size, f.mtime_ms FROM photos p JOIN files f ON f.id = p.master_file_id",
+            "SELECT p.id, f.size, f.mtime_ms, d.settings FROM photos p JOIN files f ON f.id = p.master_file_id
+               LEFT JOIN develop d ON d.photo_id = p.id",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?)))?;
+        let rows =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

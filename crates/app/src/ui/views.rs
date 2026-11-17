@@ -282,6 +282,10 @@ fn paint_cell(
     if st.show_dirty && style != GridStyle::Minimal {
         paint_needs_saving(&painter, cell.right_bottom() - egui::vec2(12.0, 10.0 + footer.max(4.0) / 2.0));
     }
+    // LrC's "has Develop adjustments" badge, left of the needs-saving one.
+    if photo.develop.is_some() && style != GridStyle::Minimal {
+        paint_developed(&painter, cell.right_bottom() - egui::vec2(26.0, 10.0 + footer.max(4.0) / 2.0));
+    }
 }
 
 /// LrC's virtual copy badge: a page corner folded over at the photo's bottom left.
@@ -296,6 +300,18 @@ fn paint_virtual_copy_badge(painter: &egui::Painter, corner: egui::Pos2) {
 }
 
 /// A small page with a down arrow: catalog metadata not yet saved to the sidecar.
+/// A small ± box: the photo has Develop settings.
+fn paint_developed(painter: &egui::Painter, center: egui::Pos2) {
+    let r = Rect::from_center_size(center, egui::vec2(10.0, 10.0));
+    let color = theme::TEXT_WEAK;
+    painter.rect_stroke(r, 1.5, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+    let s = Stroke::new(1.0, color);
+    let c = r.center();
+    painter.line_segment([c + egui::vec2(-2.5, -1.5), c + egui::vec2(2.5, -1.5)], s);
+    painter.line_segment([c + egui::vec2(0.0, -4.0), c + egui::vec2(0.0, 1.0)], s);
+    painter.line_segment([c + egui::vec2(-2.5, 2.5), c + egui::vec2(2.5, 2.5)], s);
+}
+
 fn paint_needs_saving(painter: &egui::Painter, center: egui::Pos2) {
     let page = Rect::from_center_size(center, egui::vec2(8.0, 10.0));
     let color = theme::TEXT_WEAK;

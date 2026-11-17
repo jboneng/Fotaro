@@ -279,6 +279,8 @@ struct Task {
     data: catalog::XmpData,
     /// The photo's copyright, for the simple copyright watermark (whatever the level).
     copyright: Option<String>,
+    /// The photo's Develop settings, applied to the exported pixels.
+    develop: Option<imaging::develop::DevelopSettings>,
 }
 
 fn source_kind(kind: FileKind) -> imaging::SourceKind {
@@ -341,6 +343,7 @@ fn plan(
             dest,
             data,
             copyright: all.copyright,
+            develop: crate::jobs::develop_settings(row.develop.as_deref()),
         });
     }
     Ok(tasks)
@@ -360,6 +363,7 @@ fn export_one(t: &Task, prefs: &ExportPrefs) -> Result<()> {
         t.turns,
         &prefs.image,
         t.copyright.as_deref(),
+        t.develop.as_ref(),
     )?;
     let embedded = EmbeddedMetadata {
         gps: meta.gps.filter(|_| prefs.metadata.location() && !prefs.remove_location),
