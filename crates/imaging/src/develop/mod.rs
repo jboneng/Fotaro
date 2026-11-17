@@ -1,6 +1,7 @@
 //! Develop: non-destructive adjustments (LrC's Basic panel), rendered from the original
 //! file's pixels. The catalog stores [`DevelopSettings`]; nothing is written to the photo.
 
+mod dehaze;
 mod local;
 mod matrix;
 mod pipeline;

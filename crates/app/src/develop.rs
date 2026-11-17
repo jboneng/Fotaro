@@ -16,9 +16,6 @@ use imaging::develop::{DevelopSettings, ResolvedWb, WbPreset, WorkingImage, auto
 
 use crate::jobs::Histogram;
 
-/// Long side of the image the sliders work on.
-const PROXY_PX: u32 = 2560;
-
 /// What the center view shows: the photo as developed, or before any adjustments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
@@ -31,6 +28,8 @@ enum Request {
         photo_id: i64,
         path: PathBuf,
         kind: SourceKind,
+        /// Long side of the proxy to work on.
+        max_px: u32,
     },
     Render {
         photo_id: i64,
@@ -41,11 +40,7 @@ enum Request {
         seq: u64,
     },
     /// Settings computed from the pixels.
-    Adjust {
-        photo_id: i64,
-        op: Adjust,
-        settings: DevelopSettings,
-    },
+    Adjust { photo_id: i64, op: Adjust, settings: DevelopSettings },
 }
 
 /// Changes worked out from the photo's pixels.
@@ -148,18 +143,23 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         let mut adjusts = Vec::new();
         for req in std::iter::once(first).chain(rx.try_iter()) {
             match req {
-                Request::Load { photo_id, path, kind } => load = Some((photo_id, path, kind)),
+                Request::Load { photo_id, path, kind, max_px } => load = Some((photo_id, path, kind, max_px)),
                 Request::Render { photo_id, slot, settings, clipping, seq } => {
                     renders.insert(slot, (photo_id, settings, clipping, seq));
                 }
                 Request::Adjust { photo_id, op, settings } => adjusts.push((photo_id, op, settings)),
             }
         }
-        if let Some((photo_id, path, kind)) = load {
-            if current.as_ref().is_none_or(|(id, _)| *id != photo_id) {
+        if let Some((photo_id, path, kind, max_px)) = load {
+            // A new photo, or this one at another size.
+            let stale = current.as_ref().is_none_or(|(id, img)| {
+                *id != photo_id
+                    || img.width().max(img.height()) < max_px.min(img.full_size.0.max(img.full_size.1))
+            });
+            if stale {
                 current = None;
                 let started = std::time::Instant::now();
-                match WorkingImage::load(&path, kind, Some(PROXY_PX)) {
+                match WorkingImage::load(&path, kind, Some(max_px)) {
                     Ok((img, _)) => {
                         log::debug!("develop: loaded {} in {:.0?}", path.display(), started.elapsed());
                         current = Some((photo_id, img));
@@ -227,6 +227,10 @@ pub struct DevelopState {
     pub before: bool,
     /// W: the White Balance Selector is active (click the photo to pick).
     pub picking_wb: bool,
+    /// Long side, in pixels, the center view shows the photo at (rounded up), and the
+    /// proxy size the current photo was loaded at: renders cost in proportion.
+    pub view_px: u32,
+    loaded_px: u32,
     /// J: show clipped pixels; and how many there are in the current render.
     pub clipping: bool,
     pub clipped: Clipped,
@@ -265,6 +269,8 @@ impl DevelopState {
             shown: HashMap::new(),
             before: false,
             picking_wb: false,
+            view_px: 1536,
+            loaded_px: 0,
             clipping: false,
             clipped: Clipped::default(),
             clipboard: None,
@@ -300,10 +306,34 @@ impl DevelopState {
             self.error = Some("The file could not be found.".into());
         } else {
             let kind = if photo.kind == FileKind::Raw { SourceKind::Raw } else { SourceKind::Image };
-            let _ = self.tx.send(Request::Load { photo_id: photo.id, path: photo.path.clone(), kind });
+            self.loaded_px = self.view_px;
+            let max_px = self.view_px;
+            let _ =
+                self.tx.send(Request::Load { photo_id: photo.id, path: photo.path.clone(), kind, max_px });
             self.request_renders();
         }
         Ok(changed)
+    }
+
+    /// The center view shows the photo `px` pixels long (on its long side). Renders are
+    /// made at about that size; if the view grew well past the loaded proxy (a bigger
+    /// window), the photo is loaded again, larger.
+    pub fn set_view_px(&mut self, px: u32, photo: &PhotoRow) {
+        // Round up so small window changes don't reload, and keep a sensible minimum.
+        let px = px.div_ceil(256).max(4) * 256;
+        self.view_px = px;
+        if self.photo == Some(photo.id) && self.loaded_px != 0 && px > self.loaded_px && !photo.missing {
+            self.loaded_px = px;
+            let kind = if photo.kind == FileKind::Raw { SourceKind::Raw } else { SourceKind::Image };
+            let _ = self.tx.send(Request::Load {
+                photo_id: photo.id,
+                path: photo.path.clone(),
+                kind,
+                max_px: px,
+            });
+            self.sent.clear();
+            self.request_renders();
+        }
     }
 
     /// Take stored settings (JSON) as both shown and saved.

@@ -155,3 +155,59 @@ fn auto_tone_brightens_a_dark_photo() {
     assert!(s.exposure > 1.0, "{s:?}");
     assert_eq!(s.vibrance, 10.0, "other settings are kept");
 }
+
+/// Standard deviation of the green channel inside a box.
+fn spread_in(img: &RgbImage, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>) -> f32 {
+    let vals: Vec<f32> = ys
+        .flat_map(|y| xs.clone().map(move |x| (x, y)))
+        .map(|(x, y)| f32::from(img.get_pixel(x, y)[1]))
+        .collect();
+    let m = vals.iter().sum::<f32>() / vals.len() as f32;
+    (vals.iter().map(|v| (v - m).powi(2)).sum::<f32>() / vals.len() as f32).sqrt()
+}
+
+/// Mid-grey with a coarse pattern (blobs of ~20 px) and a fine one (1-2 px).
+fn patterned(coarse: u8, fine: u8) -> RgbImage {
+    ImageBuffer::from_fn(400, 300, |x, y| {
+        let c = if (x / 20 + y / 20) % 2 == 0 { coarse } else { 0 };
+        let f = if (x + y) % 2 == 0 { fine } else { 0 };
+        let v = 100 + c + f;
+        Rgb([v, v, v])
+    })
+}
+
+#[test]
+fn clarity_raises_mid_scale_contrast() {
+    let img = rendered(&patterned(16, 0));
+    let base = render_srgb8(&img, &DevelopSettings::default());
+    let more = render_srgb8(&img, &DevelopSettings { clarity: 80.0, ..Default::default() });
+    let less = render_srgb8(&img, &DevelopSettings { clarity: -80.0, ..Default::default() });
+    let s = |i: &RgbImage| spread_in(i, 100..300, 80..220);
+    assert!(s(&more) > s(&base) * 1.15, "{} vs {}", s(&more), s(&base));
+    assert!(s(&less) < s(&base) * 0.9, "{} vs {}", s(&less), s(&base));
+}
+
+#[test]
+fn texture_raises_fine_contrast() {
+    let img = rendered(&patterned(0, 12));
+    let base = render_srgb8(&img, &DevelopSettings::default());
+    let more = render_srgb8(&img, &DevelopSettings { texture: 80.0, ..Default::default() });
+    let s = |i: &RgbImage| spread_in(i, 100..300, 80..220);
+    assert!(s(&more) > s(&base) * 1.15, "{} vs {}", s(&more), s(&base));
+}
+
+#[test]
+fn dehaze_adds_contrast_to_a_hazy_photo_and_negative_adds_haze() {
+    // Low-contrast, bright, bluish: a hazy landscape.
+    let hazy: RgbImage = ImageBuffer::from_fn(300, 200, |x, y| {
+        let v = if (x / 30 + y / 30) % 2 == 0 { 170 } else { 200 };
+        Rgb([v - 10, v, v + 20])
+    });
+    let img = rendered(&hazy);
+    let base = render_srgb8(&img, &DevelopSettings::default());
+    let clear = render_srgb8(&img, &DevelopSettings { dehaze: 70.0, ..Default::default() });
+    let foggy = render_srgb8(&img, &DevelopSettings { dehaze: -70.0, ..Default::default() });
+    let s = |i: &RgbImage| spread_in(i, 0..300, 0..200);
+    assert!(s(&clear) > s(&base) * 1.2, "{} vs {}", s(&clear), s(&base));
+    assert!(s(&foggy) < s(&base) * 0.8, "{} vs {}", s(&foggy), s(&base));
+}

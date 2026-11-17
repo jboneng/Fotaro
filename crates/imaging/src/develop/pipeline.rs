@@ -1,14 +1,16 @@
 //! Rendering a [`WorkingImage`] with [`DevelopSettings`].
 //!
-//! Per pixel: white balance (and the camera matrix) → exposure → Highlights / Shadows (a
-//! gain from the local brightness map, see [`super::local`]) → tone curve (whites, blacks,
-//! contrast, highlight shoulder; plus the base rendering for RAW files) → vibrance /
-//! saturation → B&W → output. Values are linear until the output encoding.
+//! Per pixel: white balance (and the camera matrix) → Dehaze (see [`super::dehaze`]) →
+//! exposure, Highlights / Shadows, Clarity and Texture (gains from local brightness maps,
+//! see [`super::local`]) → tone curve (whites, blacks, contrast, highlight shoulder; plus
+//! the base rendering for RAW files) → vibrance / saturation → B&W → output. Values are
+//! linear until the output encoding.
 
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 
-use super::local::{BaseMap, tone_gain};
+use super::dehaze::{HazeMap, add_haze};
+use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
 use super::matrix::{self, Mat3f};
 use super::settings::{DevelopSettings, Treatment};
 use super::source::{SourceColor, WorkingImage};
@@ -101,10 +103,18 @@ struct Prepared {
     saturation: f32,
     bw: bool,
     luma: [f32; 3],
-    /// Highlights / Shadows, −1..+1, and their gain map (from local brightness).
+    /// Highlights / Shadows, Clarity, Texture: −1..+1.
     highlights: f32,
     shadows: f32,
-    local: Option<BaseMap>,
+    clarity: f32,
+    texture: f32,
+    /// With any of them on: the exposure gain of every pixel (`gain` with the local
+    /// adjustments applied), computed in one pass before rendering.
+    gains: Option<Vec<f32>>,
+    width: usize,
+    /// Dehaze, −1..+1, and the haze map (also used for its colour when adding haze).
+    dehaze: f32,
+    haze: Option<HazeMap>,
 }
 
 impl Prepared {
@@ -137,22 +147,86 @@ impl Prepared {
             luma: matrix::work_luma(),
             highlights: s.highlights / 100.0,
             shadows: s.shadows / 100.0,
-            local: None,
+            clarity: s.clarity / 100.0,
+            gains: None,
+            texture: s.texture / 100.0,
+            width: img.width() as usize,
+            dehaze: s.dehaze / 100.0,
+            haze: None,
         };
-        if prep.highlights != 0.0 || prep.shadows != 0.0 {
-            let (w, h) = (img.width() as usize, img.height() as usize);
-            let px = img.pixels.as_raw();
-            let mut map = BaseMap::build(w, h, |x, y| {
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let px = img.pixels.as_raw();
+        if prep.dehaze != 0.0 {
+            let map = HazeMap::build(w, h, prep.dehaze.max(0.0), |x, y| {
                 let i = 3 * (y * w + x);
-                prep.luminance(prep.linear([px[i], px[i + 1], px[i + 2]]))
+                prep.linear([px[i], px[i + 1], px[i + 2]])
             });
-            // Brightness (stops from middle grey after exposure) → gain, per map cell.
-            let offset = prep.gain.log2() - MIDDLE_GREY.log2();
-            let (hl, sh) = (prep.highlights, prep.shadows);
-            map.transform(|v| tone_gain(v + offset, hl, sh).exp2());
-            prep.local = Some(map);
+            prep.haze = Some(map);
+        }
+        let tone = prep.highlights != 0.0 || prep.shadows != 0.0;
+        let detail = prep.clarity != 0.0 || prep.texture != 0.0;
+        if tone || detail {
+            prep.gains = Some(prep.local_gains(img));
         }
         prep
+    }
+
+    /// The exposure gain of every pixel with Highlights / Shadows, Clarity and Texture
+    /// applied: maps of local brightness first, then one simple pass over the pixels.
+    fn local_gains(&self, img: &WorkingImage) -> Vec<f32> {
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        // Luminance of every pixel (white balanced, before exposure), shared by the maps.
+        let lum: Vec<f32> = img
+            .pixels
+            .as_raw()
+            .par_chunks(3)
+            .map(|p| self.luminance(self.linear([p[0], p[1], p[2]])))
+            .collect();
+        let tone = (self.highlights != 0.0 || self.shadows != 0.0).then(|| {
+            let mut map = BaseMap::build(w, h, TONE_MAP, |x, y| lum[y * w + x]);
+            // Brightness (stops from middle grey after exposure) → gain, per map cell.
+            let offset = self.gain.log2() - MIDDLE_GREY.log2();
+            let (hl, sh) = (self.highlights, self.shadows);
+            map.transform(|v| tone_gain(v + offset, hl, sh).exp2());
+            map
+        });
+        let clarity = (self.clarity != 0.0).then(|| BaseMap::build(w, h, CLARITY_MAP, |x, y| lum[y * w + x]));
+        let ylog: Option<Vec<f32>> = (self.clarity != 0.0 || self.texture != 0.0)
+            .then(|| lum.par_iter().map(|v| fast_log2(v.max(1e-6))).collect());
+        drop(lum);
+        // Texture: log luminance blurred twice (close to a Gaussian) over a few pixels; the
+        // radius follows the image size so a preview and a full-size export agree.
+        let texture = (self.texture != 0.0).then(|| {
+            let r = (w.max(h) as f32 / 1000.0).round().max(1.0) as usize;
+            let ylog = ylog.as_deref().unwrap_or_default();
+            box_blur_par(&box_blur_par(ylog, w, h, r), w, h, r)
+        });
+        let grey = MIDDLE_GREY.log2();
+        let mut gains = vec![self.gain; w * h];
+        gains.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, g) in row.iter_mut().enumerate() {
+                if let Some(map) = &tone {
+                    *g *= map.sample(x, y);
+                }
+                let Some(ylog) = &ylog else { continue };
+                let i = y * w + x;
+                let l = ylog[i];
+                let mut stops = 0.0;
+                if let Some(map) = &clarity {
+                    let d = (l - map.sample(x, y)).clamp(-1.5, 1.5);
+                    // Mostly the midtones: deep shadows and highlights are left alone.
+                    let rel = l + fast_log2(*g) - grey;
+                    stops += self.clarity * 0.9 * d / (1.0 + rel * rel / 6.0);
+                }
+                if let Some(base) = &texture {
+                    let d = (l - base[i]).clamp(-1.0, 1.0);
+                    // Soft threshold: the smallest differences are mostly noise.
+                    stops += self.texture * 1.2 * d * (d.abs() / (d.abs() + 0.04));
+                }
+                *g *= fast_exp2(stops);
+            }
+        });
+        gains
     }
 
     #[inline]
@@ -184,9 +258,16 @@ impl Prepared {
     /// Input pixel `p` at (x, y) → display-referred linear working-space RGB, 0..1.
     #[inline]
     fn pixel(&self, p: [f32; 3], x: usize, y: usize) -> [f32; 3] {
-        let lin = self.linear(p);
-        let g = match &self.local {
-            Some(gains) => self.gain * gains.sample(x, y),
+        let mut lin = self.linear(p);
+        if let Some(haze) = &self.haze {
+            lin = if self.dehaze > 0.0 {
+                haze.clear(lin, x, y)
+            } else {
+                add_haze(lin, -self.dehaze, haze.airlight)
+            };
+        }
+        let g = match &self.gains {
+            Some(gains) => gains[y * self.width + x],
             None => self.gain,
         };
         let mut d =

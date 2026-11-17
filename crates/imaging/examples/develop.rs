@@ -29,16 +29,23 @@ fn main() {
     let kind = if raw { SourceKind::Raw } else { SourceKind::Image };
 
     let t = Instant::now();
-    let (img, _) = WorkingImage::load(&path, kind, Some(2560)).expect("load");
+    let (img, _) = WorkingImage::load(
+        &path,
+        kind,
+        Some(std::env::var("PROXY").ok().and_then(|v| v.parse().ok()).unwrap_or(2560)),
+    )
+    .expect("load");
     println!("load proxy {}x{} in {:?} ({:?})", img.width(), img.height(), t.elapsed(), img.color);
     let wb = img.resolve_wb(&settings);
     println!("white balance {:?}", wb);
     let mut rendered = None;
-    for _ in 0..5 {
+    let mut best = std::time::Duration::MAX;
+    for _ in 0..15 {
         let t = Instant::now();
         rendered = Some(render_srgb8(&img, &settings));
-        println!("render {:?}", t.elapsed());
+        best = best.min(t.elapsed());
     }
+    println!("render: best of 15 {best:?}");
     rendered.unwrap().save(&out).unwrap();
     let (preview, _) = imaging::decode(&path, kind, 2560).expect("preview");
     let prev_out = out.with_extension("preview.png");

@@ -436,7 +436,6 @@ fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         if slider == Slider::Texture {
             sub_header(ui, "Presence", |_| {});
         }
-        let available = !matches!(slider, Slider::Texture | Slider::Clarity | Slider::Dehaze);
         let spec = Spec {
             slider,
             range: slider.range(kelvin),
@@ -451,15 +450,11 @@ fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             kelvin,
         };
         let mut v = slider.get(&st);
-        let row = ui.add_enabled_ui(available, |ui| slider_row(ui, &spec, &mut v));
-        if !available {
-            row.response.on_disabled_hover_text("Comes in a later Develop step");
-            continue;
-        }
-        if row.inner.changed {
+        let moved = slider_row(ui, &spec, &mut v);
+        if moved.changed {
             slider.set(&mut st, v);
         }
-        if row.inner.done {
+        if moved.done {
             done = Some(None);
         }
     }
@@ -526,6 +521,9 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let resp = ui.allocate_rect(rect, Sense::click());
     let Some(s) = &mut app.session else { return };
     let Some(photo) = s.active_photo().cloned() else { return };
+    // Render at the size the photo is shown (LrC renders previews at screen size).
+    let shown = rect.shrink(18.0).size().max_elem() * ui.ctx().pixels_per_point();
+    s.develop.set_view_px(shown.ceil() as u32, &photo);
     let slot = if s.develop.before { Slot::Before } else { Slot::Current };
     let developed = s.develop.textures.get(&slot).cloned();
     let tex = developed.clone().or_else(|| standard_preview(s, &photo));

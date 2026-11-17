@@ -466,7 +466,8 @@ match Adobe's exactly.
 - **Engine** (`imaging::develop`): LibRaw demosaics to linear camera RGB with unity white
   balance; we apply WB (Kelvin/tint via Robertson isotemperature lines and the camera matrix),
   so Temp/Tint are interactive. Working space linear ProPhoto, f32, rayon by rows; an
-  interactive proxy (~2560 px) and a full-size render for export and 1:1.
+  interactive proxy the size the photo is shown at (as LrC renders at screen size;
+  reloaded larger if the window grows) and a full-size render for export and 1:1.
 - **UI**: module picker Library | Develop (D, G, E, Ctrl+Alt+1/2); left Navigator + History
   (Presets, Snapshots planned); right Histogram + Basic (other panels planned); toolbar
   Before/After (\), Copy / Paste settings, Reset. Shortcuts become per module.
@@ -503,3 +504,9 @@ match Adobe's exactly.
       ~384 px, gain per map cell; ~40 ms per proxy render with them on), Auto Tone (Ctrl+U,
       the Auto button) from luminance percentiles, clipping overlay (J; red / blue) and the
       histogram's clipping triangles (click to toggle). Auto WB and the WB Selector came in step 5.
+- [x] 7. Texture (fine detail against a small blur, radius ∝ image size, noise threshold),
+      Clarity (mid-scale detail against a second edge-preserving map, mostly midtones),
+      Dehaze (dark channel prior: haze map at ~256 px and airlight; negative adds haze).
+      Speed: local adjustments are computed into one gain-per-pixel buffer before the main
+      pass, with fast log2/exp2; and the proxy now follows the view size instead of a fixed
+      2560 px. At a 1280 px view: plain render ~7 ms, all local effects at once ~50 ms.
