@@ -1288,6 +1288,17 @@ impl PhotoLibraryApp {
             self.notify(format!("{} arrives in {phase}", sc.description));
             return;
         }
+        // Delete with the Remove tool open: the selected spot.
+        if self.module == Module::Develop
+            && action == Action::RemoveFromCollection
+            && let Some(s) = &mut self.session
+            && s.develop.removing.is_some()
+        {
+            if crate::ui::delete_spot(&mut s.develop) {
+                self.develop_op(|d, c| d.commit(c, None));
+            }
+            return;
+        }
         // With the crop tool open, X swaps portrait / landscape and Enter closes it, as in LrC.
         if self.module == Module::Develop
             && let Some(s) = &mut self.session
@@ -1351,6 +1362,10 @@ impl PhotoLibraryApp {
                     if let Some(s) = &mut self.session {
                         s.develop.picking_wb = false;
                         s.develop.picking_detail = false;
+                        // Remove: Esc closes it.
+                        if s.develop.removing.is_some() {
+                            crate::ui::set_removing(&mut s.develop, false);
+                        }
                         // Crop: Esc puts the Straighten tool away, then closes the crop tool.
                         let d = &mut s.develop;
                         match &mut d.cropping {
@@ -1667,6 +1682,8 @@ impl PhotoLibraryApp {
             | Action::Masking
             | Action::NewBrushMask
             | Action::CropTool
+            | Action::RemoveTool
+            | Action::NewSource
             | Action::ResetCrop
             | Action::BrushSize(_)
             | Action::BrushFeather(_)
@@ -1992,11 +2009,15 @@ impl PhotoLibraryApp {
             Action::Masking => crate::ui::set_masking(d, d.masking.is_none()),
             Action::NewBrushMask => crate::ui::new_mask_tool(d, crate::develop::ShapeKind::Brush),
             Action::CropTool => crate::ui::set_cropping(d, d.cropping.is_none()),
+            Action::RemoveTool => crate::ui::set_removing(d, d.removing.is_none()),
+            Action::NewSource => crate::ui::new_source(d),
             Action::ResetCrop => self.develop_op(|d, c| {
                 let mut s = d.settings.clone();
                 s.transform.crop = Default::default();
                 d.apply(c, s, "Reset Crop")
             }),
+            // [ ] size the Remove tool's spots while it is open, else the brush.
+            Action::BrushSize(dir) if d.removing.is_some() => crate::ui::step_spot_size(d, dir),
             Action::BrushSize(dir) => d.brush.step_size(dir),
             Action::BrushFeather(dir) => d.brush.step_feather(dir),
             Action::NewLinearMask => crate::ui::new_mask_tool(d, crate::develop::ShapeKind::Linear),

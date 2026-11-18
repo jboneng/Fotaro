@@ -38,34 +38,34 @@ impl Canvas {
     }
 
     /// A point of the untransformed photo (0..1) on screen.
-    fn screen(&self, p: [f32; 2]) -> Option<Pos2> {
+    pub(super) fn screen(&self, p: [f32; 2]) -> Option<Pos2> {
         let q = self.transform.output_point(p[0], p[1], self.size.0, self.size.1)?;
         let (u, v) = rotate(q, self.rotation);
         Some(self.img_rect.min + egui::vec2(u, v) * self.img_rect.size())
     }
 
     /// The untransformed photo's point (0..1) under a screen position.
-    fn photo(&self, q: Pos2) -> [f32; 2] {
+    pub(super) fn photo(&self, q: Pos2) -> [f32; 2] {
         let (x, y) = unrotate((q - self.img_rect.min) / self.img_rect.size(), self.rotation);
         let (u, v) = self.transform.source_point(x, y, self.size.0, self.size.1);
         [u, v]
     }
 
     /// 0..1 → pixels of the untransformed photo (for distances and angles), and back.
-    fn px(&self, p: [f32; 2]) -> Vec2 {
+    pub(super) fn px(&self, p: [f32; 2]) -> Vec2 {
         egui::vec2(p[0] * self.size.0 as f32, p[1] * self.size.1 as f32)
     }
 
-    fn unit(&self, v: Vec2) -> [f32; 2] {
+    pub(super) fn unit(&self, v: Vec2) -> [f32; 2] {
         [v.x / self.size.0.max(1) as f32, v.y / self.size.1.max(1) as f32]
     }
 
     /// Half the long side in pixels (the unit of radii and brush sizes).
-    fn half(&self) -> f32 {
+    pub(super) fn half(&self) -> f32 {
         self.size.0.max(self.size.1) as f32 / 2.0
     }
 
-    fn screen_px(&self, v: Vec2) -> Option<Pos2> {
+    pub(super) fn screen_px(&self, v: Vec2) -> Option<Pos2> {
         self.screen(self.unit(v))
     }
 }
@@ -1081,10 +1081,16 @@ pub(super) fn masking_button(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         (resp, color)
     };
     let cropping = d.cropping.is_some();
-    let (crop, color) = tool(ui, slot(1.0), cropping, "crop_tool");
-    super::icons::crop(ui.painter(), slot(1.0).center(), 7.5, color);
+    let (crop, color) = tool(ui, slot(2.0), cropping, "crop_tool");
+    super::icons::crop(ui.painter(), slot(2.0).center(), 7.5, color);
     if crop.on_hover_text("Crop & Straighten (R)").clicked() && d.photo.is_some() {
         super::crop::set_cropping(d, !cropping);
+    }
+    let removing = d.removing.is_some();
+    let (rm, color) = tool(ui, slot(1.0), removing, "remove_tool");
+    super::icons::remove(ui.painter(), slot(1.0).center(), 7.5, color);
+    if rm.on_hover_text("Remove: Heal and Clone spots (Q)").clicked() && d.photo.is_some() {
+        super::remove::set_removing(d, !removing);
     }
     let on = d.masking.is_some();
     let (resp, color) = tool(ui, slot(0.0), on, "masking_tool");
@@ -1106,6 +1112,7 @@ pub(super) fn masking_button(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     {
         if !on {
             d.cropping = None;
+            d.removing = None;
         }
         set_masking(d, !on);
     }
@@ -1134,6 +1141,7 @@ pub fn set_masking(d: &mut DevelopState, on: bool) {
     });
     if on {
         d.cropping = None;
+        d.removing = None;
     }
     d.picking_wb = false;
     d.picking_detail = false;

@@ -615,6 +615,7 @@ fn warp(img: &WorkingImage, t: &Transform) -> WorkingImage {
         transform_cache: TransformCache::default(),
         warp_source: Some(map),
         mask_cache: super::masks::MaskCache::default(),
+        heal_cache: Default::default(),
     }
 }
 

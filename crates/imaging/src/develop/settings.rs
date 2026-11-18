@@ -6,6 +6,7 @@ use super::curve::ToneCurve;
 use super::detail::{Detail, DetailParam};
 use super::effects::{EffectParam, Effects};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
+use super::heal::Spot;
 use super::hsl::{COLORS, Hsl, HslGroup};
 use super::masks::{Component, LocalParam, Mask, Shape};
 use super::transform::{Transform, TransformParam};
@@ -116,6 +117,8 @@ pub struct DevelopSettings {
     pub transform: Transform,
     /// Masking: local adjustments, applied in order.
     pub masks: Vec<Mask>,
+    /// The Remove tool's spots (Heal, Clone), applied first.
+    pub spots: Vec<Spot>,
 }
 
 impl Default for DevelopSettings {
@@ -145,6 +148,7 @@ impl Default for DevelopSettings {
             effects: Effects::default(),
             transform: Transform::default(),
             masks: Vec::new(),
+            spots: Vec::new(),
         }
     }
 }
@@ -471,6 +475,12 @@ impl DevelopSettings {
                 eat(p.get(&self.detail).to_bits());
             }
         }
+        if !self.spots.is_empty() {
+            eat(0x5b_07);
+            for b in serde_json::to_vec(&self.spots).unwrap_or_default() {
+                eat(u32::from(b));
+            }
+        }
         if !self.masks.is_empty() {
             eat(0x3a_5c);
             for b in serde_json::to_vec(&self.masks).unwrap_or_default() {
@@ -556,6 +566,9 @@ impl DevelopSettings {
                 }
                 _ => "Detail".into(),
             };
+        }
+        if self.spots != old.spots {
+            return describe_spots(&self.spots, &old.spots);
         }
         if self.masks != old.masks {
             return describe_masks(&self.masks, &old.masks, kelvin);
@@ -731,5 +744,18 @@ fn describe_masks(new: &[Mask], old: &[Mask], kelvin: bool) -> String {
             format!("{name}: {} {}", p.label(), s.format(p.get(&m.adjust), kelvin))
         }
         _ => format!("{name}: Settings"),
+    }
+}
+
+/// A History label for a change to the Remove tool's spots, LrC style.
+fn describe_spots(new: &[Spot], old: &[Spot]) -> String {
+    match new.len().cmp(&old.len()) {
+        std::cmp::Ordering::Greater => {
+            let mode = new.last().map_or("Spot", |s| s.mode.label());
+            format!("Remove: {mode}")
+        }
+        std::cmp::Ordering::Less if new.is_empty() => "Reset Spots".into(),
+        std::cmp::Ordering::Less => "Delete Spot".into(),
+        std::cmp::Ordering::Equal => "Edit Spot".into(),
     }
 }

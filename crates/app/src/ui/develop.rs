@@ -151,6 +151,11 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 });
                 super::masking::masking_button(app, ui);
                 // Masking replaces the panels with the selected mask's sliders, as in LrC.
+                if app.session.as_ref().is_some_and(|s| s.develop.removing.is_some()) {
+                    super::remove::right_panel(app, ui);
+                    app.ui.dev_right = stack;
+                    return;
+                }
                 if app.session.as_ref().is_some_and(|s| s.develop.cropping.is_some()) {
                     super::crop::right_panel(app, ui);
                     app.ui.dev_right = stack;
@@ -569,6 +574,8 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let img_px = rotated_size(full_size.unwrap_or_else(|| tex.size_vec2()), photo.rotation);
     // Crop & Straighten shows the whole photo (fit), as in LrC.
     let cropping = !s.develop.before && developed.is_some() && s.develop.cropping.is_some();
+    // The Remove tool: clicks and drags make and move spots.
+    let removing = !s.develop.before && developed.is_some() && s.develop.removing.is_some();
     let zoomed =
         app.zoom.zoomed && !photo.missing && !s.develop.picking_wb && !s.develop.picking_detail && !cropping;
     // Upright Guided: drags on the photo draw guides.
@@ -578,7 +585,8 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         && !s.develop.picking_wb
         && !s.develop.picking_detail
         && s.develop.masking.is_none()
-        && s.develop.cropping.is_none();
+        && s.develop.cropping.is_none()
+        && s.develop.removing.is_none();
     // Masking: drags on the photo draw and shape masks.
     let masking = !s.develop.before && developed.is_some() && s.develop.masking.is_some();
     let brushing = masking && super::masking::brush_active(&s.develop);
@@ -592,11 +600,11 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         if let Some((q, offset)) = z.anchor.take() {
             z.center = q - offset / size;
         }
-        if resp.dragged() && !guiding && !masking {
+        if resp.dragged() && !guiding && !masking && !removing {
             z.center -= resp.drag_delta() / size;
         }
         // The wheel pans, unless the brush is out (then it sizes the brush).
-        if resp.hovered() && !brushing {
+        if resp.hovered() && !brushing && !removing {
             let scroll = ui.input(|i| i.smooth_scroll_delta);
             if scroll != Vec2::ZERO {
                 z.center -= scroll / size;
@@ -713,6 +721,12 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let q = (p - img_rect.min) / img_rect.size();
             let (x, y) = unrotate(q, photo.rotation);
             s.develop.pick(x, y);
+        }
+        return;
+    }
+    if removing {
+        if super::remove::canvas(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter) {
+            app.run(Command::DevelopCommit(None));
         }
         return;
     }

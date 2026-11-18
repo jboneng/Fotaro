@@ -14,7 +14,7 @@ use eframe::egui;
 use imaging::SourceKind;
 use imaging::develop::{
     DevelopSettings, Region, ResolvedWb, SharpenView, Upright, WbPreset, WorkingImage, apply_upright,
-    auto_tone, render_mask, render_region_srgb8_view, straighten_angle,
+    auto_tone, find_source, render_mask, render_region_srgb8_view, straighten_angle,
 };
 
 use crate::jobs::Histogram;
@@ -24,6 +24,61 @@ use crate::jobs::Histogram;
 pub enum Slot {
     Current,
     Before,
+}
+
+/// The Remove tool's settings for new spots (kept while the app runs).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RemoveSettings {
+    pub mode: imaging::develop::SpotMode,
+    /// Size 1..100 (as the brush's), Feather and Opacity 0..100.
+    pub size: f32,
+    pub feather: f32,
+    pub opacity: f32,
+}
+
+impl Default for RemoveSettings {
+    fn default() -> Self {
+        RemoveSettings { mode: imaging::develop::SpotMode::Heal, size: 12.0, feather: 50.0, opacity: 100.0 }
+    }
+}
+
+/// The Size slider ↔ a spot's radius (half long sides), as the brush's: fine control for
+/// small spots.
+pub fn spot_radius(size: f32) -> f32 {
+    (size / 100.0).powi(2) * 0.5
+}
+
+pub fn spot_size(radius: f32) -> f32 {
+    ((radius / 0.5).max(0.0).sqrt() * 100.0).clamp(1.0, 100.0)
+}
+
+/// A drag with the Remove tool.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveDrag {
+    /// Painting a new brushed spot (its path so far, 0..1 of the photo).
+    Paint(Vec<[f32; 2]>),
+    /// Moving spot `index` (the source stays put), its source, or its size.
+    Spot {
+        index: usize,
+        grab: [f32; 2],
+        original: imaging::develop::Spot,
+    },
+    Source {
+        index: usize,
+        grab: [f32; 2],
+        original: imaging::develop::Spot,
+    },
+    Resize {
+        index: usize,
+        original: imaging::develop::Spot,
+    },
+}
+
+/// The Remove tool (Q): the selected spot and the drag in progress.
+#[derive(Debug, Clone, Default)]
+pub struct RemoveTool {
+    pub selected: Option<usize>,
+    pub drag: Option<RemoveDrag>,
 }
 
 /// What a drag on the photo does with the crop tool.
@@ -260,6 +315,11 @@ enum Adjust {
     AutoStraighten {
         constrain: bool,
     },
+    /// The Remove tool: find spot `index` a source (another one than now with `other`).
+    FindSource {
+        index: usize,
+        other: bool,
+    },
 }
 
 impl Adjust {
@@ -269,6 +329,8 @@ impl Adjust {
             Adjust::AutoTone => "Auto Settings".into(),
             Adjust::Upright(mode) => format!("Upright: {}", mode.label()),
             Adjust::AutoStraighten { .. } => "Auto Straighten".into(),
+            Adjust::FindSource { other: true, .. } => "Remove: New Source".into(),
+            Adjust::FindSource { .. } => "Remove: Spot".into(),
         }
     }
 }
@@ -483,6 +545,11 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 }
                 Adjust::AutoTone => Some(auto_tone(img, &settings)),
                 Adjust::Upright(mode) => Some(apply_upright(img, &settings, mode)),
+                Adjust::FindSource { index, other } => settings.spots.get(index).cloned().map(|spot| {
+                    let mut s = settings.clone();
+                    s.spots[index].offset = find_source(img, &spot, other.then_some(spot.offset));
+                    s
+                }),
                 Adjust::AutoStraighten { constrain } => {
                     let mut s = settings.clone();
                     s.transform.crop.angle = straighten_angle(img, &settings.transform);
@@ -608,6 +675,9 @@ pub struct DevelopState {
     pub crop_lock: bool,
     /// Constrain to Image: the crop never shows past the photo's edge.
     pub crop_constrain: bool,
+    /// The Remove tool (Q), when open, and its settings for new spots.
+    pub removing: Option<RemoveTool>,
+    pub remove: RemoveSettings,
     /// The mask overlay: what was last asked for, the newest shown, and its texture.
     overlay_sent: Option<(DevelopSettings, usize)>,
     overlay_seq: u64,
@@ -688,6 +758,8 @@ impl DevelopState {
             cropping: None,
             crop_lock: true,
             crop_constrain: true,
+            removing: None,
+            remove: RemoveSettings::default(),
             overlay_sent: None,
             overlay_seq: 0,
             overlay_shown: 0,
@@ -726,6 +798,7 @@ impl DevelopState {
         self.guide_drag = None;
         self.masking = None;
         self.cropping = None;
+        self.removing = None;
         self.overlay_sent = None;
         self.overlay = None;
         self.histogram = None;
@@ -1078,6 +1151,14 @@ impl DevelopState {
         let t = imaging::develop::Transform { crop: Default::default(), ..self.settings.transform.clone() };
         let (fw, fh) = t.output_size(w, h);
         Some(fw as f32 / fh.max(1) as f32)
+    }
+
+    /// The Remove tool: pick spot `index` a source from the photo (on the worker; saved as
+    /// a History step when it answers). `other`: a different one than now (the / key).
+    pub fn find_source(&mut self, index: usize, other: bool) {
+        let Some(photo_id) = self.photo else { return };
+        let op = Adjust::FindSource { index, other };
+        let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
     }
 
     /// Crop & Straighten's Auto: level the photo from its lines (on the worker).

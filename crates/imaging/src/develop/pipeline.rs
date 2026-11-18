@@ -16,6 +16,7 @@ use super::dehaze::{HazeMap, add_haze};
 use super::detail::{SharpenView, apply as apply_detail};
 use super::effects::{Effects, Grain, Vignette, VignetteStyle};
 use super::grading::Grading;
+use super::heal::healed;
 use super::hsl::{HslAdjust, oklab_to_srgb, srgb_to_oklab};
 use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
 use super::masks::{LocalAdjust, Mask, MaskField};
@@ -627,6 +628,9 @@ pub fn render_region_srgb8_view(
     region: Region,
     view: Option<SharpenView>,
 ) -> RgbImage {
+    // The Remove tool's spots first, on the photo's own pixels.
+    let spotless = healed(img, &s.spots);
+    let img: &WorkingImage = &spotless;
     let source = img;
     let geometry = transformed(img, &s.transform);
     let img: &WorkingImage = &geometry;
@@ -713,6 +717,9 @@ impl<'a> Finish<'a> {
 
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
 pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<Rgb<u16>, Vec<u16>> {
+    // The Remove tool's spots first, on the photo's own pixels.
+    let spotless = healed(img, &s.spots);
+    let img: &WorkingImage = &spotless;
     let source = img;
     let geometry = transformed(img, &s.transform);
     let img: &WorkingImage = &geometry;

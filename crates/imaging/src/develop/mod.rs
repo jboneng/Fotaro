@@ -6,6 +6,7 @@ mod dehaze;
 mod detail;
 mod effects;
 mod grading;
+mod heal;
 mod hsl;
 mod local;
 mod masks;
@@ -24,6 +25,7 @@ pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, T
 pub use detail::{Detail, DetailParam, SharpenView};
 pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
+pub use heal::{Spot, SpotMode, find_source};
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use masks::{CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke};
 pub use pipeline::{

@@ -147,3 +147,24 @@ pub fn crop(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
     painter.line_segment([center + vec2(a, b), center + vec2(a, -a)], s);
     painter.line_segment([center + vec2(a, -a), center + vec2(-b, -a)], s);
 }
+
+/// The Remove tool: a plaster (a rounded bar at an angle with a pad).
+pub fn remove(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let k = std::f32::consts::FRAC_1_SQRT_2;
+    let d = vec2(k, -k);
+    let n = vec2(k, k);
+    let corners = [
+        center + d * r - n * r * 0.38,
+        center + d * r + n * r * 0.38,
+        center - d * r + n * r * 0.38,
+        center - d * r - n * r * 0.38,
+    ];
+    painter.add(Shape::closed_line(corners.to_vec(), Stroke::new(1.4, color)));
+    let pad = [
+        center + d * r * 0.32 - n * r * 0.38,
+        center + d * r * 0.32 + n * r * 0.38,
+        center - d * r * 0.32 + n * r * 0.38,
+        center - d * r * 0.32 - n * r * 0.38,
+    ];
+    painter.add(Shape::convex_polygon(pad.to_vec(), color, Stroke::NONE));
+}

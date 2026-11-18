@@ -8,6 +8,7 @@ use image::{DynamicImage, ImageBuffer, Rgb, Rgb32FImage};
 use lcms2::{ColorSpaceSignature, PixelFormat, Profile};
 use rayon::prelude::*;
 
+use super::heal::HealCache;
 use super::masks::MaskCache;
 use super::matrix::{self, Mat3, Mat3f};
 use super::settings::{DevelopSettings, WbPreset};
@@ -58,6 +59,8 @@ pub struct WorkingImage {
     pub(super) warp_source: Option<Mapping>,
     /// Brush masks rasterized for this image (see [`super::masks`]).
     pub(super) mask_cache: MaskCache,
+    /// The photo with the Remove tool's spots healed (see [`super::heal`]).
+    pub(super) heal_cache: HealCache,
 }
 
 /// The resolved white balance: multipliers to apply and the Temp/Tint the panel shows.
@@ -78,6 +81,7 @@ impl WorkingImage {
             transform_cache: TransformCache::default(),
             warp_source: None,
             mask_cache: MaskCache::default(),
+            heal_cache: HealCache::default(),
         }
     }
 
@@ -133,6 +137,7 @@ impl WorkingImage {
             transform_cache: TransformCache::default(),
             warp_source: None,
             mask_cache: MaskCache::default(),
+            heal_cache: HealCache::default(),
         }
     }
 

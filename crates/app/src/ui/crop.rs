@@ -488,6 +488,7 @@ pub fn set_cropping(d: &mut DevelopState, on: bool) {
     d.cropping = on.then(CropTool::default);
     if on {
         d.masking = None;
+        d.removing = None;
         d.picking_wb = false;
         d.picking_detail = false;
     }

@@ -689,3 +689,21 @@ later as another component kind.
       frame the Transform shows). Constrain to Image keeps the crop on the photo (no white
       corners) while turning, resizing and moving. Enter or R closes it, Esc puts the
       Straighten tool away and then closes; Ctrl+Alt+R resets the crop.
+
+## Develop: Remove (Q): Heal and Clone
+- [x] LrC's spot removal without the AI mode (Content-Aware Remove comes with the
+      segmentation work). A click makes a round spot, a drag brushes one; each takes its
+      pixels from the same shape moved by an offset. The source is found automatically
+      nearby: candidates around the spot are scored by how well the ring around them
+      matches the ring around the spot (inside the photo, nearer preferred); / picks
+      another. Clone copies the source; Heal multiplies it by the ratio of the
+      destination's and the source's local average colour, both measured on the ring
+      only (a normalised convolution, so the blemish never counts), which matches it to
+      the surroundings. Spots are in the untransformed photo's coordinates and applied to
+      its own pixels first (cached until they change), so Transform, crop and masks follow.
+- [x] The tool: outlines for all spots, the selected one with its source and an arrow;
+      drag a spot (its source stays) or its source to move it, a round spot's edge to
+      resize; the wheel and [ ] size the selected spot (or new ones); Heal / Clone, Size,
+      Feather, Opacity for the selected spot or new ones; New Source, Delete, Reset; Q,
+      Esc, Delete, / keys. In the tool strip between Crop and Masking.
+- [ ] Later: Visualize Spots (A), Content-Aware Remove (AI).

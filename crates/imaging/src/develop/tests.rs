@@ -799,3 +799,37 @@ fn auto_straighten_levels_a_tilted_photo() {
     let angle = straighten_angle(&tilted, &Transform::default());
     assert!((angle + 4.0).abs() < 0.5, "{angle}");
 }
+
+#[test]
+fn spots_heal_in_renders_and_regions_still_match() {
+    // Mid grey with a dark dust spot at (40, 30).
+    let img: RgbImage = ImageBuffer::from_fn(120, 80, |x, y| {
+        if (x as f32 - 40.0).hypot(y as f32 - 30.0) < 3.0 { Rgb([20, 20, 20]) } else { Rgb([128, 128, 128]) }
+    });
+    let w = rendered(&img);
+    let spot = Spot {
+        points: vec![[40.0 / 120.0, 30.0 / 80.0]],
+        size: 0.1,
+        offset: find_source(
+            &w,
+            &Spot { points: vec![[40.0 / 120.0, 30.0 / 80.0]], size: 0.1, ..Spot::default() },
+            None,
+        ),
+        ..Spot::default()
+    };
+    let s = DevelopSettings { spots: vec![spot], ..Default::default() };
+    let out = render_srgb8(&w, &s);
+    assert!(out.get_pixel(40, 30)[0].abs_diff(128) <= 3, "{:?}", out.get_pixel(40, 30));
+    // With a crop on top, a region matches the whole render.
+    let cropped = DevelopSettings {
+        transform: Transform {
+            crop: Crop { left: 0.1, right: 0.9, angle: 3.0, ..Crop::default() },
+            ..Default::default()
+        },
+        ..s.clone()
+    };
+    let whole = render_srgb8(&w, &cropped);
+    let part = render_region_srgb8(&w, &cropped, Region { x: 20, y: 10, w: 40, h: 40 });
+    assert!((0..40).all(|y| (0..40).all(|x| part.get_pixel(x, y) == whole.get_pixel(x + 20, y + 10))));
+    assert_eq!(s.describe_change(&DevelopSettings::default(), false), "Remove: Heal");
+}
