@@ -2,6 +2,8 @@
 
 mod collections;
 mod develop;
+mod masking;
+pub use masking::{delete_selected, new_mask_tool, set_masking};
 pub mod edit_in;
 pub mod export;
 mod filter_bar;

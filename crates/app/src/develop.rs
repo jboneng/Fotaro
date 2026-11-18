@@ -14,7 +14,7 @@ use eframe::egui;
 use imaging::SourceKind;
 use imaging::develop::{
     DevelopSettings, Region, ResolvedWb, SharpenView, Upright, WbPreset, WorkingImage, apply_upright,
-    auto_tone, render_region_srgb8_view,
+    auto_tone, render_mask, render_region_srgb8_view,
 };
 
 use crate::jobs::Histogram;
@@ -24,6 +24,132 @@ use crate::jobs::Histogram;
 pub enum Slot {
     Current,
     Before,
+}
+
+/// The shapes a mask component can have (the tools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeKind {
+    Brush,
+    Linear,
+    Radial,
+}
+
+impl ShapeKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            ShapeKind::Brush => "Brush",
+            ShapeKind::Linear => "Linear Gradient",
+            ShapeKind::Radial => "Radial Gradient",
+        }
+    }
+}
+
+/// Where a shape drawn with a tool goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolTarget {
+    NewMask,
+    /// A new component of the selected mask.
+    Component(imaging::develop::CombineMode),
+}
+
+/// A tool waiting for a drag on the photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaskTool {
+    pub kind: ShapeKind,
+    pub target: ToolTarget,
+}
+
+/// What part of a shape a drag moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Handle {
+    /// The pin or the inside: move the whole shape.
+    Move,
+    /// A linear gradient's start or end line.
+    Start,
+    End,
+    /// A radial gradient's radius along its own x or y axis.
+    RadiusX,
+    RadiusY,
+    /// Turn the shape around its centre.
+    Rotate,
+}
+
+/// A drag on the photo while masking.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MaskDrag {
+    /// Moving a handle of the selected component, from `grab`, starting from `original`.
+    Edit { handle: Handle, grab: [f32; 2], original: imaging::develop::Shape },
+    /// Painting (or erasing) a brush stroke into the selected component.
+    Paint,
+}
+
+/// The brush's settings (kept while the app runs, as LrC keeps them).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushSettings {
+    /// Size 1..100 (a radius from a few pixels to half the photo), Feather, Flow, Density 0..100.
+    pub size: f32,
+    pub feather: f32,
+    pub flow: f32,
+    pub density: f32,
+    /// Paint erases (also while Alt is held).
+    pub erase: bool,
+}
+
+impl Default for BrushSettings {
+    fn default() -> Self {
+        BrushSettings { size: 15.0, feather: 50.0, flow: 100.0, density: 100.0, erase: false }
+    }
+}
+
+impl BrushSettings {
+    /// The brush radius in half long sides of the photo (as strokes store it): size 10
+    /// is 0.5%, 50 is 12.5%, 100 is half the long side.
+    pub fn radius(&self) -> f32 {
+        (self.size / 100.0).powi(2) * 0.5
+    }
+
+    /// `[` / `]`: about a sixth smaller or larger.
+    pub fn step_size(&mut self, dir: i8) {
+        // At least one step either way (small sizes would round back to themselves).
+        let next = if dir < 0 {
+            (self.size / 1.18).round().min(self.size - 1.0)
+        } else {
+            (self.size * 1.18).round().max(self.size + 1.0)
+        };
+        self.size = next.clamp(1.0, 100.0);
+    }
+
+    /// The mouse wheel: `dy` points scrolled (up is positive): larger going up, about a
+    /// tenth per wheel notch, smoothly for trackpads.
+    pub fn scroll_size(&mut self, dy: f32) {
+        self.size = (self.size * (dy / 300.0).exp2()).clamp(1.0, 100.0);
+    }
+
+    /// Shift+[ / Shift+]: feather in steps of 10.
+    pub fn step_feather(&mut self, dir: i8) {
+        self.feather = (self.feather + 10.0 * f32::from(dir.signum())).clamp(0.0, 100.0);
+    }
+}
+
+/// Masking mode (Shift+W): what is selected and what the photo does with drags.
+#[derive(Debug, Clone, Default)]
+pub struct Masking {
+    /// The mask being edited, and its component.
+    pub selected: Option<usize>,
+    pub component: usize,
+    pub tool: Option<MaskTool>,
+    /// O: show the selected mask as a red overlay.
+    pub overlay: bool,
+    /// A mask hovered in the Masks panel (its overlay shows meanwhile).
+    pub hover: Option<usize>,
+    pub drag: Option<MaskDrag>,
+}
+
+impl Masking {
+    /// The mask whose overlay to show, if any.
+    pub fn overlay_mask(&self) -> Option<usize> {
+        self.hover.or(self.selected.filter(|_| self.overlay))
+    }
 }
 
 /// Upright Guided: what a drag on the photo is doing.
@@ -66,6 +192,8 @@ enum Request {
     Region { photo_id: i64, target: RegionTarget, view: RegionView, seq: u64 },
     /// Settings computed from the pixels.
     Adjust { photo_id: i64, op: Adjust, settings: DevelopSettings },
+    /// A mask's values over the proxy, for the red overlay.
+    Overlay { photo_id: i64, settings: DevelopSettings, index: usize, seq: u64 },
 }
 
 /// What a full-resolution region render shows.
@@ -126,6 +254,11 @@ enum Reply {
         photo_id: i64,
         op: Adjust,
         settings: Option<DevelopSettings>,
+    },
+    Overlay {
+        photo_id: i64,
+        seq: u64,
+        image: egui::ColorImage,
     },
     Failed {
         photo_id: i64,
@@ -201,6 +334,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     // another batch than) the load it needs.
     let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, Option<SharpenView>, u64)> = HashMap::new();
     let mut adjusts: Vec<(i64, Adjust, DevelopSettings)> = Vec::new();
+    let mut overlay: Option<(i64, DevelopSettings, usize, u64)> = None;
     loop {
         let first = crossbeam_channel::select! {
             recv(rx) -> req => match req {
@@ -235,6 +369,9 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                     pending_regions.insert(target, (photo_id, view, seq));
                 }
                 Request::Adjust { photo_id, op, settings } => adjusts.push((photo_id, op, settings)),
+                Request::Overlay { photo_id, settings, index, seq } => {
+                    overlay = Some((photo_id, settings, index, seq))
+                }
             }
         }
         if let Some((photo_id, path, kind, max_px)) = load {
@@ -272,6 +409,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         let wanted = source.as_ref().map(|s| s.0);
         renders.retain(|_, r| Some(r.0) == wanted);
         adjusts.retain(|a| Some(a.0) == wanted);
+        overlay = overlay.filter(|o| Some(o.0) == wanted);
         let Some((id, img)) = &current else {
             ctx.request_repaint();
             continue;
@@ -303,6 +441,15 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 Adjust::Upright(mode) => Some(apply_upright(img, &settings, mode)),
             };
             let _ = tx.send(Reply::Adjusted { photo_id, op, settings });
+        }
+        // The mask overlay, after the render it goes over.
+        if let Some((photo_id, settings, index, seq)) = overlay.take_if(|o| o.0 == *id)
+            && let Some(mask) = render_mask(img, &settings, index)
+        {
+            let (w, h) = (mask.width() as usize, mask.height() as usize);
+            let rgba: Vec<u8> = mask.as_raw().iter().flat_map(|v| [255, 40, 40, v / 2]).collect();
+            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            let _ = tx.send(Reply::Overlay { photo_id, seq, image });
         }
         // 1:1: render the regions from the full-size image, loading that first.
         for target in [RegionTarget::DetailBox, RegionTarget::Zoom] {
@@ -397,6 +544,14 @@ pub struct DevelopState {
     pub picking_detail: bool,
     /// A Transform slider is being dragged: show a grid over the photo.
     pub transform_grid: bool,
+    /// Masking mode (Shift+W), when on.
+    pub masking: Option<Masking>,
+    pub brush: BrushSettings,
+    /// The mask overlay: what was last asked for, the newest shown, and its texture.
+    overlay_sent: Option<(DevelopSettings, usize)>,
+    overlay_seq: u64,
+    overlay_shown: u64,
+    pub overlay: Option<egui::TextureHandle>,
     /// Upright Guided: the guide being drawn or moved on the photo.
     pub guide_drag: Option<GuideDrag>,
     /// When the shown settings last changed (regions wait until they settle).
@@ -467,6 +622,12 @@ impl DevelopState {
             detail_focus: (0.5, 0.5),
             picking_detail: false,
             transform_grid: false,
+            masking: None,
+            brush: BrushSettings::default(),
+            overlay_sent: None,
+            overlay_seq: 0,
+            overlay_shown: 0,
+            overlay: None,
             guide_drag: None,
             changed_at: std::time::Instant::now(),
             clipboard: None,
@@ -499,6 +660,9 @@ impl DevelopState {
         self.detail_focus = (0.5, 0.5);
         self.picking_detail = false;
         self.guide_drag = None;
+        self.masking = None;
+        self.overlay_sent = None;
+        self.overlay = None;
         self.histogram = None;
         self.wb = None;
         self.error = None;
@@ -581,6 +745,23 @@ impl DevelopState {
             self.sent.insert(slot, (settings.clone(), clipping, view, self.seq));
             let _ = self.tx.send(Request::Render { photo_id, slot, settings, clipping, view, seq: self.seq });
         }
+        // The mask overlay (masking with O on, or a mask hovered in the Masks panel).
+        match self.masking.as_ref().and_then(Masking::overlay_mask).filter(|_| !self.before) {
+            Some(index) => {
+                let want = (self.settings.clone(), index);
+                if self.overlay_sent.as_ref() != Some(&want) {
+                    self.overlay_seq += 1;
+                    let settings = want.0.clone();
+                    let _ =
+                        self.tx.send(Request::Overlay { photo_id, settings, index, seq: self.overlay_seq });
+                    self.overlay_sent = Some(want);
+                }
+            }
+            None => {
+                self.overlay_sent = None;
+                self.overlay = None;
+            }
+        }
     }
 
     /// Is a render of newer settings still on its way?
@@ -649,6 +830,17 @@ impl DevelopState {
                             let name = format!("develop_region_{target:?}");
                             r.shown = Some((view, ctx.load_texture(name, image, opts)));
                         }
+                    }
+                }
+                Reply::Overlay { photo_id, seq, image } if Some(photo_id) == self.photo => {
+                    if seq < self.overlay_shown || self.overlay_sent.is_none() {
+                        continue;
+                    }
+                    self.overlay_shown = seq;
+                    let opts = egui::TextureOptions::LINEAR;
+                    match &mut self.overlay {
+                        Some(t) if t.size() == image.size => t.set(image, opts),
+                        _ => self.overlay = Some(ctx.load_texture("develop_mask_overlay", image, opts)),
                     }
                 }
                 Reply::Failed { photo_id, error } if Some(photo_id) == self.photo => {

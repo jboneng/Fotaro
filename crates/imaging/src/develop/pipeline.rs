@@ -18,10 +18,12 @@ use super::effects::{Effects, Grain, Vignette, VignetteStyle};
 use super::grading::Grading;
 use super::hsl::{HslAdjust, oklab_to_srgb, srgb_to_oklab};
 use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
+use super::masks::{LocalAdjust, Mask, MaskField};
 use super::matrix::{self, Mat3f};
 use super::settings::{DevelopSettings, Treatment};
 use super::source::{SourceColor, WorkingImage};
 use super::transform::transformed;
+use super::wb::relative_multipliers;
 
 /// Extra exposure for scene-referred (RAW) data: cameras keep highlight headroom, so a
 /// straight linear render looks dark next to their JPEGs.
@@ -172,6 +174,8 @@ struct Prepared {
     haze: Option<HazeMap>,
     /// Post-Crop Vignetting, when on.
     vignette: Option<Vignette>,
+    /// Masks' local adjustments, when any mask changes something.
+    locals: Option<Locals>,
 }
 
 impl Prepared {
@@ -219,6 +223,7 @@ impl Prepared {
             dehaze: s.dehaze / 100.0,
             haze: None,
             vignette: Vignette::new(&s.effects, img.width(), img.height()),
+            locals: None,
         };
         if prep.dehaze != 0.0 {
             let (w, h) = (img.width() as usize, img.height() as usize);
@@ -344,6 +349,11 @@ impl Prepared {
     #[inline]
     fn pixel(&self, p: [f32; 3], x: usize, y: usize) -> [f32; 3] {
         let mut lin = self.linear(p);
+        // Masks: how much of each active mask applies here.
+        let masks = self.locals.as_ref().map(|l| (l, l.field.at(x, y)));
+        if let Some((l, ms)) = masks {
+            lin = l.white_balance(lin, ms);
+        }
         if let Some(haze) = &self.haze {
             lin = if self.dehaze > 0.0 {
                 haze.clear(lin, x, y)
@@ -364,11 +374,18 @@ impl Prepared {
             }
             _ => g,
         };
+        let g = match masks {
+            Some((l, ms)) => g * l.exposure(ms),
+            None => g,
+        };
         let mut d = [
             lookup(&self.luts[0], lin[0] * g),
             lookup(&self.luts[1], lin[1] * g),
             lookup(&self.luts[2], lin[2] * g),
         ];
+        if let Some((l, ms)) = masks {
+            d = l.tone(d, ms, &self.luma);
+        }
         // HSL in colour; in Black & White the B&W Mix decides how light each colour turns.
         if let Some(hsl) = &self.hsl
             && !self.bw
@@ -390,6 +407,11 @@ impl Prepared {
             let f = (1.0 + v) * (1.0 + self.saturation);
             d = d.map(|c| (luma + (c - luma) * f).max(0.0));
         }
+        if let Some((l, ms)) = masks
+            && !self.bw
+        {
+            d = l.color(d, ms);
+        }
         // Color Grading, so it also tones black & white photos (split toning); then the
         // vignette's after-tone styles.
         if let Some(g) = &self.grading {
@@ -399,6 +421,139 @@ impl Prepared {
             Some(v) => v.after_tone(d, x, y),
             None => d,
         }
+    }
+}
+
+impl Prepared {
+    /// Add the masks' local adjustments (`field`: the active masks' values over the
+    /// region being rendered).
+    fn with_masks(mut self, field: Option<MaskField>, masks: &[Mask]) -> Prepared {
+        self.locals = field.map(|field| Locals::new(field, masks));
+        self
+    }
+}
+
+/// Entries of a mask's tone table (indexed by √ of display-linear luminance).
+const LOCAL_LUT: usize = 1024;
+
+/// One mask's local adjustments, ready to apply.
+struct LocalParams {
+    /// Temp / Tint as channel gains.
+    wb: Option<[f32; 3]>,
+    /// Exposure, stops.
+    ev: f32,
+    /// Contrast, Highlights, Shadows, Whites, Blacks: output / input luminance by input.
+    tone: Option<Vec<f32>>,
+    /// Saturation (−1..+1) and Hue (radians).
+    saturation: f32,
+    hue: f32,
+}
+
+impl LocalParams {
+    fn new(a: &LocalAdjust) -> LocalParams {
+        let tone_on = [a.contrast, a.highlights, a.shadows, a.whites, a.blacks].iter().any(|v| *v != 0.0);
+        let tone = tone_on.then(|| {
+            let tp = ToneParams {
+                contrast: (a.contrast / 100.0).clamp(-1.0, 1.0),
+                whites: a.whites / 100.0,
+                blacks: a.blacks / 100.0,
+                shoulder: 1.0,
+            };
+            let (hl, sh) = (a.highlights / 100.0, a.shadows / 100.0);
+            (0..LOCAL_LUT)
+                .map(|i| {
+                    let s = i as f32 / (LOCAL_LUT - 1) as f32;
+                    let y = (s * s).max(1e-5);
+                    // Highlights / Shadows bend the tones by brightness, then the curve.
+                    let y1 = y * tone_gain((y / MIDDLE_GREY).log2(), hl, sh).exp2();
+                    tone(y1, &tp) / y
+                })
+                .collect()
+        });
+        LocalParams {
+            wb: (a.temp != 0.0 || a.tint != 0.0).then(|| relative_multipliers(a.temp, a.tint)),
+            ev: a.exposure,
+            tone,
+            saturation: a.saturation / 100.0,
+            hue: a.hue.to_radians(),
+        }
+    }
+}
+
+/// The masks' local adjustments for a render.
+struct Locals {
+    field: MaskField,
+    params: Vec<LocalParams>,
+    to_srgb: Mat3f,
+    to_work: Mat3f,
+}
+
+impl Locals {
+    fn new(field: MaskField, masks: &[Mask]) -> Locals {
+        let params = field.active.iter().map(|&i| LocalParams::new(&masks[i].adjust)).collect();
+        Locals {
+            field,
+            params,
+            to_srgb: matrix::to_f32(&matrix::work_to_srgb()),
+            to_work: matrix::to_f32(&matrix::srgb_to_work()),
+        }
+    }
+
+    /// The masks that apply at a pixel, with their values.
+    #[inline]
+    fn applying<'a>(&'a self, ms: &'a [f32]) -> impl Iterator<Item = (f32, &'a LocalParams)> {
+        ms.iter().zip(&self.params).filter(|(m, _)| **m > 0.0).map(|(m, p)| (*m, p))
+    }
+
+    /// Temp / Tint, on scene-linear values.
+    #[inline]
+    fn white_balance(&self, mut lin: [f32; 3], ms: &[f32]) -> [f32; 3] {
+        for (m, p) in self.applying(ms) {
+            if let Some(g) = p.wb {
+                lin = std::array::from_fn(|c| lin[c] * (1.0 + m * (g[c] - 1.0)));
+            }
+        }
+        lin
+    }
+
+    /// Exposure, as a gain.
+    #[inline]
+    fn exposure(&self, ms: &[f32]) -> f32 {
+        let stops: f32 = self.applying(ms).map(|(m, p)| m * p.ev).sum();
+        if stops == 0.0 { 1.0 } else { fast_exp2(stops) }
+    }
+
+    /// Contrast, Highlights, Shadows, Whites, Blacks: on display-linear values, through
+    /// luminance (keeping hues).
+    #[inline]
+    fn tone(&self, mut d: [f32; 3], ms: &[f32], luma: &[f32; 3]) -> [f32; 3] {
+        for (m, p) in self.applying(ms) {
+            let Some(lut) = &p.tone else { continue };
+            let y = (luma[0] * d[0] + luma[1] * d[1] + luma[2] * d[2]).max(0.0);
+            let f = (y.sqrt() * (LOCAL_LUT - 1) as f32).min((LOCAL_LUT - 1) as f32);
+            let i = (f as usize).min(LOCAL_LUT - 2);
+            let ratio = lut[i] + (f - i as f32) * (lut[i + 1] - lut[i]);
+            let k = 1.0 + m * (ratio - 1.0);
+            d = d.map(|c| c * k);
+        }
+        d
+    }
+
+    /// Saturation and Hue, in Oklab.
+    #[inline]
+    fn color(&self, d: [f32; 3], ms: &[f32]) -> [f32; 3] {
+        let (mut sat, mut hue) = (1.0f32, 0.0f32);
+        for (m, p) in self.applying(ms) {
+            sat *= (1.0 + m * p.saturation).max(0.0);
+            hue += m * p.hue;
+        }
+        if sat == 1.0 && hue == 0.0 {
+            return d;
+        }
+        let [l, a, b] = srgb_to_oklab(matrix::apply(&self.to_srgb, d));
+        let (cos, sin) = (hue.cos(), hue.sin());
+        let (a, b) = ((a * cos - b * sin) * sat, (a * sin + b * cos) * sat);
+        matrix::apply(&self.to_work, oklab_to_srgb([l, a, b])).map(|v| v.max(0.0))
     }
 }
 
@@ -472,6 +627,7 @@ pub fn render_region_srgb8_view(
     region: Region,
     view: Option<SharpenView>,
 ) -> RgbImage {
+    let source = img;
     let geometry = transformed(img, &s.transform);
     let img: &WorkingImage = &geometry;
     let region = region.clipped(img);
@@ -481,7 +637,7 @@ pub fn render_region_srgb8_view(
     let finish = Finish::new(img, s, view.is_none());
     let (rx, ry) = (region.x as usize, region.y as usize);
     if s.detail.is_active() || view.is_some() {
-        let detailed = Detailed::render(img, s, region, view);
+        let detailed = Detailed::render(source, img, s, region, view);
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 *o = finish.apply(detailed.srgb(i, j), rx + i, ry + j).map(|v| enc.encode(v));
@@ -489,12 +645,32 @@ pub fn render_region_srgb8_view(
         });
         return out;
     }
-    let prep = Prepared::new(img, s, region);
+    let prep =
+        Prepared::new(img, s, region).with_masks(MaskField::build(source, img, &s.masks, region), &s.masks);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         let l = finish.apply(matrix::apply(&to_srgb, prep.pixel(p, x, y)), x, y);
         o.copy_from_slice(&l.map(|v| enc.encode(v)));
     });
     out
+}
+
+/// Mask `index`'s values over the developed photo (the size `render_srgb8` makes it), as
+/// 0..255: the red overlay of the mask being edited. `None` if there is no such mask or it
+/// has no components.
+pub fn render_mask(img: &WorkingImage, s: &DevelopSettings, index: usize) -> Option<image::GrayImage> {
+    let mask = s.masks.get(index)?;
+    if mask.components.is_empty() {
+        return None;
+    }
+    // The overlay shows the mask's shape whatever its Amount or visibility.
+    let mut masks = s.masks.clone();
+    masks[index].amount = 100.0;
+    let geometry = transformed(img, &s.transform);
+    let shown: &WorkingImage = &geometry;
+    let region = Region::whole(shown);
+    let field = MaskField::build_for(img, shown, &masks, vec![index], region)?;
+    let values = field.plane(0);
+    image::GrayImage::from_raw(region.w, region.h, values.iter().map(|v| (v * 255.0).round() as u8).collect())
 }
 
 /// Rendered pixels per full-size pixel (Detail and Grain are sized in full-size pixels).
@@ -537,6 +713,7 @@ impl<'a> Finish<'a> {
 
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
 pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<Rgb<u16>, Vec<u16>> {
+    let source = img;
     let geometry = transformed(img, &s.transform);
     let img: &WorkingImage = &geometry;
     let region = Region::whole(img);
@@ -544,7 +721,7 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
     let to_u16 = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
     let finish = Finish::new(img, s, true);
     if s.detail.is_active() {
-        let detailed = Detailed::render(img, s, region, None);
+        let detailed = Detailed::render(source, img, s, region, None);
         let to_work = matrix::to_f32(&matrix::srgb_to_work());
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
@@ -553,7 +730,8 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
         });
         return out;
     }
-    let prep = Prepared::new(img, s, region);
+    let prep =
+        Prepared::new(img, s, region).with_masks(MaskField::build(source, img, &s.masks, region), &s.masks);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         o.copy_from_slice(&finish.apply(prep.pixel(p, x, y), x, y).map(to_u16));
     });
@@ -572,6 +750,7 @@ struct Detailed {
 
 impl Detailed {
     fn render(
+        source: &WorkingImage,
         img: &WorkingImage,
         s: &DevelopSettings,
         region: Region,
@@ -588,7 +767,8 @@ impl Detailed {
             w: (region.x + region.w + m).min(img.width()) - x0,
             h: (region.y + region.h + m).min(img.height()) - y0,
         };
-        let prep = Prepared::new(img, s, area);
+        let prep =
+            Prepared::new(img, s, area).with_masks(MaskField::build(source, img, &s.masks, area), &s.masks);
         let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
         let (aw, ah, w) = (area.w as usize, area.h as usize, img.width() as usize);
         let mut planes: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; aw * ah]);

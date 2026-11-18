@@ -1320,7 +1320,10 @@ impl PhotoLibraryApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             }
             Action::Escape => {
-                if self.fullscreen {
+                if egui::Popup::is_any_open(ctx) {
+                    // Esc closes the open menu and nothing else.
+                    egui::Popup::close_all(ctx);
+                } else if self.fullscreen {
                     self.fullscreen = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                 } else if self.lights != Lights::On {
@@ -1329,6 +1332,13 @@ impl PhotoLibraryApp {
                     if let Some(s) = &mut self.session {
                         s.develop.picking_wb = false;
                         s.develop.picking_detail = false;
+                        // Masking: Esc drops the tool, then leaves masking.
+                        let d = &mut s.develop;
+                        match &mut d.masking {
+                            Some(m) if m.tool.is_some() => m.tool = None,
+                            Some(_) => crate::ui::set_masking(d, false),
+                            None => {}
+                        }
                     }
                 } else {
                     self.view = View::Grid;
@@ -1564,6 +1574,17 @@ impl PhotoLibraryApp {
                     Err(e) => self.error = Some(format!("{e:#}")),
                 }
             }
+            // Delete while masking: the selected mask component.
+            Action::RemoveFromCollection
+                if self.module == Module::Develop
+                    && self.session.as_ref().is_some_and(|s| s.develop.masking.is_some()) =>
+            {
+                if let Some(s) = &mut self.session
+                    && crate::ui::delete_selected(&mut s.develop)
+                {
+                    self.develop_op(|d, c| d.commit(c, None));
+                }
+            }
             Action::RemoveFromCollection => {
                 let view = self.view;
                 let Some(s) = &mut self.session else { return };
@@ -1617,6 +1638,13 @@ impl PhotoLibraryApp {
             | Action::AutoWhiteBalance
             | Action::WhiteBalanceSelector
             | Action::ClippingIndicators
+            | Action::Masking
+            | Action::NewBrushMask
+            | Action::BrushSize(_)
+            | Action::BrushFeather(_)
+            | Action::NewLinearMask
+            | Action::NewRadialMask
+            | Action::MaskOverlay
             | Action::ResetSettings
             | Action::CopySettings
             | Action::PasteSettings
@@ -1916,6 +1944,7 @@ impl PhotoLibraryApp {
             d.picking_wb = false;
             d.picking_detail = false;
             d.set_sharpen_view(None);
+            d.masking = None;
             d.commit(catalog, None)
         });
     }
@@ -1932,6 +1961,18 @@ impl PhotoLibraryApp {
             }
             Action::AutoTone => d.auto_tone(),
             Action::ClippingIndicators => d.set_clipping(!d.clipping),
+            Action::Masking => crate::ui::set_masking(d, d.masking.is_none()),
+            Action::NewBrushMask => crate::ui::new_mask_tool(d, crate::develop::ShapeKind::Brush),
+            Action::BrushSize(dir) => d.brush.step_size(dir),
+            Action::BrushFeather(dir) => d.brush.step_feather(dir),
+            Action::NewLinearMask => crate::ui::new_mask_tool(d, crate::develop::ShapeKind::Linear),
+            Action::NewRadialMask => crate::ui::new_mask_tool(d, crate::develop::ShapeKind::Radial),
+            Action::MaskOverlay => {
+                if let Some(m) = &mut d.masking {
+                    m.overlay = !m.overlay;
+                }
+                d.request_renders();
+            }
             Action::CopySettings => {
                 d.clipboard = Some(d.settings.clone());
                 self.notify("Copied settings");

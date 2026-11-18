@@ -638,3 +638,87 @@ fn constrain_crop_removes_the_white_and_upright_straightens_a_leaning_frame() {
     let part = render_region_srgb8(&src, &cropped, Region { x: 10, y: 10, w: 40, h: 30 });
     assert_eq!(part.get_pixel(5, 5), out.get_pixel(15, 15));
 }
+
+fn radial(center: [f32; 2], r: f32, exposure: f32) -> Mask {
+    let mut m = Mask::new("Mask 1", Shape::Radial { center, radii: [r, r], angle: 0.0, feather: 0.0 });
+    m.adjust.exposure = exposure;
+    m
+}
+
+#[test]
+fn masked_exposure_stays_inside_and_regions_still_match() {
+    let img: RgbImage = ImageBuffer::from_fn(120, 80, |x, y| {
+        let v = 90 + ((x * 7 + y * 3) % 11) as u8;
+        Rgb([v, v, v - 10])
+    });
+    let w = rendered(&img);
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    let s = DevelopSettings { masks: vec![radial([0.25, 0.5], 0.15, 1.0)], ..Default::default() };
+    let out = render_srgb8(&w, &s);
+    // Inside (30, 40): brighter; far outside (100, 40): unchanged.
+    assert!(out.get_pixel(30, 40)[1] > plain.get_pixel(30, 40)[1] + 30);
+    assert_eq!(out.get_pixel(100, 40), plain.get_pixel(100, 40));
+    // A hidden mask, or one at Amount 0, does nothing.
+    let mut hidden = s.clone();
+    hidden.masks[0].visible = false;
+    assert_eq!(render_srgb8(&w, &hidden), plain);
+
+    // Every local slider of stage 1 changes the inside; a region matches the whole render
+    // (with Detail on, too).
+    let mut all = s.clone();
+    let a = &mut all.masks[0].adjust;
+    (a.temp, a.tint, a.contrast, a.highlights, a.shadows, a.whites, a.blacks) =
+        (30.0, -20.0, 40.0, -30.0, 30.0, 20.0, -20.0);
+    (a.saturation, a.hue) = (-50.0, 40.0);
+    all.detail.sharpen_amount = 40.0;
+    let whole = render_srgb8(&w, &all);
+    let part = render_region_srgb8(&w, &all, Region { x: 10, y: 20, w: 50, h: 40 });
+    for y in 0..40 {
+        for x in 0..50 {
+            let (p, q) = (part.get_pixel(x, y), whole.get_pixel(x + 10, y + 20));
+            assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+        }
+    }
+}
+
+#[test]
+fn masks_follow_the_photo_through_transform_and_crop() {
+    let img: RgbImage = ImageBuffer::from_pixel(120, 80, Rgb([100, 100, 100]));
+    let w = rendered(&img);
+    let transform = Transform { x_offset: 40.0, rotate: 3.0, constrain_crop: true, ..Default::default() };
+    let s = DevelopSettings { masks: vec![radial([0.3, 0.5], 0.08, 1.5)], transform, ..Default::default() };
+    let out = render_srgb8(&w, &s);
+    let (ow, oh) = out.dimensions();
+    // Where the mask's centre is shown now: bright; where it was before the transform: not.
+    let (x, y) = s.transform.output_point(0.3, 0.5, 120, 80).unwrap();
+    let at = |u: f32, v: f32| out.get_pixel((u * ow as f32) as u32, (v * oh as f32) as u32)[1];
+    assert!(at(x, y) > 150, "{}", at(x, y));
+    assert!(at(0.3, 0.5) < 120, "{}", at(0.3, 0.5));
+    // The overlay is the mask, at the developed size.
+    let overlay = render_mask(&w, &s, 0).unwrap();
+    assert_eq!(overlay.dimensions(), (ow, oh));
+    assert_eq!(overlay.get_pixel((x * ow as f32) as u32, (y * oh as f32) as u32)[0], 255);
+    assert!(render_mask(&w, &s, 1).is_none());
+}
+
+#[test]
+fn settings_without_masks_still_load_and_masks_are_named_in_history() {
+    let old = r#"{"process_version":1,"exposure":0.5}"#;
+    let s = DevelopSettings::from_json(old).unwrap();
+    assert!(s.masks.is_empty());
+    assert_eq!(s.stable_hash(), DevelopSettings { exposure: 0.5, ..Default::default() }.stable_hash());
+    let with = DevelopSettings { masks: vec![radial([0.5, 0.5], 0.2, 0.0)], ..s.clone() };
+    assert_eq!(with.describe_change(&s, false), "Add Radial Gradient Mask");
+    let mut brighter = with.clone();
+    brighter.masks[0].adjust.exposure = 0.5;
+    assert_eq!(brighter.describe_change(&with, false), "Mask 1: Exposure +0.50");
+    assert_ne!(brighter.stable_hash(), with.stable_hash());
+    let mut sub = brighter.clone();
+    sub.masks[0].components.push(Component {
+        mode: CombineMode::Subtract,
+        invert: false,
+        shape: Shape::Linear { start: [0.0, 0.0], end: [0.0, 0.5] },
+    });
+    assert_eq!(sub.describe_change(&brighter, false), "Subtract Linear Gradient");
+    assert_eq!(s.describe_change(&sub, false), "Delete Mask 1");
+}

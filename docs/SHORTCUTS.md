@@ -146,6 +146,15 @@ Shortcuts work in both modules unless marked (Library) or listed under Develop.
 | `Ctrl+Shift+U` | Auto White Balance | ✅ |
 | `W` | White Balance Selector (click a neutral area) | ✅ |
 | `J` | Show clipping (shadows blue, highlights red) | ✅ |
+| `Shift+W` | Masking: open / close | ✅ |
+| `K` | New Brush mask (paint on the photo; Alt erases) | ✅ |
+| `M` | New Linear Gradient mask (drag on the photo) | ✅ |
+| `Shift+M` | New Radial Gradient mask (drag on the photo) | ✅ |
+| `O` | Masking: show / hide the overlay | ✅ |
+| `[` | Brush: smaller | ✅ |
+| `]` | Brush: larger | ✅ |
+| `{` | Brush: less feather (Shift+[) | ✅ |
+| `}` | Brush: more feather (Shift+]) | ✅ |
 | `Ctrl+Shift+R` | Reset all settings | ✅ |
 | `Ctrl+Shift+C` | Copy settings | ✅ |
 | `Ctrl+Shift+V` | Paste settings | ✅ |

@@ -638,3 +638,38 @@ All nine steps of the Basic panel plan are done.
       can build on it.
 - [x] Fix found on the way: sliders with one decimal (Detail's Radius) rounded to whole
       numbers; they now step by their own precision.
+
+## Design: Masking (Brush, Linear Gradient, Radial Gradient)
+Local adjustments as in LrC's Masks; AI masks (sky, subject from a segmentation model) come
+later as another component kind.
+- A mask has components combined in order (the first adds; then Add / Subtract /
+  Intersect, each invertible), an Amount, visibility, and LrC's local sliders (Temp, Tint,
+  Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Texture, Clarity, Dehaze, Hue,
+  Saturation, Sharpness, Noise, Color). Stored in the settings JSON (`masks`); shapes in the
+  untransformed photo's coordinates, so masks follow Transform and Constrain Crop.
+- Rendering: per render, every active mask's value per output pixel (output → source
+  through the Transform's mapping): linear and radial analytically, brushes as dabs along
+  each stroke rasterized in source pixels (cached with the source image by strokes and
+  area). The local sliders act inside the per-pixel pipeline at the matching step.
+- UI (decided with the user): a floating Masks panel over the photo as in LrC; the right
+  panel shows the selected mask's sliders while masking. Shift+W, K, M, Shift+M, O, [ ].
+
+### Steps
+1. [x] Engine: masks, components, brush rasterizing, mask values per pixel; local Temp,
+   Tint, Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Hue, Saturation; the
+   overlay image; History labels ("Add Brush Mask", "Mask 1: Exposure +0.50").
+2. [x] Masking mode: floating Masks panel, Linear and Radial tools with pins and handles,
+   local sliders, overlay (O), shortcuts. The overlay is the mask rendered on the worker
+   from the proxy (red, half strength), asked for alongside renders. Esc drops the tool,
+   then leaves masking; Delete removes the selected component.
+3. [x] Brush: K, paint (a stroke per drag, live), erase (Alt or the Erase box), Size /
+   Feather / Flow / Density, a two-circle cursor, [ ] for size and { } (Shift+[ ]) for
+   feather; a click paints one dab, and a click with the radial tool makes a default one.
+   A Shift-typed symbol now also matches its plain binding (US Shift+[ arrives as {).
+   UI pass (2026-11-18): the Masks panel and the masking tool are painted like the rest of
+   the app (tool glyphs, rows, an on/off switch per mask instead of an eye, pill buttons,
+   a + menu with keys), the right panel is a section with a header, the brush sliders
+   use the standard slider rows, outlines stay on the photo, pins are rings, and Esc
+   with a menu open only closes the menu.
+4. [ ] Texture, Clarity, Dehaze, Sharpness, Noise, Color; mask thumbnails, duplicate, rename.
+5. [ ] Auto Mask (edge-aware brush).

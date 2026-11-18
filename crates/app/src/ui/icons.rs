@@ -96,3 +96,44 @@ pub fn icon_button(ui: &mut egui::Ui, size: Vec2, selected: bool) -> (egui::Resp
     }
     (resp, rect)
 }
+
+/// A plus sign (new mask, add).
+pub fn plus(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let s = Stroke::new(1.5, color);
+    painter.line_segment([center + vec2(-r, 0.0), center + vec2(r, 0.0)], s);
+    painter.line_segment([center + vec2(0.0, -r), center + vec2(0.0, r)], s);
+}
+
+/// An on/off switch (a pill with a knob), `size` wide; returns the click response.
+pub fn toggle_switch(ui: &mut egui::Ui, on: bool, size: Vec2) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let t = ui.ctx().animate_bool_responsive(resp.id, on);
+    let track = Color32::from_rgb(0x2a, 0x2a, 0x2a).lerp_to_gamma(Color32::from_rgb(0x9a, 0x9a, 0x9a), t);
+    let r = rect.height() / 2.0;
+    ui.painter().rect_filled(rect, r, track);
+    let border = if resp.hovered() { Color32::from_gray(0xb0) } else { Color32::from_gray(0x1a) };
+    ui.painter().rect_stroke(rect, r, Stroke::new(1.0, border), egui::StrokeKind::Inside);
+    let x = egui::lerp((rect.left() + r)..=(rect.right() - r), t);
+    let knob = if on { Color32::from_gray(0xf0) } else { Color32::from_gray(0x8c) };
+    ui.painter().circle_filled(pos2(x, rect.center().y), r - 2.0, knob);
+    resp
+}
+
+/// LrC's Masking tool icon: a circle, half filled, with a dashed edge on the empty half.
+pub fn masking(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let half: Vec<Pos2> = (0..=16)
+        .map(|i| {
+            let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 16.0;
+            center + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    painter.add(Shape::convex_polygon(half, color, Stroke::NONE));
+    for i in 0..8 {
+        let a0 = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * (i as f32 + 0.15) / 8.0;
+        let a1 = a0 + std::f32::consts::PI * 0.6 / 8.0;
+        painter.line_segment(
+            [center + vec2(a0.cos(), a0.sin()) * r, center + vec2(a1.cos(), a1.sin()) * r],
+            Stroke::new(1.3, color),
+        );
+    }
+}

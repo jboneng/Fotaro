@@ -8,9 +8,10 @@ use image::{DynamicImage, ImageBuffer, Rgb, Rgb32FImage};
 use lcms2::{ColorSpaceSignature, PixelFormat, Profile};
 use rayon::prelude::*;
 
+use super::masks::MaskCache;
 use super::matrix::{self, Mat3, Mat3f};
 use super::settings::{DevelopSettings, WbPreset};
-use super::transform::TransformCache;
+use super::transform::{Mapping, TransformCache};
 use super::wb;
 use crate::decode::{SourceKind, fit_image, open_image, orient_raw};
 use crate::export::space;
@@ -52,6 +53,11 @@ pub struct WorkingImage {
     pub(super) coverage: Option<Arc<Vec<f32>>>,
     /// The transformed copy last rendered (see [`super::transform`]).
     pub(super) transform_cache: TransformCache,
+    /// After a Transform: how this image's pixels map to the source's (masks are drawn
+    /// on the source).
+    pub(super) warp_source: Option<Mapping>,
+    /// Brush masks rasterized for this image (see [`super::masks`]).
+    pub(super) mask_cache: MaskCache,
 }
 
 /// The resolved white balance: multipliers to apply and the Temp/Tint the panel shows.
@@ -64,7 +70,15 @@ pub struct ResolvedWb {
 
 impl WorkingImage {
     fn new(pixels: Rgb32FImage, color: SourceColor, full_size: (u32, u32)) -> WorkingImage {
-        WorkingImage { pixels, color, full_size, coverage: None, transform_cache: TransformCache::default() }
+        WorkingImage {
+            pixels,
+            color,
+            full_size,
+            coverage: None,
+            transform_cache: TransformCache::default(),
+            warp_source: None,
+            mask_cache: MaskCache::default(),
+        }
     }
 
     /// Linear working-space pixels as a rendered photo of their own size.
@@ -117,6 +131,8 @@ impl WorkingImage {
             full_size: self.full_size,
             coverage: None,
             transform_cache: TransformCache::default(),
+            warp_source: None,
+            mask_cache: MaskCache::default(),
         }
     }
 

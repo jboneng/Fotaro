@@ -91,6 +91,13 @@ pub enum Action {
     AutoWhiteBalance,
     WhiteBalanceSelector,
     ClippingIndicators,
+    NewBrushMask,
+    BrushSize(i8),
+    BrushFeather(i8),
+    Masking,
+    NewLinearMask,
+    NewRadialMask,
+    MaskOverlay,
     ResetSettings,
     CopySettings,
     PasteSettings,
@@ -355,6 +362,15 @@ pub const SHORTCUTS: &[Shortcut] = &[
     dev(ctrl_shift(K::U), A::AutoWhiteBalance, "Auto White Balance"),
     dev(k(K::W), A::WhiteBalanceSelector, "White Balance Selector (click a neutral area)"),
     dev(k(K::J), A::ClippingIndicators, "Show clipping (shadows blue, highlights red)"),
+    dev(shift(K::W), A::Masking, "Masking: open / close"),
+    dev(k(K::K), A::NewBrushMask, "New Brush mask (paint on the photo; Alt erases)"),
+    dev(k(K::M), A::NewLinearMask, "New Linear Gradient mask (drag on the photo)"),
+    dev(shift(K::M), A::NewRadialMask, "New Radial Gradient mask (drag on the photo)"),
+    dev(k(K::O), A::MaskOverlay, "Masking: show / hide the overlay"),
+    dev(k(K::OpenBracket), A::BrushSize(-1), "Brush: smaller"),
+    dev(k(K::CloseBracket), A::BrushSize(1), "Brush: larger"),
+    dev(k(K::OpenCurlyBracket), A::BrushFeather(-1), "Brush: less feather (Shift+[)"),
+    dev(k(K::CloseCurlyBracket), A::BrushFeather(1), "Brush: more feather (Shift+])"),
     dev(ctrl_shift(K::R), A::ResetSettings, "Reset all settings"),
     dev(ctrl_shift(K::C), A::CopySettings, "Copy settings"),
     dev(ctrl_shift(K::V), A::PasteSettings, "Paste settings"),
@@ -379,6 +395,8 @@ pub fn key_name(key: Key) -> &'static str {
         Key::Slash => "/",
         Key::OpenBracket => "[",
         Key::CloseBracket => "]",
+        Key::OpenCurlyBracket => "{",
+        Key::CloseCurlyBracket => "}",
         Key::ArrowLeft => "←",
         Key::ArrowRight => "→",
         Key::ArrowUp => "↑",
@@ -484,13 +502,21 @@ fn resolve(key: Key, physical: Option<Key>, m: egui::Modifiers, module: Module) 
             .find(|s| s.binding.key == key && s.binding.modifiers_match(m))
             .or_else(|| active().find(|s| s.binding.matches(key, physical, m)))
     };
-    find(m).or_else(|| {
-        // Symbols typed with AltGr (`\` is AltGr+'+' on Nordic layouts, `[` AltGr+8 on
-        // German ones) arrive as Ctrl+Alt+symbol on Windows: match the plain binding.
-        (m.ctrl && m.alt && !m.shift && is_symbol(key))
-            .then(|| find(egui::Modifiers { ctrl: false, alt: false, command: false, ..m }))
-            .flatten()
-    })
+    find(m)
+        .or_else(|| {
+            // Symbols typed with AltGr (`\` is AltGr+'+' on Nordic layouts, `[` AltGr+8 on
+            // German ones) arrive as Ctrl+Alt+symbol on Windows: match the plain binding.
+            (m.ctrl && m.alt && !m.shift && is_symbol(key))
+                .then(|| find(egui::Modifiers { ctrl: false, alt: false, command: false, ..m }))
+                .flatten()
+        })
+        .or_else(|| {
+            // A symbol typed with Shift (`{` is Shift+[ on US layouts) already is the
+            // shifted character: match its binding without Shift.
+            (m.shift && !m.ctrl && !m.alt && is_symbol(key))
+                .then(|| find(egui::Modifiers { shift: false, ..m }))
+                .flatten()
+        })
 }
 
 /// Punctuation keys, which some layouts only reach through AltGr.
@@ -585,6 +611,20 @@ mod tests {
         let s = resolve(Key::E, None, altgr, Module::Library).unwrap();
         assert_eq!(s.action, Action::EditInOther);
         assert!(resolve(Key::P, None, altgr, Module::Library).is_none());
+        // Brush keys: `[` is AltGr+8 and `{` AltGr+7 on Nordic layouts; `{` is Shift+[ on US.
+        let s = resolve(Key::OpenBracket, Some(Key::Num8), altgr, Module::Develop).unwrap();
+        assert_eq!(s.action, Action::BrushSize(-1));
+        let s = resolve(Key::OpenCurlyBracket, Some(Key::Num7), altgr, Module::Develop).unwrap();
+        assert_eq!(s.action, Action::BrushFeather(-1));
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        let s = resolve(Key::CloseCurlyBracket, Some(Key::CloseBracket), shift, Module::Develop).unwrap();
+        assert_eq!(s.action, Action::BrushFeather(1));
+        // Ctrl+[ still rotates.
+        let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+        assert_eq!(
+            resolve(Key::OpenBracket, None, ctrl, Module::Develop).unwrap().action,
+            Action::RotateLeft
+        );
     }
 
     #[test]

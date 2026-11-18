@@ -8,6 +8,7 @@ mod effects;
 mod grading;
 mod hsl;
 mod local;
+mod masks;
 mod matrix;
 mod pipeline;
 mod settings;
@@ -24,8 +25,10 @@ pub use detail::{Detail, DetailParam, SharpenView};
 pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
+pub use masks::{CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke};
 pub use pipeline::{
-    Region, auto_tone, render_linear16, render_region_srgb8, render_region_srgb8_view, render_srgb8,
+    Region, auto_tone, render_linear16, render_mask, render_region_srgb8, render_region_srgb8_view,
+    render_srgb8,
 };
 pub use settings::{DevelopSettings, PROCESS_VERSION, Slider, Treatment, WbPreset};
 pub use source::{ResolvedWb, SourceColor, WorkingImage};

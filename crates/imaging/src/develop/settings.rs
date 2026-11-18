@@ -7,6 +7,7 @@ use super::detail::{Detail, DetailParam};
 use super::effects::{EffectParam, Effects};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::hsl::{COLORS, Hsl, HslGroup};
+use super::masks::{Component, LocalParam, Mask, Shape};
 use super::transform::{Transform, TransformParam};
 
 /// Bumped when the renderer changes how existing settings look.
@@ -113,6 +114,8 @@ pub struct DevelopSettings {
     pub effects: Effects,
     /// The Transform panel (perspective, rotation, scale…).
     pub transform: Transform,
+    /// Masking: local adjustments, applied in order.
+    pub masks: Vec<Mask>,
 }
 
 impl Default for DevelopSettings {
@@ -141,6 +144,7 @@ impl Default for DevelopSettings {
             detail: Detail::default(),
             effects: Effects::default(),
             transform: Transform::default(),
+            masks: Vec::new(),
         }
     }
 }
@@ -180,6 +184,12 @@ pub enum Slider {
     Effect(EffectParam),
     /// The Transform panel.
     Transform(TransformParam),
+    /// A mask's local slider (mask index, slider).
+    Local(u8, LocalParam),
+    /// A mask's Amount.
+    MaskAmount(u8),
+    /// A radial gradient's Feather (mask index, component index).
+    MaskFeather(u8, u8),
 }
 
 impl Slider {
@@ -218,6 +228,9 @@ impl Slider {
             Self::Detail(p) => p.label(),
             Self::Effect(p) => p.label(),
             Self::Transform(p) => p.label(),
+            Self::Local(_, p) => p.label(),
+            Self::MaskAmount(_) => "Amount",
+            Self::MaskFeather(..) => "Feather",
         }
     }
 
@@ -230,6 +243,8 @@ impl Slider {
             Self::Detail(p) => p.range(),
             Self::Effect(p) => p.range(),
             Self::Transform(p) => p.range(),
+            Self::Local(_, p) => p.range(),
+            Self::MaskAmount(_) | Self::MaskFeather(..) => (0.0, 100.0),
             Self::Grade(_, GradeParam::Hue) => (0.0, 360.0),
             Self::Grade(_, GradeParam::Saturation) | Self::GradeBlending => (0.0, 100.0),
             _ => (-100.0, 100.0),
@@ -241,6 +256,7 @@ impl Slider {
             Self::Exposure => 2,
             Self::Detail(DetailParam::SharpenRadius) => 1,
             Self::Transform(p) => p.decimals(),
+            Self::Local(_, p) => p.decimals(),
             _ => 0,
         }
     }
@@ -272,11 +288,42 @@ impl Slider {
             Self::Detail(p) => p.get(&s.detail),
             Self::Effect(p) => p.get(&s.effects),
             Self::Transform(p) => p.get(&s.transform),
+            Self::Local(i, p) => s.masks.get(usize::from(i)).map_or(0.0, |m| p.get(&m.adjust)),
+            Self::MaskAmount(i) => s.masks.get(usize::from(i)).map_or(0.0, |m| m.amount),
+            Self::MaskFeather(i, j) => {
+                match s.masks.get(usize::from(i)).and_then(|m| m.components.get(usize::from(j))) {
+                    Some(Component { shape: Shape::Radial { feather, .. }, .. }) => *feather,
+                    _ => 0.0,
+                }
+            }
         }
     }
 
     /// Set the value; moving Temp or Tint makes the white balance Custom.
     pub fn set(self, s: &mut DevelopSettings, v: f32) {
+        // Mask sliders: nothing to set if the mask is gone.
+        match self {
+            Self::Local(i, p) => {
+                if let Some(m) = s.masks.get_mut(usize::from(i)) {
+                    *p.get_mut(&mut m.adjust) = v;
+                }
+                return;
+            }
+            Self::MaskAmount(i) => {
+                if let Some(m) = s.masks.get_mut(usize::from(i)) {
+                    m.amount = v;
+                }
+                return;
+            }
+            Self::MaskFeather(i, j) => {
+                let c = s.masks.get_mut(usize::from(i)).and_then(|m| m.components.get_mut(usize::from(j)));
+                if let Some(Component { shape: Shape::Radial { feather, .. }, .. }) = c {
+                    *feather = v;
+                }
+                return;
+            }
+            _ => {}
+        }
         let field = match self {
             Self::Temp | Self::Tint => {
                 s.wb = WbPreset::Custom;
@@ -305,6 +352,7 @@ impl Slider {
             Self::Detail(p) => p.get_mut(&mut s.detail),
             Self::Effect(p) => p.get_mut(&mut s.effects),
             Self::Transform(p) => p.get_mut(&mut s.transform),
+            Self::Local(..) | Self::MaskAmount(_) | Self::MaskFeather(..) => unreachable!("handled above"),
         };
         *field = v;
     }
@@ -319,7 +367,9 @@ impl Slider {
             }
             Self::Detail(_) => format!("{v:.*}", self.decimals()),
             Self::Effect(p) if !p.signed() => format!("{v:.0}"),
-            Self::Transform(TransformParam::Scale) => format!("{v:.0}"),
+            Self::Transform(TransformParam::Scale) | Self::MaskAmount(_) | Self::MaskFeather(..) => {
+                format!("{v:.0}")
+            }
             _ if v.abs() < 0.5 * 10f32.powi(-(self.decimals() as i32)) => {
                 format!("{:.*}", self.decimals(), 0.0)
             }
@@ -414,6 +464,12 @@ impl DevelopSettings {
                 eat(p.get(&self.detail).to_bits());
             }
         }
+        if !self.masks.is_empty() {
+            eat(0x3a_5c);
+            for b in serde_json::to_vec(&self.masks).unwrap_or_default() {
+                eat(u32::from(b));
+            }
+        }
         if self.transform != Transform::default() {
             let t = &self.transform;
             eat(0x7a_f0);
@@ -489,6 +545,9 @@ impl DevelopSettings {
                 }
                 _ => "Detail".into(),
             };
+        }
+        if self.masks != old.masks {
+            return describe_masks(&self.masks, &old.masks, kelvin);
         }
         if self.transform != old.transform {
             let (t, o) = (&self.transform, &old.transform);
@@ -597,5 +656,58 @@ impl DevelopSettings {
             _ if changed.iter().all(|s| Slider::TONE.contains(s)) => "Auto Settings".into(),
             _ => "Settings".into(),
         }
+    }
+}
+
+/// A History label for a change to the masks, LrC style ("Add Brush Mask", "Brush Stroke",
+/// "Mask 1: Exposure +0.50", "Subtract Radial Gradient").
+fn describe_masks(new: &[Mask], old: &[Mask], kelvin: bool) -> String {
+    if new.len() > old.len() {
+        let kind = new.last().and_then(|m| m.components.first()).map_or("", |c| c.shape.label());
+        return format!("Add {kind} Mask");
+    }
+    if new.len() < old.len() {
+        let gone = old.iter().find(|m| !new.contains(m)).map_or("Mask", |m| m.name.as_str());
+        return format!("Delete {gone}");
+    }
+    let Some(i) = (0..new.len()).find(|&i| new[i] != old[i]) else { return "Masks".into() };
+    let (m, o) = (&new[i], &old[i]);
+    let name = &m.name;
+    if m.components.len() > o.components.len() {
+        let c = m.components.last().expect("a component was added");
+        return format!("{} {}", c.mode.label(), c.shape.label());
+    }
+    if m.components.len() < o.components.len() {
+        let gone = o.components.iter().find(|c| !m.components.contains(c));
+        return format!("Delete {}", gone.map_or("Component", |c| c.shape.label()));
+    }
+    if let Some((c, p)) = m.components.iter().zip(&o.components).find(|(c, p)| c != p) {
+        return match (&c.shape, &p.shape) {
+            _ if c.invert != p.invert => format!("Invert {}", c.shape.label()),
+            _ if c.mode != p.mode => format!("{} {}", c.mode.label(), c.shape.label()),
+            (Shape::Brush { .. }, _) => "Brush Stroke".into(),
+            _ => format!("Edit {}", c.shape.label()),
+        };
+    }
+    if m.visible != o.visible {
+        return format!("{} {name}", if m.visible { "Show" } else { "Hide" });
+    }
+    if m.name != o.name {
+        return format!("Rename {}", o.name);
+    }
+    if m.amount != o.amount {
+        return format!("{name}: Amount {:.0}", m.amount);
+    }
+    if m.adjust.color != o.adjust.color {
+        return format!("{name}: Color");
+    }
+    let changed: Vec<LocalParam> =
+        LocalParam::all().filter(|p| p.get(&m.adjust) != p.get(&o.adjust)).collect();
+    match changed.as_slice() {
+        [p] => {
+            let s = Slider::Local(i as u8, *p);
+            format!("{name}: {} {}", p.label(), s.format(p.get(&m.adjust), kelvin))
+        }
+        _ => format!("{name}: Settings"),
     }
 }

@@ -486,6 +486,8 @@ fn warp(img: &WorkingImage, t: &Transform) -> WorkingImage {
         full_size,
         coverage: Some(Arc::new(coverage)),
         transform_cache: TransformCache::default(),
+        warp_source: Some(map),
+        mask_cache: super::masks::MaskCache::default(),
     }
 }
 

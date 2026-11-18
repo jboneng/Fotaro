@@ -42,7 +42,7 @@ const RIGHT: &[&str] = &[
     "Effects",
 ];
 
-fn weak(text: impl Into<String>) -> RichText {
+pub(super) fn weak(text: impl Into<String>) -> RichText {
     RichText::new(text).color(theme::TEXT_WEAK)
 }
 
@@ -149,6 +149,13 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     clipping_triangles(app, ui, hist);
                     super::sidebars::exposure_summary(app, ui);
                 });
+                super::masking::masking_button(app, ui);
+                // Masking replaces the panels with the selected mask's sliders, as in LrC.
+                if app.session.as_ref().is_some_and(|s| s.develop.masking.is_some()) {
+                    super::masking::right_panel(app, ui);
+                    app.ui.dev_right = stack;
+                    return;
+                }
                 stack.section(ui, Side::Right, "Basic", RIGHT, true, |ui| basic(app, ui));
                 stack.section(ui, Side::Right, "Tone Curve", RIGHT, false, |ui| tone_curve(app, ui));
                 stack.section(ui, Side::Right, "HSL / Color", RIGHT, false, |ui| hsl_panel(app, ui));
@@ -168,15 +175,15 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 /// How a slider row looks and behaves.
-struct Spec {
-    slider: Slider,
-    range: (f32, f32),
-    default: f32,
+pub(super) struct Spec {
+    pub(super) slider: Slider,
+    pub(super) range: (f32, f32),
+    pub(super) default: f32,
     /// Logarithmic track (Kelvin).
-    log: bool,
+    pub(super) log: bool,
     /// Colours at the track's ends (Temp, Tint, Vibrance, Saturation).
-    gradient: Option<[Color32; 2]>,
-    kelvin: bool,
+    pub(super) gradient: Option<[Color32; 2]>,
+    pub(super) kelvin: bool,
 }
 
 impl Spec {
@@ -199,21 +206,27 @@ impl Spec {
 }
 
 #[derive(Default)]
-struct Moved {
-    changed: bool,
+pub(super) struct Moved {
+    pub(super) changed: bool,
     /// The change is finished (slider released, value typed, reset): save it.
-    done: bool,
+    pub(super) done: bool,
     /// Double-clicked (label or track): back to the default.
-    reset: bool,
+    pub(super) reset: bool,
     /// The track or value is being dragged right now.
-    held: bool,
+    pub(super) held: bool,
 }
 
-const LABEL_W: f32 = 74.0;
+pub(super) const LABEL_W: f32 = 74.0;
 const VALUE_W: f32 = 48.0;
 
 /// One LrC slider row: label (double-click resets), track, value (drag or type).
-fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
+pub(super) fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
+    slider_row_as(ui, spec, spec.slider.label(), value)
+}
+
+/// [`slider_row`] with its own label (for settings that aren't develop sliders, such as the
+/// brush's).
+pub(super) fn slider_row_as(ui: &mut egui::Ui, spec: &Spec, text: &str, value: &mut f32) -> Moved {
     let mut out = Moved::default();
     let enabled = ui.is_enabled();
     let id = ui.scope_id().with(("dev_slider", spec.slider));
@@ -230,7 +243,7 @@ fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
     ui.painter().text(
         label_rect.right_center(),
         Align2::RIGHT_CENTER,
-        spec.slider.label(),
+        text,
         FontId::proportional(12.5),
         if label.hovered() { theme::TEXT_STRONG } else { text_color },
     );
@@ -323,7 +336,7 @@ fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
     out
 }
 
-fn sub_header(ui: &mut egui::Ui, title: &str, add_right: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn sub_header(ui: &mut egui::Ui, title: &str, add_right: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).size(12.5).color(theme::TEXT_STRONG));
@@ -555,7 +568,11 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         && developed.is_some()
         && s.develop.settings.transform.upright == Upright::Guided
         && !s.develop.picking_wb
-        && !s.develop.picking_detail;
+        && !s.develop.picking_detail
+        && s.develop.masking.is_none();
+    // Masking: drags on the photo draw and shape masks.
+    let masking = !s.develop.before && developed.is_some() && s.develop.masking.is_some();
+    let brushing = masking && super::masking::brush_active(&s.develop);
     let view = if zoomed { rect } else { fitted };
     let fit = (view.width() / img_px.x).min(view.height() / img_px.y);
     let fill = (view.width() / img_px.x).max(view.height() / img_px.y);
@@ -566,10 +583,11 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         if let Some((q, offset)) = z.anchor.take() {
             z.center = q - offset / size;
         }
-        if resp.dragged() && !guiding {
+        if resp.dragged() && !guiding && !masking {
             z.center -= resp.drag_delta() / size;
         }
-        if resp.hovered() {
+        // The wheel pans, unless the brush is out (then it sizes the brush).
+        if resp.hovered() && !brushing {
             let scroll = ui.input(|i| i.smooth_scroll_delta);
             if scroll != Vec2::ZERO {
                 z.center -= scroll / size;
@@ -686,6 +704,14 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             let q = (p - img_rect.min) / img_rect.size();
             let (x, y) = unrotate(q, photo.rotation);
             s.develop.pick(x, y);
+        }
+        return;
+    }
+    if masking {
+        let commit = super::masking::canvas(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter);
+        super::masking::masks_panel(app, ui.ctx(), rect);
+        if commit {
+            app.run(Command::DevelopCommit(None));
         }
         return;
     }
@@ -832,7 +858,7 @@ fn distance_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 
 /// A point (0..1) of the photo before the catalog's `rotation` clockwise quarter turns →
 /// the same point as displayed (the inverse of [`unrotate`]).
-fn rotate((u, v): (f32, f32), rotation: u8) -> (f32, f32) {
+pub(super) fn rotate((u, v): (f32, f32), rotation: u8) -> (f32, f32) {
     match rotation % 4 {
         1 => (1.0 - v, u),
         2 => (1.0 - u, 1.0 - v),
@@ -843,7 +869,7 @@ fn rotate((u, v): (f32, f32), rotation: u8) -> (f32, f32) {
 
 /// A point (0..1) of the photo as displayed → the same point before the catalog's
 /// `rotation` clockwise quarter turns.
-fn unrotate(q: Vec2, rotation: u8) -> (f32, f32) {
+pub(super) fn unrotate(q: Vec2, rotation: u8) -> (f32, f32) {
     match rotation % 4 {
         1 => (q.y, 1.0 - q.x),
         2 => (1.0 - q.x, 1.0 - q.y),
