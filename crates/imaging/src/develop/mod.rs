@@ -27,7 +27,9 @@ pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use heal::{Spot, SpotMode, find_source};
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
-pub use masks::{CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke};
+pub use masks::{
+    CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke, save_mask_picture, set_mask_store,
+};
 pub use pipeline::{
     Region, auto_tone, render_linear16, render_mask, render_region_srgb8, render_region_srgb8_view,
     render_srgb8,

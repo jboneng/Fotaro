@@ -151,6 +151,7 @@ Shortcuts work in both modules unless marked (Library) or listed under Develop.
 | `Ctrl+Alt+R` | Reset the crop | ✅ |
 | `Q` | Remove tool: Heal and Clone spots (open / close) | ✅ |
 | `/` | Remove tool: another source for the selected spot | ✅ |
+| `A` | Remove tool: Visualize Spots (edges white on black) | ✅ |
 | `K` | New Brush mask (paint on the photo; Alt erases) | ✅ |
 | `M` | New Linear Gradient mask (drag on the photo) | ✅ |
 | `Shift+M` | New Radial Gradient mask (drag on the photo) | ✅ |

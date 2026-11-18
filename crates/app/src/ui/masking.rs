@@ -14,7 +14,7 @@ use super::develop::{Spec, rotate, slider_row, slider_row_as, unrotate, weak};
 use super::theme;
 use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::{
-    BrushSettings, DevelopState, Handle, MaskDrag, MaskTool, Masking, ShapeKind, ToolTarget,
+    AiKind, BrushSettings, DevelopState, Handle, MaskDrag, MaskTool, Masking, ShapeKind, ToolTarget,
 };
 
 /// Pins and handles: how close (screen points) counts as on them.
@@ -82,6 +82,7 @@ fn pin(shape: &Shape) -> Option<[f32; 2]> {
         Shape::Linear { start, end } => Some([(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0]),
         Shape::Radial { center, .. } => Some(*center),
         Shape::Brush { strokes } => strokes.first().and_then(|s| s.points.first()).copied(),
+        Shape::Raster { .. } => None,
     }
 }
 
@@ -139,7 +140,7 @@ fn hit(c: &Canvas, shape: &Shape, p: Pos2) -> Option<Handle> {
                 None
             }
         }
-        Shape::Brush { .. } => None,
+        Shape::Brush { .. } | Shape::Raster { .. } => None,
     }
 }
 
@@ -179,7 +180,7 @@ fn drag_shape(c: &Canvas, original: &Shape, handle: Handle, grab: [f32; 2], to: 
             };
             Shape::Radial { center, radii, angle, feather: *feather }
         }
-        Shape::Brush { .. } => original.clone(),
+        Shape::Brush { .. } | Shape::Raster { .. } => original.clone(),
     }
 }
 
@@ -190,15 +191,13 @@ fn new_shape(kind: ShapeKind, p: [f32; 2]) -> (Shape, Handle) {
         ShapeKind::Radial => {
             (Shape::Radial { center: p, radii: [0.005, 0.005], angle: 0.0, feather: 50.0 }, Handle::End)
         }
-        ShapeKind::Brush => (Shape::Brush { strokes: Vec::new() }, Handle::Move),
+        ShapeKind::Brush | ShapeKind::Ai => (Shape::Brush { strokes: Vec::new() }, Handle::Move),
     }
 }
 
 /// The next free "Mask N" name.
 fn next_name(masks: &[Mask]) -> String {
-    let n =
-        masks.iter().filter_map(|m| m.name.strip_prefix("Mask ")?.parse::<usize>().ok()).max().unwrap_or(0);
-    format!("Mask {}", n.max(masks.len()) + 1)
+    crate::develop::next_mask_name(masks)
 }
 
 /// Put a new shape where `tool` says (a new mask, or a component of the selected one),
@@ -326,7 +325,7 @@ fn draw_shape(painter: &egui::Painter, c: &Canvas, shape: &Shape) {
                 }
             }
         }
-        Shape::Brush { .. } => {}
+        Shape::Brush { .. } | Shape::Raster { .. } => {}
     }
 }
 
@@ -470,7 +469,7 @@ pub(super) fn canvas(
                     start_stroke(&mut st, &m, &brush, erase, at);
                     done = true;
                 }
-                ShapeKind::Linear => {}
+                ShapeKind::Linear | ShapeKind::Ai => {}
             }
         } else if brushing {
             start_stroke(&mut st, &m, &brush, erase, c.photo(p));
@@ -539,6 +538,7 @@ fn kind_of(shape: &Shape) -> ShapeKind {
         Shape::Brush { .. } => ShapeKind::Brush,
         Shape::Linear { .. } => ShapeKind::Linear,
         Shape::Radial { .. } => ShapeKind::Radial,
+        Shape::Raster { .. } => ShapeKind::Ai,
     }
 }
 
@@ -572,7 +572,18 @@ fn tool_icon(painter: &egui::Painter, center: Pos2, r: f32, kind: ShapeKind, col
             painter.circle_stroke(center, r, Stroke::new(1.3, color));
             painter.circle_filled(center, r * 0.42, color);
         }
+        ShapeKind::Ai => sparkle(painter, center, r, color),
     }
+}
+
+/// A four-pointed star: AI masks' glyph.
+fn sparkle(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let w = r * 0.28;
+    let pts: Vec<Pos2> = [(0.0, -r), (w, -w), (r, 0.0), (w, w), (0.0, r), (-w, w), (-r, 0.0), (-w, -w)]
+        .iter()
+        .map(|&(x, y)| center + egui::vec2(x, y))
+        .collect();
+    painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
 
 /// Row colours of the Masks panel.
@@ -580,20 +591,38 @@ const ROW_HOVER: Color32 = Color32::from_rgb(0x3c, 0x3c, 0x3c);
 const ROW_SELECTED: Color32 = Color32::from_rgb(0x4e, 0x4e, 0x4e);
 const PANEL_BG: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x2b);
 
-/// The tools, with their keys, as menu rows; `pick` gets the chosen one.
-fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(ShapeKind)) {
-    for (kind, key) in [(ShapeKind::Brush, "K"), (ShapeKind::Linear, "M"), (ShapeKind::Radial, "Shift+M")] {
+/// A choice in a Create / Add / Subtract / Intersect menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MenuPick {
+    Tool(ShapeKind),
+    Ai(AiKind),
+}
+
+/// The AI selections first (as LrC lists them), then the tools with their keys, as menu
+/// rows; `pick` gets the chosen one.
+fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(MenuPick)) {
+    let ai = [AiKind::Subject, AiKind::Sky, AiKind::Background].map(|k| (MenuPick::Ai(k), k.label(), ""));
+    let tools = [(ShapeKind::Brush, "K"), (ShapeKind::Linear, "M"), (ShapeKind::Radial, "Shift+M")]
+        .map(|(k, key)| (MenuPick::Tool(k), k.label(), key));
+    for (n, (choice, label, key)) in ai.into_iter().chain(tools).enumerate() {
+        if n == 3 {
+            ui.separator();
+        }
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(210.0, 26.0), egui::Sense::click());
         let painter = ui.painter();
         if resp.hovered() {
             painter.rect_filled(rect, 3.0, ROW_SELECTED);
         }
+        let kind = match choice {
+            MenuPick::Tool(k) => k,
+            MenuPick::Ai(_) => ShapeKind::Ai,
+        };
         tool_icon(painter, rect.left_center() + egui::vec2(15.0, 0.0), 6.0, kind, theme::TEXT_STRONG);
         let font = egui::FontId::proportional(13.0);
         painter.text(
             rect.left_center() + egui::vec2(32.0, 0.0),
             egui::Align2::LEFT_CENTER,
-            kind.label(),
+            label,
             font,
             theme::TEXT,
         );
@@ -606,9 +635,74 @@ fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(ShapeKind)) {
             theme::TEXT_WEAK,
         );
         if resp.clicked() {
-            pick(kind);
+            pick(choice);
             ui.close();
         }
+    }
+}
+
+/// While an AI mask is being made: what is happening, with a bar or a spinner.
+fn ai_progress(ui: &mut egui::Ui, job: &crate::develop::AiJob) {
+    let (share, what) = job.progress();
+    egui::Frame::new()
+        .fill(Color32::from_rgb(0x24, 0x34, 0x4a))
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(6, 4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if share < 0.0 {
+                    ui.add(egui::Spinner::new().size(12.0));
+                }
+                ui.label(RichText::new(what).size(11.5).color(theme::TEXT_STRONG));
+            });
+            if share >= 0.0 {
+                ui.add(egui::ProgressBar::new(share).desired_height(6.0));
+            }
+        });
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+}
+
+/// Before the first AI mask: what has to be downloaded, and agreeing to it.
+pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+    let Some(s) = &mut app.session else { return };
+    let d = &mut s.develop;
+    let Some((kind, target, bytes)) = d.ai_consent else { return };
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique("ai_consent")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        ui.heading(format!("Select {}", kind.label()));
+        ui.add_space(6.0);
+        ui.label(format!(
+            "AI masks run on this computer. The first time, they need {:.0} MB downloaded: the \
+             model that finds the {}{}. Nothing about your photos is sent anywhere.",
+            bytes as f64 / 1e6,
+            kind.label().to_lowercase(),
+            if cfg!(windows) && !segment::ready(&[]) {
+                ", and ONNX Runtime with DirectML to run it"
+            } else {
+                ""
+            },
+        ));
+        ui.add_space(4.0);
+        ui.label(weak(format!("Saved in {}", segment::data_dir().display())));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Download").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(false));
+    }
+    match answer {
+        Some(true) => d.start_ai(kind, target),
+        Some(false) => d.ai_consent = None,
+        None => {}
     }
 }
 
@@ -644,6 +738,9 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
     let Some(mut m) = d.masking.clone() else { return };
     let mut st = d.settings.clone();
     let mut done = false;
+    let mut ai: Option<(AiKind, ToolTarget)> = None;
+    let job = d.ai_job.clone();
+    let mut gpu = d.ai_gpu;
     selection(&mut m, &st.masks);
     m.hover = None;
     let frame = egui::Frame::new()
@@ -674,8 +771,11 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                         super::icons::plus(ui.painter(), rect.center(), 5.0, theme::TEXT_STRONG);
                         let resp = resp.on_hover_text("Create New Mask");
                         egui::Popup::menu(&resp).show(|ui| {
-                            tool_menu(ui, |kind| {
-                                m.tool = Some(MaskTool { kind, target: ToolTarget::NewMask })
+                            tool_menu(ui, |pick| match pick {
+                                MenuPick::Tool(kind) => {
+                                    m.tool = Some(MaskTool { kind, target: ToolTarget::NewMask })
+                                }
+                                MenuPick::Ai(k) => ai = Some((k, ToolTarget::NewMask)),
                             });
                         });
                     });
@@ -815,8 +915,11 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                         for mode in [CombineMode::Add, CombineMode::Subtract, CombineMode::Intersect] {
                             let resp = pill(ui, mode.label(), true);
                             egui::Popup::menu(&resp).show(|ui| {
-                                tool_menu(ui, |kind| {
-                                    m.tool = Some(MaskTool { kind, target: ToolTarget::Component(mode) })
+                                tool_menu(ui, |pick| match pick {
+                                    MenuPick::Tool(kind) => {
+                                        m.tool = Some(MaskTool { kind, target: ToolTarget::Component(mode) })
+                                    }
+                                    MenuPick::Ai(k) => ai = Some((k, ToolTarget::Component(mode))),
                                 });
                             });
                         }
@@ -848,6 +951,24 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                             );
                         });
                 }
+                if let Some(job) = &job {
+                    ui.add_space(2.0);
+                    ai_progress(ui, job);
+                }
+                ui.add_space(4.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Use GPU for AI").size(12.0).color(theme::TEXT));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        let switch = super::icons::toggle_switch(ui, gpu, egui::vec2(24.0, 13.0));
+                        let tip = "Run Select Subject, Sky and Background on the graphics card (DirectML) \
+                                   when it can: several times faster than the processor";
+                        if switch.on_hover_text(tip).clicked() {
+                            gpu = !gpu;
+                        }
+                    });
+                });
                 ui.add_space(4.0);
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -863,10 +984,15 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
             });
         });
     d.masking = Some(m);
+    d.ai_gpu = gpu;
     if st != d.settings {
         d.set_live(st);
     }
+    if let Some((kind, target)) = ai {
+        d.select_ai(kind, target);
+    }
     d.request_renders();
+    app.ui.ai_gpu = gpu;
     if done {
         app.run(Command::DevelopCommit(None));
     }

@@ -1,0 +1,27 @@
+[package]
+name = "segment"
+description = "AI masks: subject, sky and object segmentation with ONNX models (CPU or DirectML)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+log.workspace = true
+# ONNX Runtime is loaded at run time (Microsoft's DirectML build, shipped next to the app):
+# no static linking, so no dependence on the C++ toolset it was built with.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "directml", "api-24"] }
+
+directories = "6.0.0"
+sha2 = "0.10"
+ureq = "3"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+imaging.workspace = true
+
+[lints]
+workspace = true

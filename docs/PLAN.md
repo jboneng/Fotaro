@@ -706,4 +706,59 @@ later as another component kind.
       resize; the wheel and [ ] size the selected spot (or new ones); Heal / Clone, Size,
       Feather, Opacity for the selected spot or new ones; New Source, Delete, Reset; Q,
       Esc, Delete, / keys. In the tool strip between Crop and Masking.
-- [ ] Later: Visualize Spots (A), Content-Aware Remove (AI).
+- [x] Visualize Spots (A, or the toolbar checkbox while the Remove tool is open): what is
+      shown, as its edges in white on black (the difference from a 1.5-pixel blur, scaled by
+      the threshold slider), so dust and blemishes stand out; the spot outlines stay on top.
+- [ ] Later: Content-Aware Remove (AI).
+
+## Design: AI masks (Subject, Sky, Background, Objects)
+Decided with the user (2026-11-18): PhotoLibrary will never be a commercial product, so
+non-commercial model weights are fine; DirectML from the start; ~400–500 MB of models
+downloaded on first use is acceptable; benchmark before choosing.
+
+### Benchmark (2026-11-18, `cargo run -p segment --example segbench --release`)
+i7-1260P laptop (4 P + 8 E cores, Iris Xe), photos at 1600 px. DirectML's masks were
+identical to the CPU's for every model that ran.
+
+| Use | Model (ONNX) | DirectML | CPU | Notes |
+|---|---|---|---|---|
+| Subject / Background | **RMBG-1.4** (BRIA, 176 MB, non-commercial) | **0.6 s** | 5 s | good; a little generous (sleeve, sign, person) |
+| | BiRefNet-lite (MIT, 224 MB, fixed 1024 input) | out of memory / 10–19 s | 24 s | best quality; needs a GPU with its own memory |
+| Sky (later Landscape) | **SegFormer-B2 ADE20K** (110 MB, non-commercial) | **0.4 s** | 3 s | clean sky, through trees |
+| | SegFormer-B0 (15 MB) | 0.4 s | 0.25–0.7 s | the CPU-only fallback |
+| Objects | **SAM 2.1-tiny** (Apache-2.0, 149 MB) | **encoder 0.54 s, click 0.21 s** | 5–10 s, 0.3–1.2 s | best for quality |
+| | SlimSAM-77 (Apache-2.0, 40 MB) | encoder 0.73 s, click 0.08 s | 5.5 s, 0.3 s | fast enough for live hover |
+
+Findings:
+- ONNX Runtime is loaded at run time (`ort` 2.0.0-rc.15, `load-dynamic`): Microsoft's
+  DirectML build (onnxruntime 1.24.4, ~17 MB) and DirectML.dll (1.15.4, ~18 MB) ship next
+  to the app. pyke's static build needs a newer MSVC than ours and isn't needed.
+- ONNX Runtime's default of a thread per logical core is ~5× too slow on hybrid laptop
+  chips (fast + slow cores): half the logical cores, at most 8.
+- Models must see the developed photo (what the user sees), not raw data: a film
+  negative is seen inverted otherwise.
+- Expect 2–4× faster than Iris Xe on Core Ultra (Arc) / Ryzen 8840HS (780M) laptops;
+  BiRefNet should fit on a P16s with an RTX 500 Ada.
+- Linux / macOS: the same models; acceleration via CUDA / OpenVINO / ROCm (Linux) or
+  CoreML (macOS), CPU otherwise; the runtime library name differs per OS.
+
+### Plan
+1. [x] Groundwork: model manager (download on first use with consent, SHA-256 check,
+   stored in the user's local app data), the runtime downloaded from Microsoft's NuGet
+   packages on Windows (or taken from next to the app), device choice (DirectML with CPU
+   fallback; "Use GPU for AI" in the Masks panel, remembered), a thread per job with
+   progress in the Masks panel.
+2. [x] Raster mask component (`Shape::Raster`): the model's mask stored as a PNG in the
+   catalog's `masks` folder with what made it (`selects`, `model`), in the untransformed
+   photo's file orientation; edges refined against the photo at render size with the
+   guided filter (Detail's; radius four picture pixels), cached like brush rasters, and
+   regions still render exactly like the whole; Add / Subtract / Intersect / Invert as
+   other components. A missing PNG selects nothing.
+3. [x] Select Subject / Sky / Background in the Masks panel's Create, Add, Subtract and
+   Intersect menus (Background is the subject's picture inverted). The model sees the
+   photo developed but without geometry, effects or masks, turned upright. On the
+   i7-1260P (debug build) the first Subject takes ~7 s with DirectML's session setup,
+   later ones ~3 s.
+4. [ ] Objects (SAM 2.1-tiny): box or brush over the thing, the encoder cached per photo.
+5. [ ] Later: Landscape classes (SegFormer), BiRefNet as a high-quality option on capable
+   GPUs, Content-Aware Remove (LaMa inpainting), People.

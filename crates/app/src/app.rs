@@ -189,6 +189,8 @@ pub struct UiState {
     pub edit_in: crate::editors::EditInPrefs,
     /// The version strip above the filmstrip (S).
     pub show_version_strip: bool,
+    /// Run AI masks on the GPU (DirectML) when it can.
+    pub ai_gpu: bool,
 }
 
 impl Default for UiState {
@@ -219,6 +221,7 @@ impl Default for UiState {
             export_presets: Vec::new(),
             edit_in: crate::editors::EditInPrefs::default(),
             show_version_strip: true,
+            ai_gpu: true,
         }
     }
 }
@@ -492,6 +495,7 @@ pub struct Session {
 impl Session {
     fn open(ctx: &egui::Context, catalog: Catalog, sort: catalog::SortOrder) -> Result<Self> {
         let cache = PreviewCache::new(catalog.previews_dir());
+        imaging::develop::set_mask_store(Some(catalog.dir().join("masks")));
         let (jobs, events) = JobSystem::start(ctx.clone(), catalog.dir().to_path_buf(), cache);
         let mut s = Session {
             catalog,
@@ -1232,7 +1236,8 @@ impl PhotoLibraryApp {
         let result = if create { Catalog::create(dir) } else { Catalog::open(dir) }
             .and_then(|c| Session::open(ctx, c, self.ui.sort));
         match result {
-            Ok(session) => {
+            Ok(mut session) => {
+                session.develop.ai_gpu = self.ui.ai_gpu;
                 log::info!("opened catalog {}", dir.display());
                 self.session = Some(session);
                 self.last_catalog = Some(dir.to_path_buf());
@@ -1684,6 +1689,7 @@ impl PhotoLibraryApp {
             | Action::CropTool
             | Action::RemoveTool
             | Action::NewSource
+            | Action::VisualizeSpots
             | Action::ResetCrop
             | Action::BrushSize(_)
             | Action::BrushFeather(_)
@@ -2011,6 +2017,9 @@ impl PhotoLibraryApp {
             Action::CropTool => crate::ui::set_cropping(d, d.cropping.is_none()),
             Action::RemoveTool => crate::ui::set_removing(d, d.removing.is_none()),
             Action::NewSource => crate::ui::new_source(d),
+            Action::VisualizeSpots if d.removing.is_some() => {
+                d.set_visualize_spots(!d.visualize_spots, d.spot_threshold)
+            }
             Action::ResetCrop => self.develop_op(|d, c| {
                 let mut s = d.settings.clone();
                 s.transform.crop = Default::default();

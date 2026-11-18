@@ -739,6 +739,7 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     if masking {
         let commit = super::masking::canvas(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter);
         super::masking::masks_panel(app, ui.ctx(), rect);
+        super::masking::ai_consent(app, ui.ctx());
         if commit {
             app.run(Command::DevelopCommit(None));
         }
@@ -940,6 +941,24 @@ pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         }
         if picking {
             ui.label(weak("Click something that should be neutral grey. Esc cancels."));
+        }
+        // The Remove tool's Visualize Spots, as in LrC's toolbar.
+        if app.session.as_ref().is_some_and(|s| s.develop.removing.is_some()) {
+            ui.separator();
+            if let Some(s) = &mut app.session {
+                let d = &mut s.develop;
+                let (mut on, mut t) = (d.visualize_spots, d.spot_threshold);
+                ui.checkbox(&mut on, "Visualize Spots")
+                    .on_hover_text("Show edges as white on black, so dust and blemishes stand out (A)");
+                ui.add_enabled_ui(on, |ui| {
+                    ui.spacing_mut().slider_width = 140.0;
+                    ui.add(egui::Slider::new(&mut t, 0..=100).show_value(false))
+                        .on_hover_text("More to the right shows smaller spots");
+                });
+                if (on, t) != (d.visualize_spots, d.spot_threshold) {
+                    d.set_visualize_spots(on, t);
+                }
+            }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if busy {

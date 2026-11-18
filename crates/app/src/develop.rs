@@ -126,6 +126,8 @@ pub enum ShapeKind {
     Brush,
     Linear,
     Radial,
+    /// A mask made by a model (Subject, Sky, Background); not a tool to draw with.
+    Ai,
 }
 
 impl ShapeKind {
@@ -134,6 +136,7 @@ impl ShapeKind {
             ShapeKind::Brush => "Brush",
             ShapeKind::Linear => "Linear Gradient",
             ShapeKind::Radial => "Radial Gradient",
+            ShapeKind::Ai => "AI Mask",
         }
     }
 }
@@ -246,6 +249,110 @@ impl Masking {
     }
 }
 
+/// The next free "Mask N" name.
+pub fn next_mask_name(masks: &[imaging::develop::Mask]) -> String {
+    let n =
+        masks.iter().filter_map(|m| m.name.strip_prefix("Mask ")?.parse::<usize>().ok()).max().unwrap_or(0);
+    format!("Mask {}", n.max(masks.len()) + 1)
+}
+
+/// What an AI mask selects (the Masks panel's Subject, Sky and Background).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiKind {
+    Subject,
+    Sky,
+    /// Everything but the subject (the subject model's picture, inverted).
+    Background,
+}
+
+impl AiKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AiKind::Subject => "Subject",
+            AiKind::Sky => "Sky",
+            AiKind::Background => "Background",
+        }
+    }
+
+    pub fn model(self) -> segment::AiModel {
+        match self {
+            AiKind::Subject | AiKind::Background => segment::AiModel::Subject,
+            AiKind::Sky => segment::AiModel::Sky,
+        }
+    }
+
+    fn model_name(self) -> &'static str {
+        match self.model() {
+            segment::AiModel::Subject => "RMBG-1.4",
+            segment::AiModel::Sky => "SegFormer-B2",
+        }
+    }
+}
+
+/// An AI mask being made: what it selects, where it goes, and how far along it is (share
+/// done 0..1, or below 0 while the model runs, and what is happening).
+#[derive(Debug, Clone)]
+pub struct AiJob {
+    pub kind: AiKind,
+    pub target: ToolTarget,
+    pub progress: std::sync::Arc<std::sync::Mutex<(f32, String)>>,
+}
+
+impl AiJob {
+    pub fn progress(&self) -> (f32, String) {
+        self.progress.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+/// Make an AI mask of `rgb` (the photo as displayed, `rotation` quarter turns from the
+/// file): download what is missing, run the model, save its picture. Returns the
+/// picture's id and the device that ran it.
+fn run_ai(
+    photo_id: i64,
+    kind: AiKind,
+    rgb: &image::RgbImage,
+    rotation: u8,
+    gpu: bool,
+    progress: &std::sync::Mutex<(f32, String)>,
+    ctx: &egui::Context,
+) -> Result<(String, &'static str)> {
+    use image::imageops::{rotate90, rotate180, rotate270};
+    let set = |share: f32, what: String| {
+        *progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
+        ctx.request_repaint();
+    };
+    let model = kind.model();
+    if !segment::ready(&[model]) {
+        let mut last = std::time::Instant::now();
+        segment::ensure(&[model], &mut |share, what| {
+            if last.elapsed().as_millis() > 100 {
+                last = std::time::Instant::now();
+                set(share, format!("Downloading {what}"));
+            }
+        })?;
+    }
+    set(-1.0, format!("Finding the {}…", kind.label().to_lowercase()));
+    let started = std::time::Instant::now();
+    let (mask, device) = segment::select(model, rgb, gpu)?;
+    log::info!("AI mask: {} on {} in {:.0?}", kind.label(), device.label(), started.elapsed());
+    // Background is everything but the subject (its own picture, so Invert starts off).
+    let mut mask = mask;
+    if kind == AiKind::Background {
+        image::imageops::invert(&mut mask);
+    }
+    // Back to the file's orientation, which masks are kept in.
+    let mask = match rotation % 4 {
+        1 => rotate270(&mask),
+        2 => rotate180(&mask),
+        3 => rotate90(&mask),
+        _ => mask,
+    };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let id = format!("{photo_id}-{:x}", stamp.as_nanos());
+    imaging::develop::save_mask_picture(&id, &mask)?;
+    Ok((id, device.label()))
+}
+
 /// Upright Guided: what a drag on the photo is doing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GuideDrag {
@@ -288,6 +395,8 @@ enum Request {
     Adjust { photo_id: i64, op: Adjust, settings: DevelopSettings },
     /// A mask's values over the proxy, for the red overlay.
     Overlay { photo_id: i64, settings: DevelopSettings, index: usize, seq: u64 },
+    /// Make an AI mask of the photo developed with `settings`.
+    Select { photo_id: i64, job: AiJob, settings: DevelopSettings, rotation: u8, gpu: bool },
 }
 
 /// What a full-resolution region render shows.
@@ -370,6 +479,11 @@ enum Reply {
         photo_id: i64,
         error: String,
     },
+    /// An AI mask's picture (its id, and the device that made it), or why it failed.
+    Selected {
+        photo_id: i64,
+        result: std::result::Result<(String, &'static str), String>,
+    },
 }
 
 /// Share of pixels clipped to black (all channels 0) and to white (any channel 255).
@@ -441,6 +555,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, Option<SharpenView>, u64)> = HashMap::new();
     let mut adjusts: Vec<(i64, Adjust, DevelopSettings)> = Vec::new();
     let mut overlay: Option<(i64, DevelopSettings, usize, u64)> = None;
+    let mut selects: Vec<(i64, AiJob, DevelopSettings, u8, bool)> = Vec::new();
     loop {
         let first = crossbeam_channel::select! {
             recv(rx) -> req => match req {
@@ -477,6 +592,9 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 Request::Adjust { photo_id, op, settings } => adjusts.push((photo_id, op, settings)),
                 Request::Overlay { photo_id, settings, index, seq } => {
                     overlay = Some((photo_id, settings, index, seq))
+                }
+                Request::Select { photo_id, job, settings, rotation, gpu } => {
+                    selects.push((photo_id, job, settings, rotation, gpu))
                 }
             }
         }
@@ -516,6 +634,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         renders.retain(|_, r| Some(r.0) == wanted);
         adjusts.retain(|a| Some(a.0) == wanted);
         overlay = overlay.filter(|o| Some(o.0) == wanted);
+        selects.retain(|s| Some(s.0) == wanted);
         let Some((id, img)) = &current else {
             ctx.request_repaint();
             continue;
@@ -563,6 +682,34 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 }
             };
             let _ = tx.send(Reply::Adjusted { photo_id, op, settings });
+        }
+        // AI masks: the photo as the model should see it (developed, but without geometry,
+        // effects or masks, upright), then the model on a thread of its own (it takes a
+        // second or more, longer when it first downloads).
+        let (ready, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut selects).into_iter().partition(|s| s.0 == *id);
+        selects = waiting;
+        for (photo_id, job, mut settings, rotation, gpu) in ready {
+            settings.transform = Default::default();
+            settings.effects = Default::default();
+            settings.masks.clear();
+            let rgb = render_region_srgb8_view(img, &settings, Region::whole(img), None);
+            let rgb = match rotation % 4 {
+                1 => image::imageops::rotate90(&rgb),
+                2 => image::imageops::rotate180(&rgb),
+                3 => image::imageops::rotate270(&rgb),
+                _ => rgb,
+            };
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            std::thread::Builder::new()
+                .name("ai-mask".into())
+                .spawn(move || {
+                    let result = run_ai(photo_id, job.kind, &rgb, rotation, gpu, &job.progress, &ctx)
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Reply::Selected { photo_id, result });
+                    ctx.request_repaint();
+                })
+                .expect("start an AI mask thread");
         }
         // The mask overlay, after the render it goes over.
         if let Some((photo_id, settings, index, seq)) = overlay.take_if(|o| o.0 == *id)
@@ -678,6 +825,9 @@ pub struct DevelopState {
     /// The Remove tool (Q), when open, and its settings for new spots.
     pub removing: Option<RemoveTool>,
     pub remove: RemoveSettings,
+    /// Visualize Spots (A, with the Remove tool open) and its threshold (0..100).
+    pub visualize_spots: bool,
+    pub spot_threshold: u8,
     /// The mask overlay: what was last asked for, the newest shown, and its texture.
     overlay_sent: Option<(DevelopSettings, usize)>,
     overlay_seq: u64,
@@ -685,6 +835,13 @@ pub struct DevelopState {
     pub overlay: Option<egui::TextureHandle>,
     /// Upright Guided: the guide being drawn or moved on the photo.
     pub guide_drag: Option<GuideDrag>,
+    /// AI masks: run on the GPU (DirectML) when possible; the mask being made; and one
+    /// waiting for the user to agree to download what it needs (with its size).
+    pub ai_gpu: bool,
+    pub ai_job: Option<AiJob>,
+    pub ai_consent: Option<(AiKind, ToolTarget, u64)>,
+    /// The photo's catalog rotation (clockwise quarter turns): AI models see it upright.
+    rotation: u8,
     /// When the shown settings last changed (regions wait until they settle).
     changed_at: std::time::Instant,
     /// Copy Settings / Paste Settings.
@@ -760,11 +917,17 @@ impl DevelopState {
             crop_constrain: true,
             removing: None,
             remove: RemoveSettings::default(),
+            visualize_spots: false,
+            spot_threshold: 50,
             overlay_sent: None,
             overlay_seq: 0,
             overlay_shown: 0,
             overlay: None,
             guide_drag: None,
+            ai_gpu: true,
+            ai_job: None,
+            ai_consent: None,
+            rotation: 0,
             changed_at: std::time::Instant::now(),
             clipboard: None,
             curve_point_mode: false,
@@ -790,6 +953,9 @@ impl DevelopState {
         let changed = self.commit(catalog, None)?;
         self.photo = Some(photo.id);
         self.raw = photo.kind == FileKind::Raw;
+        self.rotation = photo.rotation;
+        self.ai_job = None;
+        self.ai_consent = None;
         self.info = None;
         self.textures.clear();
         self.regions.clear();
@@ -870,7 +1036,7 @@ impl DevelopState {
     pub fn request_renders(&mut self) {
         let Some(photo_id) = self.photo else { return };
         let clipping = self.clipping;
-        let mut wanted = vec![(Slot::Current, self.view_settings(), self.sharpen_view)];
+        let mut wanted = vec![(Slot::Current, self.view_settings(), self.current_view())];
         if self.before {
             wanted.push((Slot::Before, self.defaults(), None));
         }
@@ -932,7 +1098,7 @@ impl DevelopState {
                         }
                     }
                     // A sharpening preview's grey says nothing about the photo's histogram.
-                    if slot == Slot::Current && self.sharpen_view.is_none() {
+                    if slot == Slot::Current && self.current_view().is_none() {
                         self.histogram = Some(histogram);
                         self.wb = Some(wb);
                         self.clipped = clipped;
@@ -985,10 +1151,74 @@ impl DevelopState {
                     log::warn!("develop: {error}");
                     self.error = Some(error);
                 }
+                Reply::Selected { photo_id, result } if Some(photo_id) == self.photo => {
+                    let Some(job) = self.ai_job.take() else { continue };
+                    match result {
+                        Ok((id, _device)) => {
+                            changed = changed.or(self.add_ai_mask(catalog, &job, id)?);
+                        }
+                        Err(e) => {
+                            log::warn!("AI mask: {e}");
+                            self.error =
+                                Some(format!("Couldn't select the {}: {e}", job.kind.label().to_lowercase()));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         Ok(changed)
+    }
+
+    /// Select Subject / Sky / Background (as a new mask, or a component of the selected
+    /// one): ask before the first download, else start making it.
+    pub fn select_ai(&mut self, kind: AiKind, target: ToolTarget) {
+        if self.ai_job.is_some() {
+            return;
+        }
+        let missing = segment::download_size(&[kind.model()]);
+        if missing > 0 {
+            self.ai_consent = Some((kind, target, missing));
+        } else {
+            self.start_ai(kind, target);
+        }
+    }
+
+    /// Make an AI mask (downloading first whatever it still needs).
+    pub fn start_ai(&mut self, kind: AiKind, target: ToolTarget) {
+        let Some(photo_id) = self.photo else { return };
+        self.ai_consent = None;
+        let job = AiJob { kind, target, progress: Default::default() };
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Starting…".into());
+        let settings = self.settings.clone();
+        let (rotation, gpu) = (self.rotation, self.ai_gpu);
+        let _ = self.tx.send(Request::Select { photo_id, job: job.clone(), settings, rotation, gpu });
+        self.ai_job = Some(job);
+    }
+
+    /// The AI mask `job` made (picture `id`): add it as it asked, and save.
+    fn add_ai_mask(&mut self, catalog: &mut Catalog, job: &AiJob, id: String) -> Result<Changed> {
+        use imaging::develop::{Component, Mask, Shape};
+        let kind = job.kind;
+        let shape = Shape::Raster { id, selects: kind.label().into(), model: kind.model_name().into() };
+        let mut st = self.settings.clone();
+        let selected = self.masking.as_ref().and_then(|m| m.selected).filter(|&i| i < st.masks.len());
+        let (label, at) = match (job.target, selected) {
+            (ToolTarget::Component(mode), Some(i)) => {
+                st.masks[i].components.push(Component { mode, invert: false, shape });
+                (format!("{} {}", mode.label(), kind.label()), (i, st.masks[i].components.len() - 1))
+            }
+            _ => {
+                st.masks.push(Mask::new(next_mask_name(&st.masks), shape));
+                (format!("Add {} Mask", kind.label()), (st.masks.len() - 1, 0))
+            }
+        };
+        if let Some(m) = &mut self.masking {
+            m.selected = Some(at.0);
+            m.component = at.1;
+        }
+        self.set_live(st);
+        self.commit(catalog, Some(label))
     }
 
     /// Change the shown settings (rendered right away, saved by [`Self::commit`]).
@@ -1186,7 +1416,7 @@ impl DevelopState {
     fn shown_view(&self, target: RegionTarget, region: Region) -> RegionView {
         let before = self.before && target == RegionTarget::Zoom;
         let settings = if before { self.defaults() } else { self.view_settings() };
-        let view = if before { None } else { self.sharpen_view };
+        let view = if before { None } else { self.current_view() };
         RegionView { settings, clipping: self.clipping && target == RegionTarget::Zoom, view, region }
     }
 
@@ -1226,6 +1456,23 @@ impl DevelopState {
     /// Is a 1:1 render for `target` on its way (or the full-size image loading)?
     pub fn region_pending(&self, target: RegionTarget) -> bool {
         self.regions.get(&target).is_some_and(|r| r.sent_seq > r.shown_seq)
+    }
+
+    /// The greyscale view the photo is shown in, if any: a sharpening preview, or Visualize
+    /// Spots while the Remove tool is open.
+    pub fn current_view(&self) -> Option<SharpenView> {
+        match self.sharpen_view {
+            Some(v) => Some(v),
+            None => (self.visualize_spots && self.removing.is_some())
+                .then_some(SharpenView::Spots(self.spot_threshold)),
+        }
+    }
+
+    /// Visualize Spots on or off (A), or a new threshold.
+    pub fn set_visualize_spots(&mut self, on: bool, threshold: u8) {
+        self.visualize_spots = on;
+        self.spot_threshold = threshold.min(100);
+        self.request_renders();
     }
 
     /// Alt / Shift held while dragging a Sharpening slider (or not).

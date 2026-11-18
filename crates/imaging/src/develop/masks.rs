@@ -76,6 +76,14 @@ pub enum Shape {
     Brush {
         strokes: Vec<Stroke>,
     },
+    /// A mask made by a model (Select Subject, Select Sky): its picture is kept in the
+    /// mask store (see [`set_mask_store`]) as `<id>.png`, covering the untransformed
+    /// photo; `selects` is what it selects and `model` what made it, so it can be made again.
+    Raster {
+        id: String,
+        selects: String,
+        model: String,
+    },
 }
 
 impl Shape {
@@ -84,6 +92,59 @@ impl Shape {
             Shape::Linear { .. } => "Linear Gradient",
             Shape::Radial { .. } => "Radial Gradient",
             Shape::Brush { .. } => "Brush",
+            Shape::Raster { selects, .. } => match selects.as_str() {
+                "Subject" => "Subject",
+                "Sky" => "Sky",
+                "Background" => "Background",
+                _ => "AI Mask",
+            },
+        }
+    }
+}
+
+/// Where AI masks' pictures are kept (the catalog's folder), and those already read.
+static MASK_STORE: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+static MASK_PICTURES: Mutex<Vec<(String, Arc<image::GrayImage>)>> = Mutex::new(Vec::new());
+
+/// Set the folder AI masks' pictures are read from and saved to (the open catalog's).
+pub fn set_mask_store(dir: Option<std::path::PathBuf>) {
+    *MASK_STORE.write().unwrap_or_else(|e| e.into_inner()) = dir;
+    MASK_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// Save an AI mask's picture as `<id>.png` in the mask store.
+pub fn save_mask_picture(id: &str, picture: &image::GrayImage) -> anyhow::Result<()> {
+    let dir = MASK_STORE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no catalog to keep the mask in"))?;
+    std::fs::create_dir_all(&dir)?;
+    picture.save(dir.join(format!("{id}.png")))?;
+    MASK_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).push((id.to_owned(), Arc::new(picture.clone())));
+    Ok(())
+}
+
+/// An AI mask's picture, from memory or the mask store; `None` if it is missing.
+fn mask_picture(id: &str) -> Option<Arc<image::GrayImage>> {
+    let mut cache = MASK_PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = cache.iter().find(|(k, _)| k == id) {
+        return Some(p.clone());
+    }
+    let dir = MASK_STORE.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+    match image::open(dir.join(format!("{id}.png"))) {
+        Ok(img) => {
+            let p = Arc::new(img.to_luma8());
+            cache.push((id.to_owned(), p.clone()));
+            // A few at a time: they are ~1 MB each.
+            if cache.len() > 16 {
+                cache.remove(0);
+            }
+            Some(p)
+        }
+        Err(e) => {
+            log::warn!("AI mask {id}: {e}");
+            None
         }
     }
 }
@@ -538,6 +599,89 @@ fn brush_raster(
     r
 }
 
+/// An AI mask over the box `bbox` of the source, at the source's resolution: the model's
+/// picture scaled up, its edges then fitted to the photo's with a guided filter (models
+/// work at ~1000 px, so on their own they leave soft, blocky edges). Missing pictures
+/// select nothing.
+fn ai_raster(source: &WorkingImage, id: &str, bbox: (usize, usize, usize, usize)) -> Arc<Raster> {
+    let (sw, sh) = (source.width() as usize, source.height() as usize);
+    let mut key: u64 = 0x9e37_79b9_7f4a_7c15;
+    for b in id.bytes().map(u64::from).chain([bbox.0, bbox.1, bbox.2, bbox.3, sw, sh].map(|v| v as u64)) {
+        key = (key ^ b).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    {
+        let cache = source.mask_cache.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, r)) = cache.iter().find(|(k, _)| *k == key) {
+            return r.clone();
+        }
+    }
+    let r = Arc::new(match mask_picture(id) {
+        Some(p) => refine(source, &p, bbox),
+        None => Raster { x0: 0, y0: 0, w: 0, h: 0, data: Vec::new() },
+    });
+    let mut cache = source.mask_cache.0.lock().unwrap_or_else(|e| e.into_inner());
+    cache.push((key, r.clone()));
+    if cache.len() > 6 {
+        cache.remove(0);
+    }
+    r
+}
+
+/// The guided filter's radius in source pixels: four of the picture's pixels (models leave
+/// edges that soft), and at least 1/400 of the photo.
+fn refine_radius(source: (usize, usize), picture: (usize, usize)) -> usize {
+    let scale = (source.0 as f32 / picture.0.max(1) as f32).max(source.1 as f32 / picture.1.max(1) as f32);
+    ((4.0 * scale).round() as usize).max(source.0.max(source.1) / 400).max(2)
+}
+
+fn refine(source: &WorkingImage, picture: &image::GrayImage, bbox: (usize, usize, usize, usize)) -> Raster {
+    let (sw, sh) = (source.width() as usize, source.height() as usize);
+    let r = refine_radius((sw, sh), (picture.width() as usize, picture.height() as usize));
+    // Work on the box plus what the filter reaches into (two box blurs), so a part of the
+    // photo comes out exactly as it would in a whole one.
+    let pad = 2 * r + 2;
+    let (bx0, by0) = (bbox.0.saturating_sub(pad), bbox.1.saturating_sub(pad));
+    let (bx1, by1) = ((bbox.0 + bbox.2 + pad).min(sw), (bbox.1 + bbox.3 + pad).min(sh));
+    let (w, h) = (bx1.saturating_sub(bx0), by1.saturating_sub(by0));
+    if w == 0 || h == 0 || bbox.2 == 0 || bbox.3 == 0 {
+        return Raster { x0: bbox.0, y0: bbox.1, w: 0, h: 0, data: Vec::new() };
+    }
+    let (pw, ph) = (picture.width() as usize, picture.height() as usize);
+    let (kx, ky) = (pw as f32 / sw as f32, ph as f32 / sh as f32);
+    let px = picture.as_raw();
+    let src = source.pixels.as_raw();
+    // Guide: perceptual-ish lightness of the source; input: the picture, bilinear.
+    let (guide, input): (Vec<f32>, Vec<f32>) = (0..w * h)
+        .into_par_iter()
+        .map(|k| {
+            let (x, y) = (bx0 + k % w, by0 + k / w);
+            let s = &src[(y * sw + x) * 3..(y * sw + x) * 3 + 3];
+            let l = (0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2]).clamp(0.0, 1.0).sqrt();
+            let fx = ((x as f32 + 0.5) * kx - 0.5).clamp(0.0, (pw - 1) as f32);
+            let fy = ((y as f32 + 0.5) * ky - 0.5).clamp(0.0, (ph - 1) as f32);
+            let (x0, y0) = (fx as usize, fy as usize);
+            let (x1, y1) = ((x0 + 1).min(pw - 1), (y0 + 1).min(ph - 1));
+            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+            let at = |x: usize, y: usize| f32::from(px[y * pw + x]) / 255.0;
+            let top = at(x0, y0) + tx * (at(x1, y0) - at(x0, y0));
+            let bottom = at(x0, y1) + tx * (at(x1, y1) - at(x0, y1));
+            (l, top + ty * (bottom - top))
+        })
+        .unzip();
+    let (mi, mii) = super::detail::guide_stats(&guide, w, h, r);
+    let (ma, mb) = super::detail::guided_coeffs(&guide, &mi, &mii, &input, w, h, r, 1e-4);
+    let (ox, oy) = (bbox.0 - bx0, bbox.1 - by0);
+    let mut data = vec![0.0f32; bbox.2 * bbox.3];
+    data.par_chunks_mut(bbox.2).enumerate().for_each(|(j, row)| {
+        let base = (j + oy) * w + ox;
+        for (i, v) in row.iter_mut().enumerate() {
+            let k = base + i;
+            *v = (ma[k] * guide[k] + mb[k]).clamp(0.0, 1.0);
+        }
+    });
+    Raster { x0: bbox.0, y0: bbox.1, w: bbox.2, h: bbox.3, data }
+}
+
 /// Every active mask's value at each pixel of a region of the rendered image.
 pub(super) struct MaskField {
     /// The masks (indices into the settings' list) the values are for.
@@ -627,6 +771,7 @@ impl MaskField {
                                 }
                             }
                             Shape::Brush { strokes } => Evaluator::Brush(brush_raster(source, strokes, bbox)),
+                            Shape::Raster { id, .. } => Evaluator::Brush(ai_raster(source, id, bbox)),
                         };
                         (c.mode, c.invert, e)
                     })
@@ -691,6 +836,7 @@ mod tests {
                 inner: 1.0 - feather / 100.0,
             },
             Shape::Brush { strokes } => Evaluator::Brush(Arc::new(rasterize(strokes, f, (0, 0, 200, 100)))),
+            Shape::Raster { .. } => unreachable!(),
         };
         move |u, v| p.value(u, v)
     }

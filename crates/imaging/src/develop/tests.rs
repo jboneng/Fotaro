@@ -833,3 +833,67 @@ fn spots_heal_in_renders_and_regions_still_match() {
     assert!((0..40).all(|y| (0..40).all(|x| part.get_pixel(x, y) == whole.get_pixel(x + 20, y + 10))));
     assert_eq!(s.describe_change(&DevelopSettings::default(), false), "Remove: Heal");
 }
+
+#[test]
+fn visualize_spots_shows_edges_white_on_black() {
+    // Flat grey with one small dark dust spot.
+    let img: RgbImage = ImageBuffer::from_fn(80, 60, |x, y| {
+        if (x as f32 - 40.0).hypot(y as f32 - 30.0) < 2.0 { Rgb([60, 60, 60]) } else { Rgb([150, 150, 150]) }
+    });
+    let w = rendered(&img);
+    let s = DevelopSettings::default();
+    let low = render_region_srgb8_view(&w, &s, Region::whole(&w), Some(SharpenView::Spots(0)));
+    let high = render_region_srgb8_view(&w, &s, Region::whole(&w), Some(SharpenView::Spots(100)));
+    assert_eq!(low.get_pixel(5, 5).0, [0, 0, 0], "flat areas are black");
+    assert!(high.get_pixel(42, 30)[0] > 200, "the spot's edge is white: {:?}", high.get_pixel(42, 30));
+    assert!(high.get_pixel(42, 30)[0] >= low.get_pixel(42, 30)[0], "more shows as the threshold rises");
+    assert!(high.pixels().all(|p| p[0] == p[1] && p[1] == p[2]), "grey");
+}
+
+#[test]
+fn ai_masks_follow_the_photos_edges_and_regions_still_match() {
+    // A bright disc on a dark, slightly noisy ground; the "model" saw it as a coarse blur.
+    let (cx, cy, radius) = (120.0f32, 80.0f32, 40.0f32);
+    let img: RgbImage = ImageBuffer::from_fn(240, 160, |x, y| {
+        let d = (x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy);
+        let n = ((x * 7 + y * 13) % 9) as u8;
+        if d < radius { Rgb([220 + n, 215 + n, 200 + n]) } else { Rgb([40 + n, 45 + n, 50 + n]) }
+    });
+    let w = rendered(&img);
+    let picture = image::GrayImage::from_fn(30, 20, |x, y| {
+        let d = ((x as f32 + 0.5) * 8.0 - cx).hypot((y as f32 + 0.5) * 8.0 - cy);
+        image::Luma([((0.5 - (d - radius) / 32.0).clamp(0.0, 1.0) * 255.0) as u8])
+    });
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("test-disc", &picture).unwrap();
+    assert!(store.path().join("test-disc.png").exists());
+    let shape = Shape::Raster { id: "test-disc".into(), selects: "Subject".into(), model: "test".into() };
+    let mut mask = Mask::new("Mask 1", shape);
+    mask.adjust.exposure = 1.0;
+    let s = DevelopSettings { masks: vec![mask], ..Default::default() };
+
+    // The refined mask is closer to the disc than the picture, inside and outside.
+    let m = render_mask(&w, &s, 0).unwrap();
+    let at = |d: f32| f32::from(m.get_pixel((cx + radius + d) as u32, cy as u32)[0]) / 255.0;
+    let coarse = |d: f32| 0.5 - d / 32.0;
+    assert!(at(-7.0) > coarse(-6.5) + 0.07, "inside {} vs {}", at(-7.0), coarse(-6.5));
+    assert!(at(7.0) < coarse(7.5) * 0.5, "outside {} vs {}", at(7.0), coarse(7.5));
+
+    // Regions render like the whole.
+    let whole = render_srgb8(&w, &s);
+    let part = render_region_srgb8(&w, &s, Region { x: 70, y: 30, w: 90, h: 70 });
+    for y in 0..70 {
+        for x in 0..90 {
+            let (p, q) = (part.get_pixel(x, y), whole.get_pixel(x + 70, y + 30));
+            assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+        }
+    }
+
+    // A missing picture selects nothing.
+    let mut gone = s.clone();
+    gone.masks[0].components[0].shape =
+        Shape::Raster { id: "not-there".into(), selects: "Sky".into(), model: "test".into() };
+    assert_eq!(render_srgb8(&w, &gone), render_srgb8(&w, &DevelopSettings::default()));
+    set_mask_store(None);
+}

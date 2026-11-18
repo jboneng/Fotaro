@@ -253,14 +253,14 @@ fn taps(n: usize, s: usize, low: usize) -> Vec<(usize, usize, f32)> {
 }
 
 /// The guide's local mean and mean square, shared by filters with the same guide.
-fn guide_stats(i: &[f32], w: usize, h: usize, r: usize) -> (Vec<f32>, Vec<f32>) {
+pub(super) fn guide_stats(i: &[f32], w: usize, h: usize, r: usize) -> (Vec<f32>, Vec<f32>) {
     let ii: Vec<f32> = i.par_iter().map(|x| x * x).collect();
     rayon::join(|| box_blur_par(i, w, h, r), || box_blur_par(&ii, w, h, r))
 }
 
 /// The guided filter's smoothed linear coefficients: the output is `ma · i + mb`.
 #[allow(clippy::too_many_arguments)]
-fn guided_coeffs(
+pub(super) fn guided_coeffs(
     i: &[f32],
     mi: &[f32],
     mii: &[f32],
@@ -345,6 +345,18 @@ pub(super) fn apply(
 
     // Sharpening: unsharp mask on L. Detail limits halos (low Detail: small differences
     // only); Masking keeps it to edges.
+    if let Some(SharpenView::Spots(t)) = view {
+        // Edges at the scale of what is shown (a pixel or two), however large the photo.
+        let blurred = blur(&planes[0], w, h, 1.5);
+        let gain = 4.0 + 0.4 * f32::from(t.min(100));
+        let edges =
+            planes[0].iter().zip(&blurred).map(|(l, b)| ((l - b).abs() * gain).clamp(0.0, 1.0)).collect();
+        planes[0] = edges;
+        let [_, a, b] = planes;
+        a.fill(0.0);
+        b.fill(0.0);
+        return;
+    }
     if d.sharpen_amount > 0.0 || view.is_some() {
         let sigma = px(d.sharpen_radius);
         let blurred = blur(&planes[0], w, h, sigma);
@@ -369,7 +381,8 @@ pub(super) fn apply(
                     1.0
                 };
                 *v = match view {
-                    None | Some(SharpenView::Amount) => (*v + k * m * soft).max(0.0),
+                    // (Spots returned above.)
+                    None | Some(SharpenView::Amount | SharpenView::Spots(_)) => (*v + k * m * soft).max(0.0),
                     // The detail sharpening adds, on grey, at a fixed strength.
                     Some(SharpenView::Edges) => (0.6 + 4.0 * soft).clamp(0.0, 1.0),
                     // White where sharpening applies.
@@ -396,6 +409,9 @@ pub enum SharpenView {
     Edges,
     /// Where sharpening applies: white, and black where Masking holds it back.
     Mask,
+    /// The Remove tool's Visualize Spots: the edges of what is shown as white on black, so
+    /// dust and blemishes stand out; the threshold (0..100) shows more as it rises.
+    Spots(u8),
 }
 
 impl SharpenView {
