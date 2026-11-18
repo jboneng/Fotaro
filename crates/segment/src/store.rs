@@ -16,6 +16,8 @@ pub enum AiModel {
     Subject,
     /// Select Sky: SegFormer-B2 trained on ADE20K.
     Sky,
+    /// Select Object: Segment Anything 2.1 (tiny), an image encoder and a prompt decoder.
+    Object,
 }
 
 impl AiModel {
@@ -23,19 +25,30 @@ impl AiModel {
         match self {
             AiModel::Subject => "Subject (RMBG-1.4)",
             AiModel::Sky => "Sky (SegFormer-B2, ADE20K)",
+            AiModel::Object => "Objects (SAM 2.1 tiny)",
         }
     }
 
-    fn asset(self) -> &'static Asset {
+    fn assets(self) -> &'static [Asset] {
         match self {
             AiModel::Subject => &SUBJECT,
             AiModel::Sky => &SKY,
+            AiModel::Object => &OBJECT,
         }
     }
 
-    /// The model file (once downloaded).
+    /// The model file (once downloaded): the first of its files (SAM: the encoder).
     pub fn path(self) -> PathBuf {
-        data_dir().join(self.asset().file)
+        data_dir().join(self.assets()[0].file)
+    }
+
+    /// Its `n`th file (SAM: 0 the encoder, 1 the decoder; their weights sit beside them).
+    pub fn file(self, n: usize) -> PathBuf {
+        data_dir().join(self.assets()[n].file)
+    }
+
+    fn present(self) -> bool {
+        self.assets().iter().all(|a| data_dir().join(a.file).exists())
     }
 }
 
@@ -44,22 +57,52 @@ struct Asset {
     url: &'static str,
     sha256: &'static str,
     size: u64,
+    /// Where it goes, under the AI folder.
     file: &'static str,
 }
 
-const SUBJECT: Asset = Asset {
+const SUBJECT: [Asset; 1] = [Asset {
     url: "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
     sha256: "8cafcf770b06757c4eaced21b1a88e57fd2b66de01b8045f35f01535ba742e0f",
     size: 176_153_355,
     file: "rmbg-1.4.onnx",
-};
+}];
 
-const SKY: Asset = Asset {
+const SKY: [Asset; 1] = [Asset {
     url: "https://huggingface.co/Xenova/segformer-b2-finetuned-ade-512-512/resolve/main/onnx/model.onnx",
     sha256: "819c15e6af8c4de3359c1de7ab0a17d0dde495df1d16f8908a7163f8038e0fa0",
     size: 110_445_327,
     file: "segformer-b2-ade.onnx",
-};
+}];
+
+/// SAM 2.1 tiny: the graphs keep their weights in `.onnx_data` files, found by name next
+/// to them, so they keep their names in a folder of their own.
+const OBJECT: [Asset; 4] = [
+    Asset {
+        url: "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/main/onnx/vision_encoder.onnx",
+        sha256: "4f30aacd3aaefbca81a0b7fe4c1fc96345570ea0a6f80ced599493d1b3be2e8c",
+        size: 354_238,
+        file: "sam2.1-tiny/vision_encoder.onnx",
+    },
+    Asset {
+        url: "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/main/onnx/prompt_encoder_mask_decoder.onnx",
+        sha256: "874414704c5d686db7d206a35f6e15d26563d50c8c4468fccc6739bd7e491dcf",
+        size: 213_114,
+        file: "sam2.1-tiny/prompt_encoder_mask_decoder.onnx",
+    },
+    Asset {
+        url: "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/main/onnx/vision_encoder.onnx_data",
+        sha256: "e83df9866a5afe68ea7f0f721f18f65137fc3acbf0da1c74e946d363e09c69cc",
+        size: 134_084_864,
+        file: "sam2.1-tiny/vision_encoder.onnx_data",
+    },
+    Asset {
+        url: "https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/main/onnx/prompt_encoder_mask_decoder.onnx_data",
+        sha256: "e9874d900dd4134ed60eab1e97910327c2419e0b2954485d8fd6e7f1a1470f47",
+        size: 20_958_208,
+        file: "sam2.1-tiny/prompt_encoder_mask_decoder.onnx_data",
+    },
+];
 
 /// ONNX Runtime with DirectML, and DirectML itself, as Microsoft publishes them (NuGet
 /// packages: zip files); the files to take out of each, and where they go.
@@ -123,19 +166,22 @@ fn runtime_ready() -> bool {
 
 /// Is everything there to run `models`?
 pub fn ready(models: &[AiModel]) -> bool {
-    runtime_ready() && models.iter().all(|m| m.path().exists())
+    runtime_ready() && models.iter().all(|m| m.present())
 }
 
 /// Bytes still to download for `models` (the runtime included).
 pub fn download_size(models: &[AiModel]) -> u64 {
+    let dir = data_dir();
     let mut total = 0;
     #[cfg(windows)]
     if !runtime_ready() {
         total += RUNTIME.iter().map(|(a, _)| a.size).sum::<u64>();
     }
     for m in models {
-        if !m.path().exists() {
-            total += m.asset().size;
+        for a in m.assets() {
+            if !dir.join(a.file).exists() {
+                total += a.size;
+            }
         }
     }
     total
@@ -169,13 +215,17 @@ pub fn ensure(models: &[AiModel], progress: &mut dyn FnMut(f32, &str)) -> Result
         );
     }
     for m in models {
-        let path = m.path();
-        if path.exists() {
-            continue;
+        for asset in m.assets() {
+            let path = dir.join(asset.file);
+            if path.exists() {
+                continue;
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            download(asset, &path, &mut |n| progress(((done + n) as f64 / total) as f32, m.label()))?;
+            done += asset.size;
         }
-        let asset = m.asset();
-        download(asset, &path, &mut |n| progress(((done + n) as f64 / total) as f32, m.label()))?;
-        done += asset.size;
     }
     progress(1.0, "Done");
     Ok(())
@@ -183,7 +233,7 @@ pub fn ensure(models: &[AiModel], progress: &mut dyn FnMut(f32, &str)) -> Result
 
 /// Fetch `asset` to `to` (through a partial file), checking its size and SHA-256.
 fn download(asset: &Asset, to: &Path, progress: &mut dyn FnMut(u64)) -> Result<()> {
-    let part = to.with_extension("part");
+    let part = PathBuf::from(format!("{}.part", to.display()));
     let mut response = ureq::get(asset.url).call().with_context(|| format!("downloading {}", asset.url))?;
     let mut reader = response.body_mut().with_config().limit(asset.size + 1).reader();
     let mut file = fs::File::create(&part).with_context(|| format!("writing {}", part.display()))?;

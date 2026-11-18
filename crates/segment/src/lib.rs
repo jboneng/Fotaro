@@ -195,18 +195,37 @@ pub fn sam_encode(model: &mut Model, kind: SamKind, img: &RgbImage) -> Result<Sa
 
 /// The object at `points` (photo pixels; true: on it, false: not on it).
 pub fn sam_decode(model: &mut Model, image: &SamImage, points: &[(f32, f32, bool)]) -> Result<GrayImage> {
+    sam_decode_prompt(model, image, points, None)
+}
+
+/// The object at `points` and/or inside `rect` (photo pixels: left, top, right, bottom).
+pub fn sam_decode_prompt(
+    model: &mut Model,
+    image: &SamImage,
+    points: &[(f32, f32, bool)],
+    rect: Option<[f32; 4]>,
+) -> Result<GrayImage> {
     let (inputs, _) = model.io();
-    let n = points.len();
-    let coords: Vec<f32> =
-        points.iter().flat_map(|&(x, y, _)| [x * image.scale.0, y * image.scale.1]).collect();
-    let labels: Vec<i64> = points.iter().map(|&(.., on)| i64::from(on)).collect();
+    // No points: one padding point (label -1), which the prompt encoder ignores.
+    let (coords, labels): (Vec<f32>, Vec<i64>) = if points.is_empty() {
+        (vec![0.0, 0.0], vec![-1])
+    } else {
+        (
+            points.iter().flat_map(|&(x, y, _)| [x * image.scale.0, y * image.scale.1]).collect(),
+            points.iter().map(|&(.., on)| i64::from(on)).collect(),
+        )
+    };
+    let n = labels.len();
+    let boxes: Vec<f32> = rect
+        .map(|r| vec![r[0] * image.scale.0, r[1] * image.scale.1, r[2] * image.scale.0, r[3] * image.scale.1])
+        .unwrap_or_default();
     let mut values: Vec<(String, ort::value::DynValue)> = Vec::new();
     for name in &inputs {
         let value: ort::value::DynValue = match name.as_str() {
             "input_points" => Tensor::from_array(([1usize, 1, n, 2], coords.clone()))?.into_dyn(),
             "input_labels" => Tensor::from_array(([1usize, 1, n], labels.clone()))?.into_dyn(),
-            // SAM 2 also takes boxes: none.
-            "input_boxes" => Tensor::from_array(([1usize, 0, 4], Vec::<f32>::new()))?.into_dyn(),
+            // SAM 2 also takes boxes (none, or one).
+            "input_boxes" => Tensor::from_array(([1usize, boxes.len() / 4, 4], boxes.clone()))?.into_dyn(),
             other => {
                 let Some((_, shape, data)) = image.outputs.iter().find(|(o, ..)| o == other) else {
                     bail!("the decoder wants {other}, which the encoder doesn't give");
@@ -315,12 +334,84 @@ pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, D
         let result = match model {
             AiModel::Subject => subject_rmbg(session, img),
             AiModel::Sky => sky(session, img),
+            AiModel::Object => bail!("objects are selected with select_object"),
         };
         match result {
             Ok(mask) => return Ok((mask, device)),
             Err(e) => {
                 log::warn!("AI masks: {} failed on {}: {e:#}", model.label(), device.label());
                 *loaded = None;
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("no device to run {} on", model.label())))
+}
+
+/// Segment Anything's two sessions, and the last photo encoded (by the caller's key).
+struct Sam {
+    device: Device,
+    encoder: Model,
+    decoder: Model,
+}
+static SAM: std::sync::Mutex<Option<Sam>> = std::sync::Mutex::new(None);
+static ENCODED: std::sync::Mutex<Option<(u64, SamImage)>> = std::sync::Mutex::new(None);
+
+/// Is the photo `key` (the caller's: the photo and how it was rendered) encoded already?
+/// Then [`select_object`] needs no image.
+pub fn object_encoded(key: u64) -> bool {
+    ENCODED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(k, _)| *k == key)
+}
+
+/// Select Object: the thing at `points` and/or inside `rect` (pixels of `img`), with
+/// Segment Anything 2.1 on the GPU (DirectML) when `gpu`, else (or if that fails) the CPU.
+/// The encoding of photo `key` is kept, so more objects on it take only the decoder.
+pub fn select_object(
+    key: u64,
+    img: &RgbImage,
+    points: &[(f32, f32, bool)],
+    rect: Option<[f32; 4]>,
+    gpu: bool,
+) -> Result<(GrayImage, Device)> {
+    let devices: &[Device] =
+        if gpu && cfg!(windows) { &[Device::DirectMl, Device::Cpu] } else { &[Device::Cpu] };
+    let model = AiModel::Object;
+    let mut last = None;
+    for &device in devices {
+        let mut sam = SAM.lock().unwrap_or_else(|e| e.into_inner());
+        if sam.as_ref().is_none_or(|s| s.device != device) {
+            *sam = None;
+            // The decoder always on the CPU: it is small (a fifth of a second), and its inputs
+            // change shape with the prompt, which makes DirectML rebuild it every time.
+            let loaded = Model::load(&model.file(0), device)
+                .and_then(|encoder| Ok((encoder, Model::load(&model.file(1), Device::Cpu)?)));
+            match loaded {
+                Ok((encoder, decoder)) => *sam = Some(Sam { device, encoder, decoder }),
+                Err(e) => {
+                    log::warn!("AI masks: {} on {}: {e:#}", model.label(), device.label());
+                    last = Some(e);
+                    continue;
+                }
+            }
+        }
+        let Some(s) = sam.as_mut() else { continue };
+        let mut encoded = ENCODED.lock().unwrap_or_else(|e| e.into_inner());
+        let result = (|| {
+            if !encoded.as_ref().is_some_and(|(k, _)| *k == key) {
+                if img.width() == 0 {
+                    bail!("the photo isn't encoded");
+                }
+                *encoded = None;
+                *encoded = Some((key, sam_encode(&mut s.encoder, SamKind::Sam2, img)?));
+            }
+            let Some((_, image)) = encoded.as_ref() else { bail!("no encoding") };
+            sam_decode_prompt(&mut s.decoder, image, points, rect)
+        })();
+        match result {
+            Ok(mask) => return Ok((mask, device)),
+            Err(e) => {
+                log::warn!("AI masks: {} failed on {}: {e:#}", model.label(), device.label());
+                *sam = None;
                 last = Some(e);
             }
         }

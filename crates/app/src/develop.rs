@@ -126,6 +126,8 @@ pub enum ShapeKind {
     Brush,
     Linear,
     Radial,
+    /// Select Object: brush over the thing, or box it (`DevelopState::object_rect`).
+    Object,
     /// A mask made by a model (Subject, Sky, Background); not a tool to draw with.
     Ai,
 }
@@ -136,6 +138,7 @@ impl ShapeKind {
             ShapeKind::Brush => "Brush",
             ShapeKind::Linear => "Linear Gradient",
             ShapeKind::Radial => "Radial Gradient",
+            ShapeKind::Object => "Object",
             ShapeKind::Ai => "AI Mask",
         }
     }
@@ -176,6 +179,8 @@ pub enum Handle {
 pub enum MaskDrag {
     /// Moving a handle of the selected component, from `grab`, starting from `original`.
     Edit { handle: Handle, grab: [f32; 2], original: imaging::develop::Shape },
+    /// Select Object: brushing over the thing or boxing it, in screen positions.
+    Object { path: Vec<egui::Pos2> },
     /// Painting (or erasing) a brush stroke into the selected component.
     Paint,
 }
@@ -256,13 +261,15 @@ pub fn next_mask_name(masks: &[imaging::develop::Mask]) -> String {
     format!("Mask {}", n.max(masks.len()) + 1)
 }
 
-/// What an AI mask selects (the Masks panel's Subject, Sky and Background).
+/// What an AI mask selects (the Masks panel's Subject, Sky, Background and Object).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiKind {
     Subject,
     Sky,
     /// Everything but the subject (the subject model's picture, inverted).
     Background,
+    /// The thing brushed over, boxed or clicked (Segment Anything).
+    Object,
 }
 
 impl AiKind {
@@ -271,6 +278,7 @@ impl AiKind {
             AiKind::Subject => "Subject",
             AiKind::Sky => "Sky",
             AiKind::Background => "Background",
+            AiKind::Object => "Object",
         }
     }
 
@@ -278,6 +286,7 @@ impl AiKind {
         match self {
             AiKind::Subject | AiKind::Background => segment::AiModel::Subject,
             AiKind::Sky => segment::AiModel::Sky,
+            AiKind::Object => segment::AiModel::Object,
         }
     }
 
@@ -285,16 +294,58 @@ impl AiKind {
         match self.model() {
             segment::AiModel::Subject => "RMBG-1.4",
             segment::AiModel::Sky => "SegFormer-B2",
+            segment::AiModel::Object => "SAM 2.1 tiny",
         }
     }
 }
 
-/// An AI mask being made: what it selects, where it goes, and how far along it is (share
-/// done 0..1, or below 0 while the model runs, and what is happening).
+/// A Segment Anything point: pixels, and whether it is on the object.
+type SamPoint = (f32, f32, bool);
+
+/// Select Object's prompt, in the untransformed photo (0..1, file orientation): points on
+/// the object, and a box around it (left, top, right, bottom).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ObjectPrompt {
+    pub points: Vec<[f32; 2]>,
+    pub rect: Option<[f32; 4]>,
+}
+
+impl ObjectPrompt {
+    /// In pixels of the photo turned `rotation` quarter turns clockwise (`w × h` then).
+    fn upright(&self, rotation: u8, w: u32, h: u32) -> (Vec<SamPoint>, Option<[f32; 4]>) {
+        let turn = |[u, v]: [f32; 2]| {
+            let (x, y) = match rotation % 4 {
+                1 => (1.0 - v, u),
+                2 => (1.0 - u, 1.0 - v),
+                3 => (v, 1.0 - u),
+                _ => (u, v),
+            };
+            (x * w as f32, y * h as f32)
+        };
+        let points = self.points.iter().map(|&p| {
+            let (x, y) = turn(p);
+            (x, y, true)
+        });
+        let rect = self.rect.map(|[l, t, r, b]| {
+            let corners = [[l, t], [r, t], [l, b], [r, b]].map(turn);
+            let xs = corners.map(|c| c.0);
+            let ys = corners.map(|c| c.1);
+            let min = |a: [f32; 4]| a.iter().copied().fold(f32::MAX, f32::min);
+            let max = |a: [f32; 4]| a.iter().copied().fold(f32::MIN, f32::max);
+            [min(xs), min(ys), max(xs), max(ys)]
+        });
+        (points.collect(), rect)
+    }
+}
+
+/// An AI mask being made: what it selects (and, for an object, where), where it goes, and
+/// how far along it is (share done 0..1, or below 0 while the model runs, and what is
+/// happening).
 #[derive(Debug, Clone)]
 pub struct AiJob {
     pub kind: AiKind,
     pub target: ToolTarget,
+    pub prompt: Option<ObjectPrompt>,
     pub progress: std::sync::Arc<std::sync::Mutex<(f32, String)>>,
 }
 
@@ -304,21 +355,34 @@ impl AiJob {
     }
 }
 
+/// An AI mask waiting for the user to agree to download what it needs (`bytes`).
+#[derive(Debug, Clone)]
+pub struct AiConsent {
+    pub kind: AiKind,
+    pub target: ToolTarget,
+    pub prompt: Option<ObjectPrompt>,
+    pub bytes: u64,
+}
+
 /// Make an AI mask of `rgb` (the photo as displayed, `rotation` quarter turns from the
-/// file): download what is missing, run the model, save its picture. Returns the
-/// picture's id and the device that ran it.
+/// file, `size` pixels; empty when Select Object has it encoded as `key` already):
+/// download what is missing, run the model, save its picture. Returns the picture's id
+/// and the device that ran it.
+#[allow(clippy::too_many_arguments)]
 fn run_ai(
     photo_id: i64,
-    kind: AiKind,
+    job: &AiJob,
     rgb: &image::RgbImage,
+    size: (u32, u32),
+    key: u64,
     rotation: u8,
     gpu: bool,
-    progress: &std::sync::Mutex<(f32, String)>,
     ctx: &egui::Context,
 ) -> Result<(String, &'static str)> {
     use image::imageops::{rotate90, rotate180, rotate270};
+    let kind = job.kind;
     let set = |share: f32, what: String| {
-        *progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
         ctx.request_repaint();
     };
     let model = kind.model();
@@ -333,7 +397,25 @@ fn run_ai(
     }
     set(-1.0, format!("Finding the {}…", kind.label().to_lowercase()));
     let started = std::time::Instant::now();
-    let (mask, device) = segment::select(model, rgb, gpu)?;
+    let (mask, device) = match &job.prompt {
+        Some(prompt) if kind == AiKind::Object => {
+            let (points, rect) = prompt.upright(rotation, size.0, size.1);
+            let (mask, device) = segment::select_object(key, rgb, &points, rect, gpu)?;
+            // Whatever the decoder thinks: nothing outside the box (it can leak).
+            let mut mask = mask;
+            if let Some([l, t, r, b]) = rect {
+                let pad = 0.02 * size.0.max(size.1) as f32;
+                for (x, y, p) in mask.enumerate_pixels_mut() {
+                    let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+                    if x < l - pad || x > r + pad || y < t - pad || y > b + pad {
+                        p[0] = 0;
+                    }
+                }
+            }
+            (mask, device)
+        }
+        _ => segment::select(model, rgb, gpu)?,
+    };
     log::info!("AI mask: {} on {} in {:.0?}", kind.label(), device.label(), started.elapsed());
     // Background is everything but the subject (its own picture, so Invert starts off).
     let mut mask = mask;
@@ -693,18 +775,31 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             settings.transform = Default::default();
             settings.effects = Default::default();
             settings.masks.clear();
-            let rgb = render_region_srgb8_view(img, &settings, Region::whole(img), None);
-            let rgb = match rotation % 4 {
-                1 => image::imageops::rotate90(&rgb),
-                2 => image::imageops::rotate180(&rgb),
-                3 => image::imageops::rotate270(&rgb),
-                _ => rgb,
+            // Select Object keeps the photo's encoding: this photo, rendered like this.
+            let size =
+                if rotation % 2 == 1 { (img.height(), img.width()) } else { (img.width(), img.height()) };
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (photo_id, rotation, size, settings.stable_hash()).hash(&mut h);
+                h.finish()
+            };
+            let rgb = if job.kind == AiKind::Object && segment::object_encoded(key) {
+                image::RgbImage::new(0, 0)
+            } else {
+                let rgb = render_region_srgb8_view(img, &settings, Region::whole(img), None);
+                match rotation % 4 {
+                    1 => image::imageops::rotate90(&rgb),
+                    2 => image::imageops::rotate180(&rgb),
+                    3 => image::imageops::rotate270(&rgb),
+                    _ => rgb,
+                }
             };
             let (tx, ctx) = (tx.clone(), ctx.clone());
             std::thread::Builder::new()
                 .name("ai-mask".into())
                 .spawn(move || {
-                    let result = run_ai(photo_id, job.kind, &rgb, rotation, gpu, &job.progress, &ctx)
+                    let result = run_ai(photo_id, &job, &rgb, size, key, rotation, gpu, &ctx)
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Reply::Selected { photo_id, result });
                     ctx.request_repaint();
@@ -839,7 +934,9 @@ pub struct DevelopState {
     /// waiting for the user to agree to download what it needs (with its size).
     pub ai_gpu: bool,
     pub ai_job: Option<AiJob>,
-    pub ai_consent: Option<(AiKind, ToolTarget, u64)>,
+    pub ai_consent: Option<AiConsent>,
+    /// Select Object draws a rectangle (else it brushes over the object).
+    pub object_rect: bool,
     /// The photo's catalog rotation (clockwise quarter turns): AI models see it upright.
     rotation: u8,
     /// When the shown settings last changed (regions wait until they settle).
@@ -927,6 +1024,7 @@ impl DevelopState {
             ai_gpu: true,
             ai_job: None,
             ai_consent: None,
+            object_rect: false,
             rotation: 0,
             changed_at: std::time::Instant::now(),
             clipboard: None,
@@ -1173,22 +1271,31 @@ impl DevelopState {
     /// Select Subject / Sky / Background (as a new mask, or a component of the selected
     /// one): ask before the first download, else start making it.
     pub fn select_ai(&mut self, kind: AiKind, target: ToolTarget) {
+        self.request_ai(kind, target, None);
+    }
+
+    /// Select Object: the thing `prompt` points at (as a new mask, or a component).
+    pub fn select_object(&mut self, prompt: ObjectPrompt, target: ToolTarget) {
+        self.request_ai(AiKind::Object, target, Some(prompt));
+    }
+
+    fn request_ai(&mut self, kind: AiKind, target: ToolTarget, prompt: Option<ObjectPrompt>) {
         if self.ai_job.is_some() {
             return;
         }
-        let missing = segment::download_size(&[kind.model()]);
-        if missing > 0 {
-            self.ai_consent = Some((kind, target, missing));
+        let bytes = segment::download_size(&[kind.model()]);
+        if bytes > 0 {
+            self.ai_consent = Some(AiConsent { kind, target, prompt, bytes });
         } else {
-            self.start_ai(kind, target);
+            self.start_ai(kind, target, prompt);
         }
     }
 
     /// Make an AI mask (downloading first whatever it still needs).
-    pub fn start_ai(&mut self, kind: AiKind, target: ToolTarget) {
+    pub fn start_ai(&mut self, kind: AiKind, target: ToolTarget, prompt: Option<ObjectPrompt>) {
         let Some(photo_id) = self.photo else { return };
         self.ai_consent = None;
-        let job = AiJob { kind, target, progress: Default::default() };
+        let job = AiJob { kind, target, prompt, progress: Default::default() };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Starting…".into());
         let settings = self.settings.clone();
         let (rotation, gpu) = (self.rotation, self.ai_gpu);
@@ -1489,5 +1596,26 @@ impl DevelopState {
     pub fn set_before(&mut self, before: bool) {
         self.before = before;
         self.request_renders();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn object_prompts_turn_with_the_photo() {
+        // A point near the top left and a box in the top left quarter of a 400 × 200 file.
+        let p = ObjectPrompt { points: vec![[0.1, 0.2]], rect: Some([0.0, 0.0, 0.5, 0.5]) };
+        let (pts, rect) = p.upright(0, 400, 200);
+        assert_eq!(pts, vec![(40.0, 40.0, true)]);
+        assert_eq!(rect, Some([0.0, 0.0, 200.0, 100.0]));
+        // Turned a quarter clockwise (200 × 400 now): the top left goes to the top right.
+        let (pts, rect) = p.upright(1, 200, 400);
+        assert_eq!(pts, vec![(160.0, 40.0, true)]);
+        assert_eq!(rect, Some([100.0, 0.0, 200.0, 200.0]));
+        // Half a turn: to the bottom right.
+        let (_, rect) = p.upright(2, 400, 200);
+        assert_eq!(rect, Some([200.0, 100.0, 400.0, 200.0]));
     }
 }

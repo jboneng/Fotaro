@@ -759,6 +759,13 @@ Findings:
    photo developed but without geometry, effects or masks, turned upright. On the
    i7-1260P (debug build) the first Subject takes ~7 s with DirectML's session setup,
    later ones ~3 s.
-4. [ ] Objects (SAM 2.1-tiny): box or brush over the thing, the encoder cached per photo.
+4. [x] Objects (SAM 2.1-tiny): Object in the Masks panel's menus, a tool with LrC's two
+   modes: Brush (points along the stroke; a stroke's box would confine the object to
+   the brush's width) or Rectangle (a box), and a click for one point. The encoder runs
+   on the GPU when it can, the decoder always on the CPU (its inputs change shape with
+   the prompt, which made DirectML rebuild it every time and once reset the GPU). The
+   photo's encoding is kept, so more objects on it take ~0.5 s. Masks are cut to the box
+   (with a margin). On battery the Iris Xe's encoder was erratic (3–8 s against 3.3 s on
+   the CPU); "Use GPU for AI" lets the user choose.
 5. [ ] Later: Landscape classes (SegFormer), BiRefNet as a high-quality option on capable
    GPUs, Content-Aware Remove (LaMa inpainting), People.

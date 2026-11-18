@@ -14,7 +14,8 @@ use super::develop::{Spec, rotate, slider_row, slider_row_as, unrotate, weak};
 use super::theme;
 use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::{
-    AiKind, BrushSettings, DevelopState, Handle, MaskDrag, MaskTool, Masking, ShapeKind, ToolTarget,
+    AiKind, BrushSettings, DevelopState, Handle, MaskDrag, MaskTool, Masking, ObjectPrompt, ShapeKind,
+    ToolTarget,
 };
 
 /// Pins and handles: how close (screen points) counts as on them.
@@ -191,7 +192,9 @@ fn new_shape(kind: ShapeKind, p: [f32; 2]) -> (Shape, Handle) {
         ShapeKind::Radial => {
             (Shape::Radial { center: p, radii: [0.005, 0.005], angle: 0.0, feather: 50.0 }, Handle::End)
         }
-        ShapeKind::Brush | ShapeKind::Ai => (Shape::Brush { strokes: Vec::new() }, Handle::Move),
+        ShapeKind::Brush | ShapeKind::Ai | ShapeKind::Object => {
+            (Shape::Brush { strokes: Vec::new() }, Handle::Move)
+        }
     }
 }
 
@@ -362,7 +365,8 @@ pub(super) fn canvas(
         None => sel.is_some_and(|(i, j)| matches!(st.masks[i].components[j].shape, Shape::Brush { .. })),
     };
     // The wheel sizes the brush over the photo (up: larger), as in LrC.
-    if brushing && resp.hover_pos().is_some_and(|p| img_rect.contains(p)) {
+    let object_brushing = m.tool.is_some_and(|t| t.kind == ShapeKind::Object) && !d.object_rect;
+    if (brushing || object_brushing) && resp.hover_pos().is_some_and(|p| img_rect.contains(p)) {
         let dy = ui.input(|i| i.smooth_scroll_delta.y);
         if dy != 0.0 {
             d.brush.scroll_size(dy);
@@ -381,7 +385,9 @@ pub(super) fn canvas(
         && let Some(origin) = ui.input(|i| i.pointer.press_origin())
     {
         let p = c.photo(origin);
-        if let Some(tool) = m.tool {
+        if m.tool.is_some_and(|t| t.kind == ShapeKind::Object) {
+            m.drag = Some(MaskDrag::Object { path: vec![origin] });
+        } else if let Some(tool) = m.tool {
             let (shape, handle) = new_shape(tool.kind, p);
             add_shape(&mut st, &mut m, tool, shape.clone());
             if tool.kind == ShapeKind::Brush {
@@ -418,6 +424,21 @@ pub(super) fn canvas(
         if (c.px(p) - c.px(last)).length() >= step {
             stroke.points.push(round_point(p));
         }
+    }
+    // Select Object: follow the pointer; on release, ask for the object.
+    let mut object: Option<(ObjectPrompt, ToolTarget)> = None;
+    if let (Some(MaskDrag::Object { path }), Some(q)) = (&mut m.drag, pointer)
+        && path.last().is_none_or(|l| l.distance(q) >= 3.0)
+    {
+        path.push(q);
+    }
+    if resp.drag_stopped()
+        && let Some(MaskDrag::Object { path }) = &m.drag
+    {
+        let target = m.tool.map_or(ToolTarget::NewMask, |t| t.target);
+        object = Some((object_prompt(&c, path, d.object_rect), target));
+        m.drag = None;
+        m.tool = None;
     }
     if resp.drag_stopped() && m.drag.take().is_some() {
         // A click with the radial tool makes one of a default size; a linear gradient
@@ -469,6 +490,11 @@ pub(super) fn canvas(
                     start_stroke(&mut st, &m, &brush, erase, at);
                     done = true;
                 }
+                // A click on an object selects it.
+                ShapeKind::Object => {
+                    object = Some((ObjectPrompt { points: vec![at], rect: None }, tool.target));
+                    m.tool = None;
+                }
                 ShapeKind::Linear | ShapeKind::Ai => {}
             }
         } else if brushing {
@@ -495,15 +521,38 @@ pub(super) fn canvas(
         }
     }
 
+    // Select Object's stroke or box as it is drawn.
+    if let Some(MaskDrag::Object { path }) = &m.drag {
+        if d.object_rect {
+            if let (Some(a), Some(b)) = (path.first(), path.last()) {
+                let r = Rect::from_two_pos(*a, *b);
+                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(70, 150, 255, 40));
+                painter.rect_stroke(r, 0.0, Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Middle);
+            }
+        } else if let Some(&first) = path.first() {
+            let r = brush_screen_radius(&c, first, &brush);
+            let color = Color32::from_rgba_unmultiplied(70, 150, 255, 90);
+            painter.add(egui::Shape::line(path.clone(), Stroke::new(2.0 * r, color)));
+            for p in [path.first(), path.last()].into_iter().flatten() {
+                painter.circle_filled(*p, r, color);
+            }
+        }
+    }
+
     // The cursor: drawing, or over a handle.
+    let object_brush = m.tool.is_some_and(|t| t.kind == ShapeKind::Object) && !d.object_rect;
     let brushing_now = match m.tool {
-        Some(t) => t.kind == ShapeKind::Brush,
+        Some(t) => t.kind == ShapeKind::Brush || object_brush,
         None => selection(&mut m, &st.masks)
             .is_some_and(|(i, j)| matches!(st.masks[i].components[j].shape, Shape::Brush { .. })),
     };
     if brushing_now && let Some(p) = resp.hover_pos().filter(|p| img_rect.contains(*p)) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-        draw_brush_cursor(painter, &c, p, &brush, erase);
+        if object_brush {
+            draw_brush_cursor(painter, &c, p, &BrushSettings { feather: 0.0, ..brush }, false);
+        } else {
+            draw_brush_cursor(painter, &c, p, &brush, erase);
+        }
     } else if resp.hover_pos().is_some_and(|p| img_rect.contains(p)) {
         let icon = if m.tool.is_some() {
             egui::CursorIcon::Crosshair
@@ -528,8 +577,45 @@ pub(super) fn canvas(
     if st != d.settings {
         d.set_live(st);
     }
+    if let Some((prompt, target)) = object {
+        d.select_object(prompt, target);
+    }
     d.request_renders();
     done
+}
+
+/// The brush's radius on screen at `at`, measured along the photo's x axis.
+fn brush_screen_radius(c: &Canvas, at: Pos2, brush: &BrushSettings) -> f32 {
+    let p = c.photo(at);
+    let r_px = brush.radius() * c.half();
+    c.screen_px(c.px(p) + egui::vec2(r_px, 0.0)).map_or(1.5, |edge| at.distance(edge).max(1.5))
+}
+
+/// Select Object's prompt from a drag (screen positions): a box from its corners, or a
+/// brushed stroke's points; a tiny box is a click on its start.
+fn object_prompt(c: &Canvas, path: &[Pos2], rect: bool) -> ObjectPrompt {
+    let (Some(&first), Some(&last)) = (path.first(), path.last()) else { return ObjectPrompt::default() };
+    if rect {
+        let r = Rect::from_two_pos(first, last);
+        if r.width() < 6.0 || r.height() < 6.0 {
+            return ObjectPrompt { points: vec![c.photo(first)], rect: None };
+        }
+        // The box on screen may be turned in the photo (Transform): its corners' bounds.
+        let corners = [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()].map(|q| c.photo(q));
+        let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in corners {
+            (l, t, r, b) = (l.min(p[0]), t.min(p[1]), r.max(p[0]), b.max(p[1]));
+        }
+        let rect = [l.max(0.0), t.max(0.0), r.min(1.0), b.min(1.0)];
+        return ObjectPrompt { points: Vec::new(), rect: Some(rect) };
+    }
+    // Brushed: points along the stroke, no box (a stroke's box is only as wide as the
+    // brush, which would confine the object to a strip of it). A few points: more confuse
+    // the model when the stroke strays off the thing.
+    let pts: Vec<[f32; 2]> = path.iter().map(|&q| c.photo(q)).collect();
+    let n = pts.len().min(6);
+    let points = (0..n).map(|k| pts[k * (pts.len() - 1) / (n - 1).max(1)]).collect();
+    ObjectPrompt { points, rect: None }
 }
 
 /// Which tool a component's shape belongs to.
@@ -572,7 +658,7 @@ fn tool_icon(painter: &egui::Painter, center: Pos2, r: f32, kind: ShapeKind, col
             painter.circle_stroke(center, r, Stroke::new(1.3, color));
             painter.circle_filled(center, r * 0.42, color);
         }
-        ShapeKind::Ai => sparkle(painter, center, r, color),
+        ShapeKind::Ai | ShapeKind::Object => sparkle(painter, center, r, color),
     }
 }
 
@@ -602,10 +688,11 @@ enum MenuPick {
 /// rows; `pick` gets the chosen one.
 fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(MenuPick)) {
     let ai = [AiKind::Subject, AiKind::Sky, AiKind::Background].map(|k| (MenuPick::Ai(k), k.label(), ""));
+    let object = [(MenuPick::Tool(ShapeKind::Object), "Object", "")];
     let tools = [(ShapeKind::Brush, "K"), (ShapeKind::Linear, "M"), (ShapeKind::Radial, "Shift+M")]
         .map(|(k, key)| (MenuPick::Tool(k), k.label(), key));
-    for (n, (choice, label, key)) in ai.into_iter().chain(tools).enumerate() {
-        if n == 3 {
+    for (n, (choice, label, key)) in ai.into_iter().chain(object).chain(tools).enumerate() {
+        if n == 4 {
             ui.separator();
         }
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(210.0, 26.0), egui::Sense::click());
@@ -667,7 +754,8 @@ fn ai_progress(ui: &mut egui::Ui, job: &crate::develop::AiJob) {
 pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
-    let Some((kind, target, bytes)) = d.ai_consent else { return };
+    let Some(consent) = d.ai_consent.clone() else { return };
+    let (kind, bytes) = (consent.kind, consent.bytes);
     let mut answer = None;
     let modal = egui::Modal::new(egui::Id::unique("ai_consent")).show(ctx, |ui| {
         ui.set_width(380.0);
@@ -700,7 +788,7 @@ pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
         answer = answer.or(Some(false));
     }
     match answer {
-        Some(true) => d.start_ai(kind, target),
+        Some(true) => d.start_ai(kind, consent.target, consent.prompt),
         Some(false) => d.ai_consent = None,
         None => {}
     }
@@ -741,6 +829,7 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
     let mut ai: Option<(AiKind, ToolTarget)> = None;
     let job = d.ai_job.clone();
     let mut gpu = d.ai_gpu;
+    let mut object_rect = d.object_rect;
     selection(&mut m, &st.masks);
     m.hover = None;
     let frame = egui::Frame::new()
@@ -941,14 +1030,28 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                         .inner_margin(egui::Margin::symmetric(6, 4))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.label(
-                                RichText::new(format!(
-                                    "Draw a {} on the photo  ·  Esc cancels",
-                                    tool.kind.label()
-                                ))
-                                .size(11.5)
-                                .color(theme::TEXT_STRONG),
-                            );
+                            let text = match tool.kind {
+                                ShapeKind::Object if object_rect => {
+                                    "Drag a box around the object, or click it  ·  Esc cancels".to_owned()
+                                }
+                                ShapeKind::Object => {
+                                    "Brush over the object, or click it  ·  Esc cancels".to_owned()
+                                }
+                                kind => format!("Draw a {} on the photo  ·  Esc cancels", kind.label()),
+                            };
+                            ui.label(RichText::new(text).size(11.5).color(theme::TEXT_STRONG));
+                            if tool.kind == ShapeKind::Object {
+                                ui.add_space(2.0);
+                                ui.horizontal(|ui| {
+                                    for (rect, label) in [(false, "Brush"), (true, "Rectangle")] {
+                                        let on = object_rect == rect;
+                                        let text = RichText::new(label).size(11.5);
+                                        if ui.add(egui::Button::new(text).selected(on)).clicked() {
+                                            object_rect = rect;
+                                        }
+                                    }
+                                });
+                            }
                         });
                 }
                 if let Some(job) = &job {
@@ -985,6 +1088,7 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
         });
     d.masking = Some(m);
     d.ai_gpu = gpu;
+    d.object_rect = object_rect;
     if st != d.settings {
         d.set_live(st);
     }

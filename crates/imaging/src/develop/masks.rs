@@ -96,6 +96,7 @@ impl Shape {
                 "Subject" => "Subject",
                 "Sky" => "Sky",
                 "Background" => "Background",
+                "Object" => "Object",
                 _ => "AI Mask",
             },
         }

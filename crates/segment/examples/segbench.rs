@@ -10,7 +10,12 @@ use std::time::{Duration, Instant};
 
 use image::{GrayImage, Rgb, RgbImage};
 use imaging::SourceKind;
-use segment::{Device, Model, SamKind, sam_decode, sam_encode, sky, subject_at, subject_rmbg};
+use segment::{
+    Device, Model, SamKind, sam_decode, sam_decode_prompt, sam_encode, sky, subject_at, subject_rmbg,
+};
+
+/// The last box prompt's mask (saved next to the click's).
+static BOXED: std::sync::Mutex<Option<GrayImage>> = std::sync::Mutex::new(None);
 
 /// The photo at the size the app would hand the models.
 const WORKING_PX: u32 = 1600;
@@ -98,7 +103,21 @@ fn run(
                 let (w, h) = img.dimensions();
                 let d = Instant::now();
                 let m = sam_decode(&mut models[1], &encoded, &[(w as f32 / 2.0, h as f32 / 2.0, true)])?;
-                detail = format!("(encoder {}, a click {})", ms(enc).trim(), ms(d.elapsed()).trim());
+                let click = d.elapsed();
+                // And a box around the middle half, alone (as Select Object's rectangle).
+                let d = Instant::now();
+                let (fw, fh) = (w as f32, h as f32);
+                let rect = [fw * 0.25, fh * 0.2, fw * 0.75, fh * 0.8];
+                let boxed = sam_decode_prompt(&mut models[1], &encoded, &[], Some(rect))?;
+                let covered = boxed.pixels().filter(|p| p[0] > 127).count() as f32 / (w * h) as f32;
+                detail = format!(
+                    "(encoder {}, a click {}, a box {} covering {:.0}%)",
+                    ms(enc).trim(),
+                    ms(click).trim(),
+                    ms(d.elapsed()).trim(),
+                    covered * 100.0
+                );
+                *BOXED.lock().unwrap() = Some(boxed);
                 m
             }
         };
@@ -140,7 +159,8 @@ fn main() -> anyhow::Result<()> {
         for device in [Device::Cpu, Device::DirectMl] {
             let t = Instant::now();
             let models: anyhow::Result<Vec<Model>> =
-                bench.files.iter().map(|f| Model::load(&models_dir.join(f), device)).collect();
+                // SAM's decoder runs on the CPU (as the app runs it): its inputs change shape.
+                bench.files.iter().enumerate().map(|(i, f)| Model::load(&models_dir.join(f), if i > 0 { Device::Cpu } else { device })).collect();
             let mut models = match models {
                 Ok(m) => m,
                 Err(e) => {
@@ -162,6 +182,10 @@ fn main() -> anyhow::Result<()> {
                             Device::Cpu => {
                                 overlay(img, &mask)
                                     .save(out_dir.join(format!("{stem}.{}.png", bench.name)))?;
+                                if let Some(b) = BOXED.lock().unwrap().take() {
+                                    overlay(img, &b)
+                                        .save(out_dir.join(format!("{stem}.{}_box.png", bench.name)))?;
+                                }
                                 cpu_masks.push(mask);
                                 String::new()
                             }
