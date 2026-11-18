@@ -1,8 +1,10 @@
 //! Lightroom Classic–style user interface.
 
 mod collections;
+mod crop;
 mod develop;
 mod masking;
+pub use crop::{set_cropping, swap_orientation};
 pub use masking::{delete_selected, new_mask_tool, set_masking};
 pub mod edit_in;
 pub mod export;

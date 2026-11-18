@@ -55,6 +55,104 @@ impl Upright {
 /// Upright Guided allows this many guides, as LrC does.
 pub const MAX_GUIDES: usize = 4;
 
+/// Crop & Straighten (LrC's crop overlay): the photo turned by `angle` (degrees,
+/// clockwise) about the frame's centre, and the rectangle kept, as 0..1 of the frame
+/// across and down. Applied after everything else of the Transform.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Crop {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub angle: f32,
+}
+
+impl Default for Crop {
+    fn default() -> Self {
+        Crop { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0, angle: 0.0 }
+    }
+}
+
+/// How far LrC's Angle goes either way.
+pub const MAX_CROP_ANGLE: f32 = 45.0;
+
+impl Crop {
+    /// Nothing cropped or turned.
+    pub fn is_full(&self) -> bool {
+        *self == Crop::default()
+    }
+
+    /// The whole frame, turned by the same angle (what the crop tool shows).
+    pub fn uncropped(&self) -> Crop {
+        Crop { angle: self.angle, ..Crop::default() }
+    }
+
+    /// Width / height of the kept rectangle for a frame of `aspect` (width / height).
+    pub fn ratio(&self, aspect: f32) -> f32 {
+        (self.right - self.left) * aspect / (self.bottom - self.top).max(1e-6)
+    }
+
+    /// The rectangle's corners in frame units (x 0..aspect, y 0..1).
+    fn corners(&self, aspect: f32) -> [[f32; 2]; 4] {
+        let (l, r) = (self.left * aspect, self.right * aspect);
+        [[l, self.top], [r, self.top], [r, self.bottom], [l, self.bottom]]
+    }
+
+    /// Does the rectangle show only the photo (no corner outside the turned photo), for a
+    /// frame of `aspect`?
+    pub fn inside(&self, aspect: f32) -> bool {
+        let a = -self.angle.to_radians();
+        let (cx, cy) = (aspect / 2.0, 0.5);
+        self.corners(aspect).iter().all(|p| {
+            let (dx, dy) = (p[0] - cx, p[1] - cy);
+            let (x, y) = (cx + a.cos() * dx - a.sin() * dy, cy + a.sin() * dx + a.cos() * dy);
+            (-1e-4..=aspect + 1e-4).contains(&x) && (-1e-4..=1.0001).contains(&y)
+        })
+    }
+
+    /// Shrink the rectangle about its centre, keeping its shape, until it shows only the
+    /// photo (LrC's Constrain to Image); a centre outside the photo moves to the middle.
+    pub fn fit_inside(&mut self, aspect: f32) {
+        if self.inside(aspect) {
+            return;
+        }
+        let (cx, cy) = ((self.left + self.right) / 2.0, (self.top + self.bottom) / 2.0);
+        let (hw, hh) = ((self.right - self.left) / 2.0, (self.bottom - self.top) / 2.0);
+        let at = |cx: f32, cy: f32, s: f32| Crop {
+            left: cx - hw * s,
+            right: cx + hw * s,
+            top: cy - hh * s,
+            bottom: cy + hh * s,
+            angle: self.angle,
+        };
+        let (cx, cy) = if at(cx, cy, 1e-3).inside(aspect) { (cx, cy) } else { (0.5, 0.5) };
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..30 {
+            let mid = (lo + hi) / 2.0;
+            if at(cx, cy, mid).inside(aspect) { lo = mid } else { hi = mid }
+        }
+        *self = at(cx, cy, lo);
+    }
+
+    /// The largest rectangle of width / height `ratio` centred in a frame of `aspect`.
+    pub fn with_ratio(&self, ratio: f32, aspect: f32) -> Crop {
+        // In frame units the width is `ratio` × the height.
+        let (w, h) = if ratio >= aspect { (aspect, aspect / ratio) } else { (ratio, 1.0) };
+        let (w, h) = (w / aspect, h);
+        let (cx, cy) = ((self.left + self.right) / 2.0, (self.top + self.bottom) / 2.0);
+        let cx = cx.clamp(w / 2.0, 1.0 - w / 2.0);
+        let cy = cy.clamp(h / 2.0, 1.0 - h / 2.0);
+        Crop {
+            left: cx - w / 2.0,
+            right: cx + w / 2.0,
+            top: cy - h / 2.0,
+            bottom: cy + h / 2.0,
+            angle: self.angle,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Transform {
@@ -78,6 +176,8 @@ pub struct Transform {
     /// Moves the photo, −100..+100.
     pub x_offset: f32,
     pub y_offset: f32,
+    /// Crop & Straighten: applied last (see [`Crop`]).
+    pub crop: Crop,
 }
 
 impl Default for Transform {
@@ -94,6 +194,7 @@ impl Default for Transform {
             scale: 100.0,
             x_offset: 0.0,
             y_offset: 0.0,
+            crop: Crop::default(),
         }
     }
 }
@@ -232,6 +333,31 @@ pub(super) struct Mapping {
 
 impl Mapping {
     pub(super) fn new(t: &Transform, w: u32, h: u32) -> Mapping {
+        let base = Self::uncropped(t, w, h);
+        if t.crop.is_full() {
+            return base;
+        }
+        // Crop & Straighten on what the Transform shows: an output pixel is a point of the
+        // crop rectangle, turned back by the angle about the frame's centre.
+        let (fw, fh) = (f64::from(base.out.0), f64::from(base.out.1));
+        let c = &t.crop;
+        let (x0, y0) = (f64::from(c.left) * fw, f64::from(c.top) * fh);
+        let (cw, ch) = (f64::from(c.right - c.left) * fw, f64::from(c.bottom - c.top) * fh);
+        let out = ((cw.round() as u32).max(1), (ch.round() as u32).max(1));
+        let place: Mat3 =
+            [[cw / f64::from(out.0), 0.0, x0], [0.0, ch / f64::from(out.1), y0], [0.0, 0.0, 1.0]];
+        let a = -f64::from(c.angle).to_radians();
+        let (cx, cy) = (fw / 2.0, fh / 2.0);
+        let turn: Mat3 = [
+            [a.cos(), -a.sin(), cx - a.cos() * cx + a.sin() * cy],
+            [a.sin(), a.cos(), cy - a.sin() * cx - a.cos() * cy],
+            [0.0, 0.0, 1.0],
+        ];
+        Mapping { h: mul(&base.h, &mul(&turn, &place)), out }
+    }
+
+    /// The Transform alone (with Constrain Crop), before Crop & Straighten.
+    fn uncropped(t: &Transform, w: u32, h: u32) -> Mapping {
         let uncropped = Self::frame(t, w, h);
         let (fw, fh) = (f64::from(w.max(1)), f64::from(h.max(1)));
         if t.constrain_crop
@@ -359,6 +485,7 @@ impl Transform {
             && (self.vertical, self.horizontal, self.rotate, self.aspect, self.scale)
                 == (d.vertical, d.horizontal, d.rotate, d.aspect, d.scale)
             && (self.x_offset, self.y_offset) == (d.x_offset, d.y_offset)
+            && self.crop.is_full()
     }
 
     /// The developed photo's size for a `w × h` source (smaller with Constrain Crop).

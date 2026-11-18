@@ -722,3 +722,80 @@ fn settings_without_masks_still_load_and_masks_are_named_in_history() {
     assert_eq!(sub.describe_change(&brighter, false), "Subtract Linear Gradient");
     assert_eq!(s.describe_change(&sub, false), "Delete Mask 1");
 }
+
+#[test]
+fn crop_keeps_the_rectangle_turns_clockwise_and_regions_still_match() {
+    // Left half dark, right half bright, a bright square near the top-left.
+    let img: RgbImage = ImageBuffer::from_fn(160, 100, |x, y| {
+        if (10..30).contains(&x) && (10..30).contains(&y) || x >= 80 {
+            Rgb([220, 220, 220])
+        } else {
+            Rgb([40, 40, 40])
+        }
+    });
+    let w = rendered(&img);
+    let crop = |c: Crop| DevelopSettings {
+        transform: Transform { crop: c, ..Default::default() },
+        ..Default::default()
+    };
+    // The left half: half as wide, all dark except the square.
+    let half = crop(Crop { right: 0.5, ..Crop::default() });
+    let out = render_srgb8(&w, &half);
+    assert_eq!(out.dimensions(), (80, 100));
+    assert!(out.get_pixel(70, 50)[0] < 100 && out.get_pixel(20, 20)[0] > 180);
+    assert_eq!(half.transform.output_size(160, 100), (80, 100));
+    // A clockwise turn: the dark/bright edge (vertical, at the centre) leans with its top to
+    // the right, so above the centre is dark and below it bright.
+    let turned = render_srgb8(&w, &crop(Crop { angle: 30.0, ..Crop::default() }));
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    assert!(plain.get_pixel(120, 50)[0] > 180, "right is bright");
+    assert!(turned.get_pixel(80, 15)[0] < 100, "above the centre: dark");
+    assert!(turned.get_pixel(80, 85)[0] > 180, "below the centre: bright");
+    // Regions of a cropped, turned photo match it.
+    let s = crop(Crop { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9, angle: -7.5 });
+    let whole = render_srgb8(&w, &s);
+    let part = render_region_srgb8(&w, &s, Region { x: 10, y: 10, w: 40, h: 30 });
+    for y in 0..30 {
+        for x in 0..40 {
+            let (a, b) = (part.get_pixel(x, y), whole.get_pixel(x + 10, y + 10));
+            assert!((0..3).all(|c| a[c].abs_diff(b[c]) <= 1), "({x}, {y})");
+        }
+    }
+    // Old settings (no crop) load with the full frame.
+    let old = DevelopSettings::from_json(r#"{"transform":{"vertical":10}}"#).unwrap();
+    assert!(old.transform.crop.is_full());
+}
+
+#[test]
+fn constrain_to_image_and_aspect_presets() {
+    let aspect = 1.5;
+    let mut c = Crop { angle: 10.0, ..Crop::default() };
+    assert!(!c.inside(aspect));
+    c.fit_inside(aspect);
+    assert!(c.inside(aspect) && c.right - c.left > 0.6, "{c:?}");
+    assert!((c.ratio(aspect) - 1.5).abs() < 1e-3, "keeps its shape");
+    assert!(((c.left + c.right) / 2.0 - 0.5).abs() < 1e-4);
+    // A square crop of a 3:2 frame is the full height, centred.
+    let sq = Crop::default().with_ratio(1.0, aspect);
+    assert!((sq.ratio(aspect) - 1.0).abs() < 1e-4 && sq.top == 0.0 && sq.bottom == 1.0);
+    assert!(((sq.left + sq.right) / 2.0 - 0.5).abs() < 1e-5);
+}
+
+#[test]
+fn auto_straighten_levels_a_tilted_photo() {
+    // Level bars and posts, then tilted 4° clockwise by a render.
+    let img: RgbImage = ImageBuffer::from_fn(360, 240, |x, y| {
+        if y % 60 < 3 || x % 90 < 3 { Rgb([30, 30, 30]) } else { Rgb([200, 200, 200]) }
+    });
+    let level = rendered(&img);
+    let tilt = DevelopSettings {
+        transform: Transform { crop: Crop { angle: 4.0, ..Crop::default() }, ..Default::default() },
+        ..Default::default()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("tilted.png");
+    render_srgb8(&level, &tilt).save(&path).unwrap();
+    let tilted = WorkingImage::load(&path, crate::SourceKind::Image, None).unwrap().0;
+    let angle = straighten_angle(&tilted, &Transform::default());
+    assert!((angle + 4.0).abs() < 0.5, "{angle}");
+}

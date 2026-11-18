@@ -14,7 +14,7 @@ use eframe::egui;
 use imaging::SourceKind;
 use imaging::develop::{
     DevelopSettings, Region, ResolvedWb, SharpenView, Upright, WbPreset, WorkingImage, apply_upright,
-    auto_tone, render_mask, render_region_srgb8_view,
+    auto_tone, render_mask, render_region_srgb8_view, straighten_angle,
 };
 
 use crate::jobs::Histogram;
@@ -24,6 +24,45 @@ use crate::jobs::Histogram;
 pub enum Slot {
     Current,
     Before,
+}
+
+/// What a drag on the photo does with the crop tool.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CropHandle {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    /// Inside: move the rectangle.
+    Move,
+    /// Outside: turn the photo.
+    Rotate,
+}
+
+/// A drag with the crop tool, from `grab` (0..1 of the frame), starting from `original`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CropDrag {
+    Handle {
+        handle: CropHandle,
+        grab: [f32; 2],
+        original: imaging::develop::Crop,
+    },
+    /// The Straighten tool: a line drawn from this screen point.
+    Straighten {
+        start: egui::Pos2,
+    },
+}
+
+/// Crop & Straighten (R): the tool's state.
+#[derive(Debug, Clone, Default)]
+pub struct CropTool {
+    pub drag: Option<CropDrag>,
+    /// The Straighten tool is out: a drag draws the line to level by.
+    pub straighten: bool,
 }
 
 /// The shapes a mask component can have (the tools).
@@ -217,6 +256,10 @@ enum Adjust {
     AutoTone,
     /// Upright: analyse the photo's lines (or use its guides) for this mode.
     Upright(Upright),
+    /// Crop & Straighten's Auto (and whether to keep the crop on the photo).
+    AutoStraighten {
+        constrain: bool,
+    },
 }
 
 impl Adjust {
@@ -225,6 +268,7 @@ impl Adjust {
             Adjust::PickWb { .. } => "White Balance: Custom".into(),
             Adjust::AutoTone => "Auto Settings".into(),
             Adjust::Upright(mode) => format!("Upright: {}", mode.label()),
+            Adjust::AutoStraighten { .. } => "Auto Straighten".into(),
         }
     }
 }
@@ -439,6 +483,17 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 }
                 Adjust::AutoTone => Some(auto_tone(img, &settings)),
                 Adjust::Upright(mode) => Some(apply_upright(img, &settings, mode)),
+                Adjust::AutoStraighten { constrain } => {
+                    let mut s = settings.clone();
+                    s.transform.crop.angle = straighten_angle(img, &settings.transform);
+                    if constrain {
+                        let t =
+                            imaging::develop::Transform { crop: Default::default(), ..s.transform.clone() };
+                        let (fw, fh) = t.output_size(img.width(), img.height());
+                        s.transform.crop.fit_inside(fw as f32 / fh.max(1) as f32);
+                    }
+                    Some(s)
+                }
             };
             let _ = tx.send(Reply::Adjusted { photo_id, op, settings });
         }
@@ -547,6 +602,12 @@ pub struct DevelopState {
     /// Masking mode (Shift+W), when on.
     pub masking: Option<Masking>,
     pub brush: BrushSettings,
+    /// Crop & Straighten (R), when open; and its settings (kept while the app runs).
+    pub cropping: Option<CropTool>,
+    /// The crop keeps its width / height (the Aspect lock).
+    pub crop_lock: bool,
+    /// Constrain to Image: the crop never shows past the photo's edge.
+    pub crop_constrain: bool,
     /// The mask overlay: what was last asked for, the newest shown, and its texture.
     overlay_sent: Option<(DevelopSettings, usize)>,
     overlay_seq: u64,
@@ -624,6 +685,9 @@ impl DevelopState {
             transform_grid: false,
             masking: None,
             brush: BrushSettings::default(),
+            cropping: None,
+            crop_lock: true,
+            crop_constrain: true,
             overlay_sent: None,
             overlay_seq: 0,
             overlay_shown: 0,
@@ -661,6 +725,7 @@ impl DevelopState {
         self.picking_detail = false;
         self.guide_drag = None;
         self.masking = None;
+        self.cropping = None;
         self.overlay_sent = None;
         self.overlay = None;
         self.histogram = None;
@@ -732,7 +797,7 @@ impl DevelopState {
     pub fn request_renders(&mut self) {
         let Some(photo_id) = self.photo else { return };
         let clipping = self.clipping;
-        let mut wanted = vec![(Slot::Current, self.settings.clone(), self.sharpen_view)];
+        let mut wanted = vec![(Slot::Current, self.view_settings(), self.sharpen_view)];
         if self.before {
             wanted.push((Slot::Before, self.defaults(), None));
         }
@@ -993,7 +1058,33 @@ impl DevelopState {
     /// Constrain Crop), as the center view shows it.
     pub fn output_size(&self) -> Option<(u32, u32)> {
         let (w, h) = self.info.as_ref()?.full_size;
-        Some(if self.before { (w, h) } else { self.settings.transform.output_size(w, h) })
+        Some(if self.before { (w, h) } else { self.view_settings().transform.output_size(w, h) })
+    }
+
+    /// The settings the center view shows: with the crop tool open, the whole frame (turned
+    /// by the crop's angle), so the crop rectangle can be drawn over it, as in LrC.
+    pub fn view_settings(&self) -> DevelopSettings {
+        let mut s = self.settings.clone();
+        if self.cropping.is_some() {
+            s.transform.crop = s.transform.crop.uncropped();
+        }
+        s
+    }
+
+    /// Width / height of the frame the crop is drawn on (the photo as the Transform shows it,
+    /// before cropping).
+    pub fn crop_frame_aspect(&self) -> Option<f32> {
+        let (w, h) = self.info.as_ref()?.full_size;
+        let t = imaging::develop::Transform { crop: Default::default(), ..self.settings.transform.clone() };
+        let (fw, fh) = t.output_size(w, h);
+        Some(fw as f32 / fh.max(1) as f32)
+    }
+
+    /// Crop & Straighten's Auto: level the photo from its lines (on the worker).
+    pub fn auto_straighten(&mut self) {
+        let Some(photo_id) = self.photo else { return };
+        let op = Adjust::AutoStraighten { constrain: self.crop_constrain };
+        let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
     }
 
     /// Auto (Tone), from the photo's pixels; saved when the worker answers.
@@ -1013,7 +1104,7 @@ impl DevelopState {
     /// view; the Detail box always shows the edit), clipping and the sharpening preview.
     fn shown_view(&self, target: RegionTarget, region: Region) -> RegionView {
         let before = self.before && target == RegionTarget::Zoom;
-        let settings = if before { self.defaults() } else { self.settings.clone() };
+        let settings = if before { self.defaults() } else { self.view_settings() };
         let view = if before { None } else { self.sharpen_view };
         RegionView { settings, clipping: self.clipping && target == RegionTarget::Zoom, view, region }
     }

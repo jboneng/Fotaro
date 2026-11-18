@@ -137,3 +137,13 @@ pub fn masking(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
         );
     }
 }
+
+/// The crop tool: two overlapping right angles.
+pub fn crop(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let s = Stroke::new(1.6, color);
+    let (a, b) = (r * 0.55, r);
+    painter.line_segment([center + vec2(-a, -b), center + vec2(-a, a)], s);
+    painter.line_segment([center + vec2(-a, a), center + vec2(b, a)], s);
+    painter.line_segment([center + vec2(a, b), center + vec2(a, -a)], s);
+    painter.line_segment([center + vec2(a, -a), center + vec2(-b, -a)], s);
+}

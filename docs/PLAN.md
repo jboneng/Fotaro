@@ -673,3 +673,19 @@ later as another component kind.
    with a menu open only closes the menu.
 4. [ ] Texture, Clarity, Dehaze, Sharpness, Noise, Color; mask thumbnails, duplicate, rename.
 5. [ ] Auto Mask (edge-aware brush).
+
+## Develop: Crop & Straighten (R)
+- [x] The crop is part of the Transform's mapping (`transform.crop`: a rectangle as 0..1 of
+      the frame the Transform shows, after Constrain Crop, and an angle turning the photo
+      clockwise about the frame's centre), so previews, 1:1, export, masks, the White
+      Balance Selector and Upright guides all follow it. Old settings load uncropped.
+- [x] The crop tool (R, or the crop icon in the tool strip) shows the whole turned photo,
+      dims what is cropped away, draws thirds, corner and edge handles; drag an edge or
+      corner to resize (Shift-free lock: the Aspect lock keeps the shape), inside to move,
+      outside to turn the photo. Aspect presets (Original, 1 x 1, 4 x 5, 8.5 x 11, 5 x 7,
+      2 x 3, 4 x 3, 16 x 9, 16 x 10, Custom) follow the crop's orientation; X swaps
+      portrait / landscape. Angle slider (±45°), the Straighten tool (draw a line that should
+      be level or plumb), Auto (levels from the photo's lines, as Upright Level does, in the
+      frame the Transform shows). Constrain to Image keeps the crop on the photo (no white
+      corners) while turning, resizing and moving. Enter or R closes it, Esc puts the
+      Straighten tool away and then closes; Ctrl+Alt+R resets the crop.

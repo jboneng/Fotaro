@@ -613,7 +613,7 @@ fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(ShapeKind)) {
 }
 
 /// A small text button with a thin outline (Add, Subtract…), and an optional ▾.
-fn pill(ui: &mut egui::Ui, text: &str, menu: bool) -> egui::Response {
+pub(super) fn pill(ui: &mut egui::Ui, text: &str, menu: bool) -> egui::Response {
     let font = egui::FontId::proportional(11.5);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, theme::TEXT);
     let w = galley.size().x + if menu { 22.0 } else { 14.0 };
@@ -941,7 +941,7 @@ fn implemented(p: LocalParam) -> bool {
 }
 
 /// A section header like the other panels' (title on the right), without collapsing.
-fn header(ui: &mut egui::Ui, title: &str, icon: Option<ShapeKind>) {
+pub(super) fn header(ui: &mut egui::Ui, title: &str, icon: Option<ShapeKind>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::SECTION_HEADER);
@@ -1063,19 +1063,35 @@ pub(super) fn masking_button(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let n = d.settings.masks.len();
     let (strip, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::hover());
     ui.painter().rect_filled(strip, 0.0, theme::SECTION_HEADER);
-    let button = Rect::from_center_size(strip.right_center() - egui::vec2(26.0, 0.0), egui::vec2(34.0, 26.0));
-    let on = d.masking.is_some();
-    let resp = ui.interact(button, ui.scope_id().with("masking_tool"), egui::Sense::click());
-    let painter = ui.painter();
-    if on {
-        painter.rect_filled(button, 3.0, Color32::from_rgb(0x58, 0x58, 0x58));
-    } else if resp.hovered() {
-        painter.rect_filled(button, 3.0, Color32::from_rgb(0x44, 0x44, 0x44));
+    // Right to left: Masking, then Crop & Straighten.
+    let slot = |k: f32| {
+        Rect::from_center_size(
+            strip.right_center() - egui::vec2(26.0 + 42.0 * k, 0.0),
+            egui::vec2(34.0, 26.0),
+        )
+    };
+    let tool = |ui: &mut egui::Ui, rect: Rect, on: bool, id: &str| {
+        let resp = ui.interact(rect, ui.scope_id().with(id), egui::Sense::click());
+        if on {
+            ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(0x58, 0x58, 0x58));
+        } else if resp.hovered() {
+            ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(0x44, 0x44, 0x44));
+        }
+        let color = if on || resp.hovered() { theme::TEXT_STRONG } else { theme::TEXT };
+        (resp, color)
+    };
+    let cropping = d.cropping.is_some();
+    let (crop, color) = tool(ui, slot(1.0), cropping, "crop_tool");
+    super::icons::crop(ui.painter(), slot(1.0).center(), 7.5, color);
+    if crop.on_hover_text("Crop & Straighten (R)").clicked() && d.photo.is_some() {
+        super::crop::set_cropping(d, !cropping);
     }
-    let color = if on || resp.hovered() { theme::TEXT_STRONG } else { theme::TEXT };
-    super::icons::masking(painter, button.center(), 7.5, color);
+    let on = d.masking.is_some();
+    let (resp, color) = tool(ui, slot(0.0), on, "masking_tool");
+    let painter = ui.painter();
+    super::icons::masking(painter, slot(0.0).center(), 7.5, color);
     if n > 0 {
-        let badge = button.right_top() + egui::vec2(-4.0, 5.0);
+        let badge = slot(0.0).right_top() + egui::vec2(-4.0, 5.0);
         painter.circle_filled(badge, 6.5, SELECTED);
         painter.text(
             badge,
@@ -1085,16 +1101,12 @@ pub(super) fn masking_button(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             Color32::WHITE,
         );
     }
-    painter.text(
-        button.left_center() - egui::vec2(8.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        "Masking",
-        egui::FontId::proportional(12.5),
-        if on { theme::TEXT_STRONG } else { theme::TEXT_WEAK },
-    );
     if resp.on_hover_text("Masking: Brush, Linear and Radial Gradient (Shift+W)").clicked()
         && d.photo.is_some()
     {
+        if !on {
+            d.cropping = None;
+        }
         set_masking(d, !on);
     }
 }
@@ -1120,6 +1132,9 @@ pub fn set_masking(d: &mut DevelopState, on: bool) {
         overlay: false,
         ..Masking::default()
     });
+    if on {
+        d.cropping = None;
+    }
     d.picking_wb = false;
     d.picking_detail = false;
     d.request_renders();

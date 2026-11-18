@@ -9,7 +9,7 @@
 
 use super::settings::DevelopSettings;
 use super::source::WorkingImage;
-use super::transform::{Upright, camera, turned};
+use super::transform::{Crop, Mapping, Transform, Upright, camera, turned};
 
 /// A straight edge of the photo, in normalised coordinates (centre 0, half long side 1).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -402,6 +402,27 @@ pub fn guided_angles(guides: &[[f32; 4]], w: u32, h: u32) -> [f32; 3] {
 fn finish(a: [f64; 3]) -> [f32; 3] {
     let limits = [40.0, 40.0, 45.0];
     std::array::from_fn(|i| (a[i].to_degrees().clamp(-limits[i], limits[i]) * 100.0).round() as f32 / 100.0)
+}
+
+/// Crop & Straighten's Auto: the angle (degrees, clockwise) that levels the photo as the
+/// Transform shows it, from its lines; 0 when it finds nothing to level by.
+pub fn straighten_angle(img: &WorkingImage, t: &Transform) -> f32 {
+    let base = Transform { crop: Crop::default(), ..t.clone() };
+    let (w, h) = (img.width(), img.height());
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    let half = fw.max(fh) / 2.0;
+    let map = Mapping::new(&base, w, h);
+    let (ow, oh) = (f64::from(map.out.0), f64::from(map.out.1));
+    let ohalf = ow.max(oh) / 2.0;
+    // Each line's ends: normalised source → source pixels → shown pixels → normalised.
+    let shown = |p: [f64; 2]| {
+        let (x, y) = map.output(p[0] * half + fw / 2.0, p[1] * half + fh / 2.0)?;
+        Some([(x - ow / 2.0) / ohalf, (y - oh / 2.0) / ohalf])
+    };
+    let lines: Vec<Segment> =
+        detect_lines(img).iter().filter_map(|s| Some(Segment { a: shown(s.a)?, b: shown(s.b)? })).collect();
+    // The camera's roll turns the picture the way the crop's angle does.
+    upright_angles(&lines, Upright::Level)[2]
 }
 
 /// Settings with Upright `mode` applied, analysing `img` (the untransformed photo) for

@@ -190,6 +190,8 @@ pub enum Slider {
     MaskAmount(u8),
     /// A radial gradient's Feather (mask index, component index).
     MaskFeather(u8, u8),
+    /// Crop & Straighten: the Angle.
+    CropAngle,
 }
 
 impl Slider {
@@ -231,6 +233,7 @@ impl Slider {
             Self::Local(_, p) => p.label(),
             Self::MaskAmount(_) => "Amount",
             Self::MaskFeather(..) => "Feather",
+            Self::CropAngle => "Angle",
         }
     }
 
@@ -243,6 +246,7 @@ impl Slider {
             Self::Detail(p) => p.range(),
             Self::Effect(p) => p.range(),
             Self::Transform(p) => p.range(),
+            Self::CropAngle => (-super::transform::MAX_CROP_ANGLE, super::transform::MAX_CROP_ANGLE),
             Self::Local(_, p) => p.range(),
             Self::MaskAmount(_) | Self::MaskFeather(..) => (0.0, 100.0),
             Self::Grade(_, GradeParam::Hue) => (0.0, 360.0),
@@ -256,6 +260,7 @@ impl Slider {
             Self::Exposure => 2,
             Self::Detail(DetailParam::SharpenRadius) => 1,
             Self::Transform(p) => p.decimals(),
+            Self::CropAngle => 2,
             Self::Local(_, p) => p.decimals(),
             _ => 0,
         }
@@ -288,6 +293,7 @@ impl Slider {
             Self::Detail(p) => p.get(&s.detail),
             Self::Effect(p) => p.get(&s.effects),
             Self::Transform(p) => p.get(&s.transform),
+            Self::CropAngle => s.transform.crop.angle,
             Self::Local(i, p) => s.masks.get(usize::from(i)).map_or(0.0, |m| p.get(&m.adjust)),
             Self::MaskAmount(i) => s.masks.get(usize::from(i)).map_or(0.0, |m| m.amount),
             Self::MaskFeather(i, j) => {
@@ -352,6 +358,7 @@ impl Slider {
             Self::Detail(p) => p.get_mut(&mut s.detail),
             Self::Effect(p) => p.get_mut(&mut s.effects),
             Self::Transform(p) => p.get_mut(&mut s.transform),
+            Self::CropAngle => &mut s.transform.crop.angle,
             Self::Local(..) | Self::MaskAmount(_) | Self::MaskFeather(..) => unreachable!("handled above"),
         };
         *field = v;
@@ -481,6 +488,10 @@ impl DevelopSettings {
                 eat(a.to_bits());
             }
             eat(u32::from(t.constrain_crop));
+            let c = &t.crop;
+            for v in [c.left, c.top, c.right, c.bottom, c.angle] {
+                eat(v.to_bits());
+            }
             for v in t.guides.iter().flatten() {
                 eat(v.to_bits());
             }
@@ -556,6 +567,17 @@ impl DevelopSettings {
             }
             if t.guides != o.guides {
                 return "Upright: Guided".into();
+            }
+            if t.crop != o.crop {
+                return if (t.crop.left, t.crop.top, t.crop.right, t.crop.bottom)
+                    == (o.crop.left, o.crop.top, o.crop.right, o.crop.bottom)
+                {
+                    format!("Crop Angle {:.2}", t.crop.angle)
+                } else if t.crop.is_full() {
+                    "Reset Crop".into()
+                } else {
+                    "Crop".into()
+                };
             }
             if t.constrain_crop != o.constrain_crop {
                 return format!("Constrain Crop: {}", if t.constrain_crop { "On" } else { "Off" });

@@ -1288,6 +1288,25 @@ impl PhotoLibraryApp {
             self.notify(format!("{} arrives in {phase}", sc.description));
             return;
         }
+        // With the crop tool open, X swaps portrait / landscape and Enter closes it, as in LrC.
+        if self.module == Module::Develop
+            && let Some(s) = &mut self.session
+            && s.develop.cropping.is_some()
+        {
+            match action {
+                Action::SetFlag { flag: Flag::Rejected, advance: false } => {
+                    if crate::ui::swap_orientation(&mut s.develop) {
+                        self.develop_op(|d, c| d.commit(c, None));
+                    }
+                    return;
+                }
+                Action::LoupeView => {
+                    crate::ui::set_cropping(&mut s.develop, false);
+                    return;
+                }
+                _ => {}
+            }
+        }
         // In Compare and Survey the arrow keys move within the view.
         if matches!(self.view, View::Compare | View::Survey)
             && matches!(action, Action::Next | Action::Previous | Action::Up | Action::Down)
@@ -1332,6 +1351,13 @@ impl PhotoLibraryApp {
                     if let Some(s) = &mut self.session {
                         s.develop.picking_wb = false;
                         s.develop.picking_detail = false;
+                        // Crop: Esc puts the Straighten tool away, then closes the crop tool.
+                        let d = &mut s.develop;
+                        match &mut d.cropping {
+                            Some(t) if t.straighten => t.straighten = false,
+                            Some(_) => crate::ui::set_cropping(d, false),
+                            None => {}
+                        }
                         // Masking: Esc drops the tool, then leaves masking.
                         let d = &mut s.develop;
                         match &mut d.masking {
@@ -1640,6 +1666,8 @@ impl PhotoLibraryApp {
             | Action::ClippingIndicators
             | Action::Masking
             | Action::NewBrushMask
+            | Action::CropTool
+            | Action::ResetCrop
             | Action::BrushSize(_)
             | Action::BrushFeather(_)
             | Action::NewLinearMask
@@ -1963,6 +1991,12 @@ impl PhotoLibraryApp {
             Action::ClippingIndicators => d.set_clipping(!d.clipping),
             Action::Masking => crate::ui::set_masking(d, d.masking.is_none()),
             Action::NewBrushMask => crate::ui::new_mask_tool(d, crate::develop::ShapeKind::Brush),
+            Action::CropTool => crate::ui::set_cropping(d, d.cropping.is_none()),
+            Action::ResetCrop => self.develop_op(|d, c| {
+                let mut s = d.settings.clone();
+                s.transform.crop = Default::default();
+                d.apply(c, s, "Reset Crop")
+            }),
             Action::BrushSize(dir) => d.brush.step_size(dir),
             Action::BrushFeather(dir) => d.brush.step_feather(dir),
             Action::NewLinearMask => crate::ui::new_mask_tool(d, crate::develop::ShapeKind::Linear),

@@ -32,5 +32,5 @@ pub use pipeline::{
 };
 pub use settings::{DevelopSettings, PROCESS_VERSION, Slider, Treatment, WbPreset};
 pub use source::{ResolvedWb, SourceColor, WorkingImage};
-pub use transform::{MAX_GUIDES, Transform, TransformParam, Upright};
-pub use upright::{apply_upright, guided_angles};
+pub use transform::{Crop, MAX_CROP_ANGLE, MAX_GUIDES, Transform, TransformParam, Upright};
+pub use upright::{apply_upright, guided_angles, straighten_angle};
