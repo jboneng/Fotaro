@@ -582,3 +582,16 @@ All nine steps of the Basic panel plan are done.
       unedited RAWs' previews are rendered with them. Proxy render (1280 px) with the RAW
       defaults ~20–30 ms, everything on ~35–45 ms. The develop example now uses the app's
       allocator (the system one made big buffers page-fault and doubled the timings).
+
+## Develop: Effects
+- [x] Post-Crop Vignetting: Style (Highlight Priority: an exposure change before the tone
+      curve, so highlights roll off; Color Priority: one gain per pixel after the tone
+      curve, keeping hues; Paint Overlay: blended towards black or white), Amount, Midpoint,
+      Roundness (−100 follows the frame's rectangle, 0 its ellipse, +100 a circle), Feather
+      and Highlights (keeps bright areas bright when darkening). No crop exists yet, so it
+      follows the whole frame. The shape's per-column and per-row terms are precomputed.
+- [x] Grain: Amount, Size (grains 1–5 full-size pixels), Roughness (more of a finer,
+      irregular layer). Hashed value noise in image coordinates, so 1:1 regions and exports
+      match; grains smaller than a rendered pixel average out (weaker, finer grain in a fit
+      view, as in LrC). Applied last, after Detail, so noise reduction doesn't remove it and
+      sharpening doesn't sharpen it; strongest in the midtones. Auto Tone ignores Effects.

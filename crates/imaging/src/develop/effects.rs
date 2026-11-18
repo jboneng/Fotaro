@@ -1,0 +1,418 @@
+//! Effects (LrC's Effects panel): Post-Crop Vignetting and Grain.
+//!
+//! The vignette's shape follows the image's frame (there is no crop yet, so the whole
+//! image). Grain is sized in full-size pixels, like Detail: a 1:1 view shows the real
+//! grain, a smaller view the averaged-out texture, as in LrC.
+
+use serde::{Deserialize, Serialize};
+
+use super::local::fast_exp2;
+
+/// How the vignette changes the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VignetteStyle {
+    /// Like an exposure change before the tone curve: highlights roll off, colours shift
+    /// a little.
+    #[default]
+    HighlightPriority,
+    /// After the tone curve, keeping hues; bright areas may lose detail.
+    ColorPriority,
+    /// Blends towards black or white (LrC's older, flatter style).
+    PaintOverlay,
+}
+
+impl VignetteStyle {
+    pub const ALL: [VignetteStyle; 3] = [Self::HighlightPriority, Self::ColorPriority, Self::PaintOverlay];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HighlightPriority => "Highlight Priority",
+            Self::ColorPriority => "Color Priority",
+            Self::PaintOverlay => "Paint Overlay",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Effects {
+    pub vignette_style: VignetteStyle,
+    /// −100 (darken) ..+100 (lighten).
+    pub vignette_amount: f32,
+    /// How far in the effect reaches, 0..100 (smaller: further in).
+    pub vignette_midpoint: f32,
+    /// −100 (follows the frame's rectangle) ..+100 (a circle).
+    pub vignette_roundness: f32,
+    /// Softness of the edge, 0..100.
+    pub vignette_feather: f32,
+    /// Keeps bright areas bright when darkening (Highlight and Color Priority), 0..100.
+    pub vignette_highlights: f32,
+    pub grain_amount: f32,
+    /// Grain size and roughness, 0..100.
+    pub grain_size: f32,
+    pub grain_roughness: f32,
+}
+
+impl Default for Effects {
+    fn default() -> Self {
+        Effects {
+            vignette_style: VignetteStyle::HighlightPriority,
+            vignette_amount: 0.0,
+            vignette_midpoint: 50.0,
+            vignette_roundness: 0.0,
+            vignette_feather: 50.0,
+            vignette_highlights: 0.0,
+            grain_amount: 0.0,
+            grain_size: 25.0,
+            grain_roughness: 50.0,
+        }
+    }
+}
+
+/// An Effects panel slider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectParam {
+    VignetteAmount,
+    VignetteMidpoint,
+    VignetteRoundness,
+    VignetteFeather,
+    VignetteHighlights,
+    GrainAmount,
+    GrainSize,
+    GrainRoughness,
+}
+
+impl EffectParam {
+    pub const VIGNETTE: [EffectParam; 5] = [
+        Self::VignetteAmount,
+        Self::VignetteMidpoint,
+        Self::VignetteRoundness,
+        Self::VignetteFeather,
+        Self::VignetteHighlights,
+    ];
+    pub const GRAIN: [EffectParam; 3] = [Self::GrainAmount, Self::GrainSize, Self::GrainRoughness];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::VignetteAmount | Self::GrainAmount => "Amount",
+            Self::VignetteMidpoint => "Midpoint",
+            Self::VignetteRoundness => "Roundness",
+            Self::VignetteFeather => "Feather",
+            Self::VignetteHighlights => "Highlights",
+            Self::GrainSize => "Size",
+            Self::GrainRoughness => "Roughness",
+        }
+    }
+
+    /// The History name's group.
+    pub fn group(self) -> &'static str {
+        if Self::VIGNETTE.contains(&self) { "Post-Crop Vignette" } else { "Grain" }
+    }
+
+    /// Amount and Roundness go both ways; the rest are 0..100.
+    pub fn signed(self) -> bool {
+        matches!(self, Self::VignetteAmount | Self::VignetteRoundness)
+    }
+
+    pub fn range(self) -> (f32, f32) {
+        if self.signed() { (-100.0, 100.0) } else { (0.0, 100.0) }
+    }
+
+    pub fn get(self, e: &Effects) -> f32 {
+        *match self {
+            Self::VignetteAmount => &e.vignette_amount,
+            Self::VignetteMidpoint => &e.vignette_midpoint,
+            Self::VignetteRoundness => &e.vignette_roundness,
+            Self::VignetteFeather => &e.vignette_feather,
+            Self::VignetteHighlights => &e.vignette_highlights,
+            Self::GrainAmount => &e.grain_amount,
+            Self::GrainSize => &e.grain_size,
+            Self::GrainRoughness => &e.grain_roughness,
+        }
+    }
+
+    pub fn get_mut(self, e: &mut Effects) -> &mut f32 {
+        match self {
+            Self::VignetteAmount => &mut e.vignette_amount,
+            Self::VignetteMidpoint => &mut e.vignette_midpoint,
+            Self::VignetteRoundness => &mut e.vignette_roundness,
+            Self::VignetteFeather => &mut e.vignette_feather,
+            Self::VignetteHighlights => &mut e.vignette_highlights,
+            Self::GrainAmount => &mut e.grain_amount,
+            Self::GrainSize => &mut e.grain_size,
+            Self::GrainRoughness => &mut e.grain_roughness,
+        }
+    }
+}
+
+/// Stops of exposure at the frame's edge for Amount ±100.
+const VIGNETTE_STOPS: f32 = 2.5;
+
+#[inline]
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Entries of the table from a squarer vignette's summed distance terms to its weight.
+const SHAPE_LUT: usize = 4096;
+
+/// The vignette, ready to render an image `w × h`.
+pub(super) struct Vignette {
+    pub(super) style: VignetteStyle,
+    /// −1..+1.
+    amount: f32,
+    highlights: f32,
+    /// Where the effect is half on (0 centre, 1 corner) and half its transition width.
+    centre: f32,
+    half_width: f32,
+    /// Roundness above 0: how far towards a circle.
+    circle: f32,
+    /// Distance terms per column and per row (they add up): the frame's shape
+    /// (`|n|^p / 2`, n −1..+1 across the frame) and, for a rounder vignette, the squared
+    /// distance from the centre with the corners at 1.
+    frame_x: Vec<f32>,
+    frame_y: Vec<f32>,
+    round_x: Vec<f32>,
+    round_y: Vec<f32>,
+    /// For a squarer vignette (exponent above 2): summed frame terms → weight.
+    shape: Option<Vec<f32>>,
+}
+
+impl Vignette {
+    pub(super) fn new(e: &Effects, w: u32, h: u32) -> Option<Vignette> {
+        if e.vignette_amount == 0.0 {
+            return None;
+        }
+        let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+        let roundness = e.vignette_roundness / 100.0;
+        // Below 0 the frame's ellipse turns into a squarer superellipse.
+        let p = 2.0 + 8.0 * (-roundness).max(0.0);
+        let half_diag = (w as f32).hypot(h as f32) / 2.0;
+        let axis = |n: usize, f: &dyn Fn(f32) -> f32| -> Vec<f32> {
+            (0..n).map(|i| f(((i as f32 + 0.5) / n as f32 * 2.0 - 1.0).abs())).collect()
+        };
+        let frame = |t: f32| if p == 2.0 { t * t * 0.5 } else { t.powf(p) * 0.5 };
+        let circle = roundness.max(0.0);
+        let (round_x, round_y) = if circle > 0.0 {
+            let (hw, hh) = (w as f32 / 2.0 / half_diag, h as f32 / 2.0 / half_diag);
+            (axis(w, &|t| (t * hw).powi(2)), axis(h, &|t| (t * hh).powi(2)))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let mut v = Vignette {
+            style: e.vignette_style,
+            amount: e.vignette_amount / 100.0,
+            highlights: e.vignette_highlights / 100.0,
+            centre: 0.35 + 0.7 * e.vignette_midpoint / 100.0,
+            half_width: 0.01 + 0.5 * e.vignette_feather / 100.0,
+            circle,
+            frame_x: axis(w, &frame),
+            frame_y: axis(h, &frame),
+            round_x,
+            round_y,
+            shape: None,
+        };
+        if p != 2.0 {
+            let table = (0..SHAPE_LUT)
+                .map(|i| v.falloff((i as f32 / (SHAPE_LUT - 1) as f32).powf(1.0 / p)))
+                .collect();
+            v.shape = Some(table);
+        }
+        Some(v)
+    }
+
+    /// Weight at distance `d` (0 centre, 1 corner).
+    #[inline]
+    fn falloff(&self, d: f32) -> f32 {
+        smoothstep(self.centre - self.half_width, self.centre + self.half_width, d)
+    }
+
+    /// How much of the effect pixel (x, y) gets, 0 (centre) ..1.
+    #[inline]
+    fn weight(&self, x: usize, y: usize) -> f32 {
+        let s = self.frame_x[x] + self.frame_y[y];
+        if let Some(shape) = &self.shape {
+            let f = s.min(1.0) * (SHAPE_LUT - 1) as f32;
+            let i = (f as usize).min(SHAPE_LUT - 2);
+            return shape[i] + (f - i as f32) * (shape[i + 1] - shape[i]);
+        }
+        let frame = s.sqrt();
+        let d = if self.circle > 0.0 {
+            let round = (self.round_x[x] + self.round_y[y]).sqrt();
+            frame + self.circle * (round - frame)
+        } else {
+            frame
+        };
+        self.falloff(d)
+    }
+
+    /// Bright areas keep their brightness when darkening, by the Highlights amount.
+    #[inline]
+    fn protect(&self, v: f32, bright: f32) -> f32 {
+        if self.amount < 0.0 && self.highlights > 0.0 {
+            v * (1.0 - self.highlights * smoothstep(0.2, 0.9, bright))
+        } else {
+            v
+        }
+    }
+
+    /// Highlight Priority: an exposure gain on scene-linear values, before the tone curve;
+    /// `bright` is the pixel's luminance after exposure.
+    #[inline]
+    pub(super) fn gain(&self, x: usize, y: usize, bright: f32) -> f32 {
+        let v = self.protect(self.amount * self.weight(x, y), bright.max(0.0).sqrt());
+        fast_exp2(VIGNETTE_STOPS * v)
+    }
+
+    /// Color Priority and Paint Overlay: on display-linear values, after the tone curve.
+    #[inline]
+    pub(super) fn after_tone(&self, d: [f32; 3], x: usize, y: usize) -> [f32; 3] {
+        let v = self.amount * self.weight(x, y);
+        if v == 0.0 {
+            return d;
+        }
+        match self.style {
+            VignetteStyle::HighlightPriority => d,
+            VignetteStyle::ColorPriority => {
+                let hi = d[0].max(d[1]).max(d[2]);
+                let v = self.protect(v, hi.sqrt());
+                let g = fast_exp2(VIGNETTE_STOPS * v);
+                // One gain for all channels keeps the hue; past white, scale back down
+                // rather than clip channels apart.
+                let top = (hi * g).max(1.0);
+                d.map(|c| c * g / top)
+            }
+            VignetteStyle::PaintOverlay => {
+                // Mixed with black or white on perceptual values: flat, like paint.
+                let target = if v > 0.0 { 1.0 } else { 0.0 };
+                let k = v.abs();
+                d.map(|c| {
+                    let e = c.max(0.0).sqrt();
+                    let e = e + k * (target - e);
+                    e * e
+                })
+            }
+        }
+    }
+}
+
+/// Film-like grain, ready to render an image at `scale` rendered pixels per full-size
+/// pixel.
+pub(super) struct Grain {
+    /// Stops of brightness change at full strength.
+    amount: f32,
+    /// Rendered pixels per noise cell (at least one).
+    cell: f32,
+    roughness: f32,
+}
+
+impl Grain {
+    pub(super) fn new(e: &Effects, scale: f32) -> Option<Grain> {
+        if e.grain_amount <= 0.0 {
+            return None;
+        }
+        // Grain 1–5 full-size pixels across. Grains smaller than a rendered pixel
+        // average out: the texture gets finer and weaker, as when viewing a scan smaller.
+        let size = 1.0 + 4.0 * e.grain_size / 100.0;
+        let rendered = size * scale.max(1e-3);
+        Some(Grain {
+            amount: 0.6 * e.grain_amount / 100.0 * rendered.min(1.0),
+            cell: rendered.max(1.0),
+            roughness: e.grain_roughness / 100.0,
+        })
+    }
+
+    /// Value noise in −1..1 (about) at a point measured in noise cells.
+    #[inline]
+    fn noise(u: f32, v: f32, seed: u32) -> f32 {
+        let (i, j) = (u.floor(), v.floor());
+        let (fu, fv) = (u - i, v - j);
+        let (fu, fv) = (fu * fu * (3.0 - 2.0 * fu), fv * fv * (3.0 - 2.0 * fv));
+        let (i, j) = (i as i32 as u32, j as i32 as u32);
+        let at = |a: u32, b: u32| hash(a, b, seed);
+        let top = at(i, j) + fu * (at(i + 1, j) - at(i, j));
+        let bottom = at(i, j + 1) + fu * (at(i + 1, j + 1) - at(i, j + 1));
+        top + fv * (bottom - top)
+    }
+
+    /// Grain on linear RGB at (x, y): one brightness change for all channels (so any
+    /// linear RGB space), strongest in the midtones.
+    #[inline]
+    pub(super) fn apply(&self, rgb: [f32; 3], x: usize, y: usize) -> [f32; 3] {
+        let (u, v) = ((x as f32 + 0.5) / self.cell, (y as f32 + 0.5) / self.cell);
+        let smooth = Self::noise(u, v, 0x9e37_79b9);
+        // Roughness: more of a finer, irregular layer.
+        let fine = Self::noise(u * 2.3 + 17.0, v * 2.3 + 5.0, 0x85eb_ca6b);
+        let r = self.roughness;
+        let n = (smooth * (1.0 - 0.5 * r) + fine * r) * 1.8 / (1.0 + 0.5 * r);
+        let e = rgb[0].max(rgb[1]).max(rgb[2]).clamp(0.0, 1.0).sqrt();
+        let mid = 1.0 - (2.0 * e - 1.0).powi(4);
+        let g = fast_exp2(self.amount * n * mid);
+        rgb.map(|c| c * g)
+    }
+}
+
+/// A well-mixed hash of a lattice point → −1..1.
+#[inline]
+fn hash(x: u32, y: u32, seed: u32) -> f32 {
+    let mut h = x.wrapping_mul(0x8da6_b343) ^ y.wrapping_mul(0xd816_3841) ^ seed;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
+    h as f32 * (2.0 / u32::MAX as f32) - 1.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vignette_darkens_corners_not_the_centre() {
+        let e = Effects { vignette_amount: -100.0, ..Effects::default() };
+        let v = Vignette::new(&e, 300, 200).unwrap();
+        assert!((v.gain(150, 100, 0.2) - 1.0).abs() < 1e-3, "centre untouched");
+        assert!(v.gain(0, 0, 0.2) < 0.3, "corner darker");
+        assert!(v.gain(0, 100, 0.2) < v.gain(75, 100, 0.2), "darker towards the edge");
+        // Highlights protect bright pixels.
+        let hl = Vignette::new(&Effects { vignette_highlights: 100.0, ..e.clone() }, 300, 200).unwrap();
+        assert!(hl.gain(0, 0, 1.0) > 0.9);
+        // Lightening, rounder, other styles.
+        let light = Vignette::new(&Effects { vignette_amount: 100.0, ..e.clone() }, 300, 200).unwrap();
+        assert!(light.gain(0, 0, 0.2) > 3.0);
+        for style in VignetteStyle::ALL {
+            let r = Effects { vignette_style: style, vignette_roundness: 100.0, ..e.clone() };
+            let v = Vignette::new(&r, 300, 200).unwrap();
+            let corner = if style == VignetteStyle::HighlightPriority {
+                v.gain(0, 0, 0.2) * 0.5
+            } else {
+                v.after_tone([0.5; 3], 0, 0)[0]
+            };
+            assert!(corner < 0.3, "{style:?}: {corner}");
+        }
+        assert!(Vignette::new(&Effects::default(), 300, 200).is_none());
+    }
+
+    #[test]
+    fn grain_varies_midtones_and_fades_when_small() {
+        let e = Effects { grain_amount: 100.0, ..Effects::default() };
+        let g = Grain::new(&e, 1.0).unwrap();
+        let vals: Vec<f32> = (0..400).map(|i| g.apply([0.2; 3], i % 20, i / 20)[0]).collect();
+        let spread = |v: &[f32]| {
+            let m = v.iter().sum::<f32>() / v.len() as f32;
+            (v.iter().map(|x| (x - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        let s = spread(&vals);
+        assert!(s > 0.01, "grain shows: {s}");
+        // The same pixel gets the same grain (regions match whole renders).
+        assert_eq!(g.apply([0.2; 3], 7, 9), g.apply([0.2; 3], 7, 9));
+        // Black stays black; a small preview gets weaker grain.
+        assert_eq!(g.apply([0.0; 3], 3, 3), [0.0; 3]);
+        let small = Grain::new(&e, 0.1).unwrap();
+        let sv: Vec<f32> = (0..400).map(|i| small.apply([0.2; 3], i % 20, i / 20)[0]).collect();
+        assert!(spread(&sv) < s * 0.6);
+        assert!(Grain::new(&Effects::default(), 1.0).is_none());
+    }
+}

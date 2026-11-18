@@ -4,7 +4,9 @@
 //! exposure, Highlights / Shadows, Clarity and Texture (gains from local brightness maps,
 //! see [`super::local`]) → tone curve (whites, blacks, contrast, highlight shoulder; plus
 //! the base rendering for RAW files) → HSL → vibrance / saturation or B&W → Color Grading
-//! → output. Values are linear until the output encoding.
+//! → vignette (Highlight Priority acts as an exposure change before the tone curve) →
+//! Detail (sharpening, noise reduction) → grain → output. Values are linear until the
+//! output encoding.
 
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
@@ -12,6 +14,7 @@ use rayon::prelude::*;
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
 use super::detail::apply as apply_detail;
+use super::effects::{Effects, Grain, Vignette, VignetteStyle};
 use super::grading::Grading;
 use super::hsl::{HslAdjust, oklab_to_srgb, srgb_to_oklab};
 use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
@@ -166,6 +169,8 @@ struct Prepared {
     /// Dehaze, −1..+1, and the haze map (also used for its colour when adding haze).
     dehaze: f32,
     haze: Option<HazeMap>,
+    /// Post-Crop Vignetting, when on.
+    vignette: Option<Vignette>,
 }
 
 impl Prepared {
@@ -212,6 +217,7 @@ impl Prepared {
             region,
             dehaze: s.dehaze / 100.0,
             haze: None,
+            vignette: Vignette::new(&s.effects, img.width(), img.height()),
         };
         if prep.dehaze != 0.0 {
             let (w, h) = (img.width() as usize, img.height() as usize);
@@ -351,6 +357,12 @@ impl Prepared {
             }
             None => self.gain,
         };
+        let g = match &self.vignette {
+            Some(v) if v.style == VignetteStyle::HighlightPriority => {
+                g * v.gain(x, y, self.luminance(lin) * g)
+            }
+            _ => g,
+        };
         let mut d = [
             lookup(&self.luts[0], lin[0] * g),
             lookup(&self.luts[1], lin[1] * g),
@@ -362,9 +374,9 @@ impl Prepared {
         {
             d = hsl.apply(d);
         }
-        let y = self.luminance(d);
+        let luma = self.luminance(d);
         if self.bw {
-            d = [self.hsl.as_ref().map_or(y, |m| m.grey(d, y)).min(1.0); 3];
+            d = [self.hsl.as_ref().map_or(luma, |m| m.grey(d, luma)).min(1.0); 3];
         } else if self.vibrance != 0.0 || self.saturation != 0.0 {
             let (hi, lo) = (d[0].max(d[1]).max(d[2]), d[0].min(d[1]).min(d[2]));
             let sat = if hi > 1e-6 { (hi - lo) / hi } else { 0.0 };
@@ -375,11 +387,15 @@ impl Prepared {
                 v *= 1.0 - 0.6 * (-((h - 0.4) / 0.2).powi(2)).exp();
             }
             let f = (1.0 + v) * (1.0 + self.saturation);
-            d = d.map(|c| (y + (c - y) * f).max(0.0));
+            d = d.map(|c| (luma + (c - luma) * f).max(0.0));
         }
-        // Color Grading last, so it also tones black & white photos (split toning).
-        match &self.grading {
-            Some(g) => g.apply(d),
+        // Color Grading, so it also tones black & white photos (split toning); then the
+        // vignette's after-tone styles.
+        if let Some(g) = &self.grading {
+            d = g.apply(d);
+        }
+        match &self.vignette {
+            Some(v) => v.after_tone(d, x, y),
             None => d,
         }
     }
@@ -449,21 +465,32 @@ pub fn render_region_srgb8(img: &WorkingImage, s: &DevelopSettings, region: Regi
     let enc = SrgbEncoder::new();
     let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
     let mut out = RgbImage::new(region.w, region.h);
+    let grain = Grain::new(&s.effects, render_scale(img));
+    let grained = |rgb: [f32; 3], x: usize, y: usize| match &grain {
+        Some(g) => g.apply(rgb, x, y),
+        None => rgb,
+    };
+    let (rx, ry) = (region.x as usize, region.y as usize);
     if s.detail.is_active() {
         let detailed = Detailed::render(img, s, region);
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-                *o = detailed.srgb(i, j).map(|v| enc.encode(v));
+                *o = grained(detailed.srgb(i, j), rx + i, ry + j).map(|v| enc.encode(v));
             }
         });
         return out;
     }
     let prep = Prepared::new(img, s, region);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
-        let l = matrix::apply(&to_srgb, prep.pixel(p, x, y));
+        let l = grained(matrix::apply(&to_srgb, prep.pixel(p, x, y)), x, y);
         o.copy_from_slice(&l.map(|v| enc.encode(v)));
     });
     out
+}
+
+/// Rendered pixels per full-size pixel (Detail and Grain are sized in full-size pixels).
+fn render_scale(img: &WorkingImage) -> f32 {
+    img.width() as f32 / img.full_size.0.max(1) as f32
 }
 
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
@@ -471,19 +498,24 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
     let region = Region::whole(img);
     let mut out = ImageBuffer::<Rgb<u16>, Vec<u16>>::new(img.width(), img.height());
     let to_u16 = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+    let grain = Grain::new(&s.effects, render_scale(img));
+    let grained = |rgb: [f32; 3], x: usize, y: usize| match &grain {
+        Some(g) => g.apply(rgb, x, y),
+        None => rgb,
+    };
     if s.detail.is_active() {
         let detailed = Detailed::render(img, s, region);
         let to_work = matrix::to_f32(&matrix::srgb_to_work());
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-                *o = matrix::apply(&to_work, detailed.srgb(i, j)).map(to_u16);
+                *o = grained(matrix::apply(&to_work, detailed.srgb(i, j)), i, j).map(to_u16);
             }
         });
         return out;
     }
     let prep = Prepared::new(img, s, region);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
-        o.copy_from_slice(&prep.pixel(p, x, y).map(to_u16));
+        o.copy_from_slice(&grained(prep.pixel(p, x, y), x, y).map(to_u16));
     });
     out
 }
@@ -501,7 +533,7 @@ struct Detailed {
 impl Detailed {
     fn render(img: &WorkingImage, s: &DevelopSettings, region: Region) -> Detailed {
         // Rendered pixels per full-size pixel: the filters' radii are in full-size pixels.
-        let scale = img.width() as f32 / img.full_size.0.max(1) as f32;
+        let scale = render_scale(img);
         let m = s.detail.margin(scale) as u32;
         let g = s.detail.grid(scale) as u32;
         let (x0, y0) = (region.x.saturating_sub(m) / g * g, region.y.saturating_sub(m) / g * g);
@@ -559,6 +591,8 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
         shadows: 0.0,
         whites: 0.0,
         blacks: 0.0,
+        // The vignette would count as dark or bright corners.
+        effects: Effects::default(),
         ..s.clone()
     };
     let prep = Prepared::new(img, &neutral, Region::whole(img));

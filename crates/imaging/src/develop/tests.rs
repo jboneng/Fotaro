@@ -476,3 +476,48 @@ fn detail_sharpens_and_smooths_and_regions_still_match() {
         }
     }
 }
+
+#[test]
+fn effects_vignette_and_grain_render_and_regions_still_match() {
+    let img: RgbImage = ImageBuffer::from_pixel(160, 120, Rgb([128, 128, 128]));
+    let w = rendered(&img);
+    let centre_and_corner = |i: &RgbImage| (i.get_pixel(80, 60)[1], i.get_pixel(2, 2)[1]);
+    for style in VignetteStyle::ALL {
+        let st = DevelopSettings {
+            effects: Effects { vignette_style: style, vignette_amount: -80.0, ..Effects::default() },
+            ..Default::default()
+        };
+        let (c, k) = centre_and_corner(&render_srgb8(&w, &st));
+        assert!(c.abs_diff(128) <= 2 && k + 30 < c, "{style:?}: centre {c}, corner {k}");
+    }
+    let light = DevelopSettings {
+        effects: Effects { vignette_amount: 80.0, ..Effects::default() },
+        ..Default::default()
+    };
+    let (c, k) = centre_and_corner(&render_srgb8(&w, &light));
+    assert!(k > c + 30, "lighter corners: {c} {k}");
+
+    let grain = DevelopSettings {
+        effects: Effects { grain_amount: 80.0, ..Effects::default() },
+        ..Default::default()
+    };
+    let g = render_srgb8(&w, &grain);
+    assert!(spread_in(&g, 10..60, 20..100) > 2.0, "grain shows");
+
+    // Regions match the whole render, with and without Detail.
+    for detail in [Detail::default(), Detail { sharpen_amount: 60.0, color: 40.0, ..Detail::default() }] {
+        let st = DevelopSettings {
+            effects: Effects { vignette_amount: -60.0, grain_amount: 60.0, ..Effects::default() },
+            detail,
+            ..Default::default()
+        };
+        let whole = render_srgb8(&w, &st);
+        let part = render_region_srgb8(&w, &st, Region { x: 50, y: 30, w: 60, h: 50 });
+        for y in 0..50 {
+            for x in 0..60 {
+                let (a, b) = (part.get_pixel(x, y), whole.get_pixel(x + 50, y + 30));
+                assert!((0..3).all(|c| a[c].abs_diff(b[c]) <= 1), "({x}, {y}): {a:?} vs {b:?}");
+            }
+        }
+    }
+}

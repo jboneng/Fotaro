@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::curve::ToneCurve;
 use super::detail::{Detail, DetailParam};
+use super::effects::{EffectParam, Effects};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::hsl::{COLORS, Hsl, HslGroup};
 
@@ -107,6 +108,8 @@ pub struct DevelopSettings {
     pub grading: ColorGrading,
     /// The Detail panel (sharpening, noise reduction).
     pub detail: Detail,
+    /// The Effects panel (post-crop vignetting, grain).
+    pub effects: Effects,
 }
 
 impl Default for DevelopSettings {
@@ -133,6 +136,7 @@ impl Default for DevelopSettings {
             bw_mix: [0.0; 8],
             grading: ColorGrading::default(),
             detail: Detail::default(),
+            effects: Effects::default(),
         }
     }
 }
@@ -168,6 +172,8 @@ pub enum Slider {
     GradeBalance,
     /// The Detail panel.
     Detail(DetailParam),
+    /// The Effects panel.
+    Effect(EffectParam),
 }
 
 impl Slider {
@@ -204,6 +210,7 @@ impl Slider {
             Self::GradeBlending => "Blending",
             Self::GradeBalance => "Balance",
             Self::Detail(p) => p.label(),
+            Self::Effect(p) => p.label(),
         }
     }
 
@@ -214,6 +221,7 @@ impl Slider {
             Self::Tint if kelvin => (-150.0, 150.0),
             Self::Exposure => (-5.0, 5.0),
             Self::Detail(p) => p.range(),
+            Self::Effect(p) => p.range(),
             Self::Grade(_, GradeParam::Hue) => (0.0, 360.0),
             Self::Grade(_, GradeParam::Saturation) | Self::GradeBlending => (0.0, 100.0),
             _ => (-100.0, 100.0),
@@ -253,6 +261,7 @@ impl Slider {
             Self::GradeBlending => s.grading.blending,
             Self::GradeBalance => s.grading.balance,
             Self::Detail(p) => p.get(&s.detail),
+            Self::Effect(p) => p.get(&s.effects),
         }
     }
 
@@ -284,6 +293,7 @@ impl Slider {
             Self::GradeBlending => &mut s.grading.blending,
             Self::GradeBalance => &mut s.grading.balance,
             Self::Detail(p) => p.get_mut(&mut s.detail),
+            Self::Effect(p) => p.get_mut(&mut s.effects),
         };
         *field = v;
     }
@@ -297,6 +307,7 @@ impl Slider {
                 format!("{v:.0}")
             }
             Self::Detail(_) => format!("{v:.*}", self.decimals()),
+            Self::Effect(p) if !p.signed() => format!("{v:.0}"),
             _ if v.abs() < 0.5 * 10f32.powi(-(self.decimals() as i32)) => {
                 format!("{:.*}", self.decimals(), 0.0)
             }
@@ -391,6 +402,13 @@ impl DevelopSettings {
                 eat(p.get(&self.detail).to_bits());
             }
         }
+        if self.effects != Effects::default() {
+            eat(0xeff_ec75);
+            eat(self.effects.vignette_style as u32);
+            for p in EffectParam::VIGNETTE.into_iter().chain(EffectParam::GRAIN) {
+                eat(p.get(&self.effects).to_bits());
+            }
+        }
         if self.grading != ColorGrading::default() {
             eat(0x9_ade);
             let g = &self.grading;
@@ -443,6 +461,24 @@ impl DevelopSettings {
                     format!("{}: {} {}", p.group(), p.label(), s.format(s.get(self), kelvin))
                 }
                 _ => "Detail".into(),
+            };
+        }
+        if self.effects != old.effects {
+            let (e, o) = (&self.effects, &old.effects);
+            if e.vignette_style != o.vignette_style {
+                return format!("Post-Crop Vignette: {}", e.vignette_style.label());
+            }
+            let changed: Vec<EffectParam> = EffectParam::VIGNETTE
+                .into_iter()
+                .chain(EffectParam::GRAIN)
+                .filter(|p| p.get(e) != p.get(o))
+                .collect();
+            return match changed.as_slice() {
+                [p] => {
+                    let s = Slider::Effect(*p);
+                    format!("{}: {} {}", p.group(), p.label(), s.format(s.get(self), kelvin))
+                }
+                _ => "Effects".into(),
             };
         }
         if self.grading != old.grading {

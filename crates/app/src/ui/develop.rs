@@ -13,11 +13,11 @@
 use catalog::PhotoRow;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Vec2};
 use imaging::PreviewSize;
-use imaging::develop::DetailParam;
 use imaging::develop::{
     CurveChannel, CurveFns, DEFAULT_SPLITS, GradeParam, GradeWheel, HslGroup, POINT_PRESETS, Region,
     SWATCHES, Slider, ToneCurve, Treatment, WbPreset,
 };
+use imaging::develop::{DetailParam, EffectParam, VignetteStyle};
 
 use super::panels::Side;
 use super::shortcuts::Action;
@@ -27,7 +27,7 @@ use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::Slot;
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
-const PLANNED_RIGHT: &[&str] = &["Lens Corrections", "Transform", "Effects"];
+const PLANNED_RIGHT: &[&str] = &["Lens Corrections", "Transform"];
 const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
@@ -157,6 +157,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                         ui.label(weak("Comes in a later version."));
                     });
                 }
+                stack.section(ui, Side::Right, "Effects", RIGHT, false, |ui| effects_panel(app, ui));
                 app.ui.dev_right = stack;
             });
         });
@@ -1331,6 +1332,83 @@ fn detail_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 default: p.get(&defaults.detail),
                 log: false,
                 gradient: None,
+                kelvin: false,
+            };
+            let mut v = slider.get(&st);
+            let row = ui.add_enabled_ui(enabled, |ui| slider_row(ui, &spec, &mut v));
+            if row.inner.changed {
+                slider.set(&mut st, v);
+            }
+            if row.inner.done {
+                done = Some(None);
+            }
+        }
+    }
+    if st != d.settings {
+        d.set_live(st);
+    }
+    if let Some(label) = done {
+        app.run(Command::DevelopCommit(label));
+    }
+}
+
+/// LrC's Effects panel: Post-Crop Vignetting (Style, Amount, Midpoint, Roundness, Feather,
+/// Highlights) and Grain (Amount, Size, Roughness). There is no crop yet, so the vignette
+/// follows the whole frame.
+fn effects_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
+    let d = &mut s.develop;
+    if d.photo.is_none() {
+        ui.label(weak("Select a photo to develop."));
+        return;
+    }
+    let defaults = d.defaults();
+    let mut st = d.settings.clone();
+    let mut done: Option<Option<String>> = None;
+
+    sub_header(ui, "Post-Crop Vignetting", |_| {});
+    ui.horizontal(|ui| {
+        ui.label(weak("Style:"));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let before = st.effects.vignette_style;
+            egui::ComboBox::from_id_salt("dev_vignette_style")
+                .selected_text(before.label())
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for style in VignetteStyle::ALL {
+                        ui.selectable_value(&mut st.effects.vignette_style, style, style.label());
+                    }
+                });
+            if st.effects.vignette_style != before {
+                done = Some(None);
+            }
+        });
+    });
+    let groups: [&[EffectParam]; 2] = [&EffectParam::VIGNETTE, &EffectParam::GRAIN];
+    for (n, params) in groups.into_iter().enumerate() {
+        if n == 1 {
+            sub_header(ui, "Grain", |_| {});
+        }
+        for p in params {
+            // As in LrC, the shape sliders only matter once there is an amount; Highlights
+            // only when darkening in a style that protects them.
+            let e = &st.effects;
+            let enabled = match p {
+                EffectParam::VignetteAmount | EffectParam::GrainAmount => true,
+                EffectParam::VignetteHighlights => {
+                    e.vignette_amount < 0.0 && e.vignette_style != VignetteStyle::PaintOverlay
+                }
+                EffectParam::GrainSize | EffectParam::GrainRoughness => e.grain_amount > 0.0,
+                _ => e.vignette_amount != 0.0,
+            };
+            let slider = Slider::Effect(*p);
+            let spec = Spec {
+                slider,
+                range: slider.range(false),
+                default: p.get(&defaults.effects),
+                log: false,
+                gradient: (*p == EffectParam::VignetteAmount)
+                    .then_some([Color32::from_gray(20), Color32::from_gray(235)]),
                 kelvin: false,
             };
             let mut v = slider.get(&st);
