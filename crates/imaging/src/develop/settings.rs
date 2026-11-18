@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::curve::ToneCurve;
+use super::detail::{Detail, DetailParam};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::hsl::{COLORS, Hsl, HslGroup};
 
@@ -104,6 +105,8 @@ pub struct DevelopSettings {
     pub bw_mix: [f32; 8],
     /// The Color Grading panel.
     pub grading: ColorGrading,
+    /// The Detail panel (sharpening, noise reduction).
+    pub detail: Detail,
 }
 
 impl Default for DevelopSettings {
@@ -129,6 +132,7 @@ impl Default for DevelopSettings {
             hsl: Hsl::default(),
             bw_mix: [0.0; 8],
             grading: ColorGrading::default(),
+            detail: Detail::default(),
         }
     }
 }
@@ -162,6 +166,8 @@ pub enum Slider {
     Grade(GradeWheel, GradeParam),
     GradeBlending,
     GradeBalance,
+    /// The Detail panel.
+    Detail(DetailParam),
 }
 
 impl Slider {
@@ -197,6 +203,7 @@ impl Slider {
             Self::Grade(_, p) => p.label(),
             Self::GradeBlending => "Blending",
             Self::GradeBalance => "Balance",
+            Self::Detail(p) => p.label(),
         }
     }
 
@@ -206,6 +213,7 @@ impl Slider {
             Self::Temp if kelvin => (2000.0, 50000.0),
             Self::Tint if kelvin => (-150.0, 150.0),
             Self::Exposure => (-5.0, 5.0),
+            Self::Detail(p) => p.range(),
             Self::Grade(_, GradeParam::Hue) => (0.0, 360.0),
             Self::Grade(_, GradeParam::Saturation) | Self::GradeBlending => (0.0, 100.0),
             _ => (-100.0, 100.0),
@@ -213,7 +221,11 @@ impl Slider {
     }
 
     pub fn decimals(self) -> usize {
-        if self == Self::Exposure { 2 } else { 0 }
+        match self {
+            Self::Exposure => 2,
+            Self::Detail(DetailParam::SharpenRadius) => 1,
+            _ => 0,
+        }
     }
 
     pub fn get(self, s: &DevelopSettings) -> f32 {
@@ -240,6 +252,7 @@ impl Slider {
             Self::Grade(w, p) => s.grading.wheel(w).get(p),
             Self::GradeBlending => s.grading.blending,
             Self::GradeBalance => s.grading.balance,
+            Self::Detail(p) => p.get(&s.detail),
         }
     }
 
@@ -270,6 +283,7 @@ impl Slider {
             Self::Grade(w, p) => s.grading.wheel_mut(w).get_mut(p),
             Self::GradeBlending => &mut s.grading.blending,
             Self::GradeBalance => &mut s.grading.balance,
+            Self::Detail(p) => p.get_mut(&mut s.detail),
         };
         *field = v;
     }
@@ -282,6 +296,7 @@ impl Slider {
             Self::Grade(_, GradeParam::Hue | GradeParam::Saturation) | Self::GradeBlending => {
                 format!("{v:.0}")
             }
+            Self::Detail(_) => format!("{v:.*}", self.decimals()),
             _ if v.abs() < 0.5 * 10f32.powi(-(self.decimals() as i32)) => {
                 format!("{:.*}", self.decimals(), 0.0)
             }
@@ -293,12 +308,25 @@ impl Slider {
 impl DevelopSettings {
     /// True when nothing would change the photo (Temp/Tint only count when Custom).
     pub fn is_default(&self) -> bool {
+        self.is_default_for(false)
+    }
+
+    /// A new photo's settings: LrC gives RAW files some sharpening and colour noise
+    /// reduction; rendered files (JPEG, TIFF…) none.
+    pub fn default_for(raw: bool) -> Self {
+        let detail = if raw { Detail::raw() } else { Detail::default() };
+        DevelopSettings { detail, ..Self::default() }
+    }
+
+    /// True when nothing differs from [`Self::default_for`] (Temp/Tint only count when
+    /// Custom).
+    pub fn is_default_for(&self, raw: bool) -> bool {
         let mut s = self.clone();
         if s.wb != WbPreset::Custom {
             (s.temp, s.tint) = (0.0, 0.0);
         }
         s.process_version = PROCESS_VERSION;
-        s == Self::default()
+        s == Self::default_for(raw)
     }
 
     pub fn to_json(&self) -> String {
@@ -357,6 +385,12 @@ impl DevelopSettings {
                 eat(v.to_bits());
             }
         }
+        if self.detail != Detail::default() {
+            eat(0xde_7a11);
+            for p in DetailParam::SHARPENING.into_iter().chain(DetailParam::NOISE) {
+                eat(p.get(&self.detail).to_bits());
+            }
+        }
         if self.grading != ColorGrading::default() {
             eat(0x9_ade);
             let g = &self.grading;
@@ -395,6 +429,20 @@ impl DevelopSettings {
                 [] if c.splits != o.splits => "Tone Curve: Split Points".into(),
                 [] => "Tone Curve: Point Curve".into(),
                 _ => "Tone Curve".into(),
+            };
+        }
+        if self.detail != old.detail {
+            let changed: Vec<DetailParam> = DetailParam::SHARPENING
+                .into_iter()
+                .chain(DetailParam::NOISE)
+                .filter(|p| p.get(&self.detail) != p.get(&old.detail))
+                .collect();
+            return match changed.as_slice() {
+                [p] => {
+                    let s = Slider::Detail(*p);
+                    format!("{}: {} {}", p.group(), p.label(), s.format(s.get(self), kelvin))
+                }
+                _ => "Detail".into(),
             };
         }
         if self.grading != old.grading {

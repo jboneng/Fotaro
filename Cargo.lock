@@ -2031,6 +2031,7 @@ dependencies = [
  "libraw",
  "log",
  "memmap2",
+ "mimalloc",
  "png",
  "rayon",
  "serde",

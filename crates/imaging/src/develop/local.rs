@@ -90,27 +90,32 @@ pub(super) fn box_blur_par(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32
             }
         }
     });
+    // Columns: bands of rows in parallel, each starting its running sums afresh.
+    const BAND: usize = 32;
+    let row = |y: usize| &rows[y * w..(y + 1) * w];
     let mut out = vec![0.0; src.len()];
-    let mut sum = vec![0.0f32; w];
-    let mut n = 0.0f32;
-    for y in 0..=r.min(h - 1) {
-        sum.iter_mut().zip(&rows[y * w..(y + 1) * w]).for_each(|(s, v)| *s += v);
-        n += 1.0;
-    }
-    for y in 0..h {
-        let inv = 1.0 / n;
-        out[y * w..(y + 1) * w].iter_mut().zip(&sum).for_each(|(o, s)| *o = s * inv);
-        if y + r + 1 < h {
-            let add = &rows[(y + r + 1) * w..(y + r + 2) * w];
-            sum.iter_mut().zip(add).for_each(|(s, v)| *s += v);
-            n += 1.0;
+    out.par_chunks_mut(BAND * w).enumerate().for_each(|(band, dst)| {
+        let y0 = band * BAND;
+        let (lo, hi) = (y0.saturating_sub(r), (y0 + r).min(h - 1));
+        let mut sum = vec![0.0f32; w];
+        for y in lo..=hi {
+            sum.iter_mut().zip(row(y)).for_each(|(s, v)| *s += v);
         }
-        if y >= r {
-            let sub = &rows[(y - r) * w..(y - r + 1) * w];
-            sum.iter_mut().zip(sub).for_each(|(s, v)| *s -= v);
-            n -= 1.0;
+        let mut n = (hi - lo + 1) as f32;
+        for (j, line) in dst.chunks_mut(w).enumerate() {
+            let y = y0 + j;
+            let inv = 1.0 / n;
+            line.iter_mut().zip(&sum).for_each(|(o, s)| *o = s * inv);
+            if y + r + 1 < h {
+                sum.iter_mut().zip(row(y + r + 1)).for_each(|(s, v)| *s += v);
+                n += 1.0;
+            }
+            if y >= r {
+                sum.iter_mut().zip(row(y - r)).for_each(|(s, v)| *s -= v);
+                n -= 1.0;
+            }
         }
-    }
+    });
     out
 }
 

@@ -568,3 +568,17 @@ All nine steps of the Basic panel plan are done.
       the user. The embedded JPEG shows as a placeholder while the rendered preview is built
       (~0.3–0.5 s per RAW instead of ~0.05 s). Existing caches rebuild once (new key); old
       embedded previews are removed as their replacements are written.
+
+## Develop: Detail
+- [x] Sharpening (Amount, Radius, Detail, Masking) and Noise Reduction (Luminance with Detail
+      and Contrast; Color with Detail and Smoothness), done last on the rendered image's Oklab
+      lightness and colour. Sharpening is an unsharp mask on L with soft halo limiting (Detail)
+      and an edge mask (Masking); luminance NR is an edge-preserving guided filter on L;
+      colour NR smooths a/b guided by L, computed on 2–4 px blocks and applied at full
+      resolution (colour noise is coarse). Radii are in full-size pixels, so a fit view shows
+      a scaled-down effect and 1:1 is exact, as in LrC; 1:1 regions render with a margin on
+      the block grid and match the whole image exactly. Defaults per file type, as in LrC:
+      RAWs get Sharpening 40 and Color NR 25, rendered files nothing; Reset uses them, and
+      unedited RAWs' previews are rendered with them. Proxy render (1280 px) with the RAW
+      defaults ~20–30 ms, everything on ~35–45 ms. The develop example now uses the app's
+      allocator (the system one made big buffers page-fault and doubled the timings).

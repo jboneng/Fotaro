@@ -29,6 +29,7 @@ epaint_default_fonts = "0.37.0"
 [dev-dependencies]
 tempfile.workspace = true
 catalog.workspace = true
+mimalloc = "0.1.52"
 
 [lints]
 workspace = true

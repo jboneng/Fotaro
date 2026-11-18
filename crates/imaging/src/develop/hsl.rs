@@ -97,8 +97,23 @@ const M1_INV: Mat3f = [
 ];
 
 pub(super) fn srgb_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
-    let lms = matrix::apply(&M1, rgb).map(f32::cbrt);
+    let lms = matrix::apply(&M1, rgb).map(fast_cbrt);
     matrix::apply(&M2, lms)
+}
+
+/// Cube root to within a few float steps (relative 5e-7): a bit-level first guess, then Newton steps;
+/// several times faster than libm's.
+#[inline]
+pub(super) fn fast_cbrt(x: f32) -> f32 {
+    let a = x.abs();
+    if a < 1e-30 {
+        return 0.0;
+    }
+    let mut y = f32::from_bits(a.to_bits() / 3 + 0x2a51_4067);
+    for _ in 0..3 {
+        y = (2.0 * y + a / (y * y)) * (1.0 / 3.0);
+    }
+    y.copysign(x)
 }
 
 pub(super) fn oklab_to_srgb(lab: [f32; 3]) -> [f32; 3] {
@@ -222,6 +237,16 @@ impl HslAdjust {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_cbrt_matches_libm() {
+        for k in -400..=400 {
+            let x = (k as f32 * 0.05).exp2() * if k % 3 == 0 { -1.0 } else { 1.0 };
+            let (fast, exact) = (fast_cbrt(x), x.cbrt());
+            assert!((fast - exact).abs() <= exact.abs() * 5e-7, "{x}: {fast} vs {exact}");
+        }
+        assert_eq!(fast_cbrt(0.0), 0.0);
+    }
 
     #[test]
     fn oklab_round_trips_and_centres_ascend() {

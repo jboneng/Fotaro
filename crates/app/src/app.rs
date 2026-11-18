@@ -1922,7 +1922,10 @@ impl PhotoLibraryApp {
                 let s = DevelopSettings { wb: WbPreset::Auto, ..d.settings.clone() };
                 d.apply(c, s, "White Balance: Auto")
             }),
-            Action::ResetSettings => self.develop_op(|d, c| d.apply(c, DevelopSettings::default(), "Reset")),
+            Action::ResetSettings => self.develop_op(|d, c| {
+                let defaults = d.defaults();
+                d.apply(c, defaults, "Reset")
+            }),
             Action::PasteSettings => match d.clipboard.clone() {
                 Some(clip) => self.develop_op(|d, c| d.apply(c, clip, "Paste Settings")),
                 None => self.notify("Copy settings from a photo first"),

@@ -13,6 +13,7 @@
 use catalog::PhotoRow;
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Vec2};
 use imaging::PreviewSize;
+use imaging::develop::DetailParam;
 use imaging::develop::{
     CurveChannel, CurveFns, DEFAULT_SPLITS, GradeParam, GradeWheel, HslGroup, POINT_PRESETS, Region,
     SWATCHES, Slider, ToneCurve, Treatment, WbPreset,
@@ -26,7 +27,7 @@ use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::Slot;
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
-const PLANNED_RIGHT: &[&str] = &["Detail", "Lens Corrections", "Transform", "Effects"];
+const PLANNED_RIGHT: &[&str] = &["Lens Corrections", "Transform", "Effects"];
 const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
@@ -150,6 +151,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 stack.section(ui, Side::Right, "Tone Curve", RIGHT, false, |ui| tone_curve(app, ui));
                 stack.section(ui, Side::Right, "HSL / Color", RIGHT, false, |ui| hsl_panel(app, ui));
                 stack.section(ui, Side::Right, "Color Grading", RIGHT, false, |ui| color_grading(app, ui));
+                stack.section(ui, Side::Right, "Detail", RIGHT, false, |ui| detail_panel(app, ui));
                 for title in PLANNED_RIGHT {
                     stack.section(ui, Side::Right, title, RIGHT, false, |ui| {
                         ui.label(weak("Comes in a later version."));
@@ -1289,6 +1291,58 @@ fn color_grading(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         note(m, &mut done);
     }
 
+    if st != d.settings {
+        d.set_live(st);
+    }
+    if let Some(label) = done {
+        app.run(Command::DevelopCommit(label));
+    }
+}
+
+/// LrC's Detail panel: Sharpening (Amount, Radius, Detail, Masking) and Noise Reduction
+/// (Luminance with its Detail and Contrast; Color with its Detail and Smoothness).
+fn detail_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
+    let d = &mut s.develop;
+    if d.photo.is_none() {
+        ui.label(weak("Select a photo to develop."));
+        return;
+    }
+    ui.label(weak("Zoom to 1:1 (Z) to judge sharpening and noise reduction."));
+    let defaults = d.defaults();
+    let mut st = d.settings.clone();
+    let mut done: Option<Option<String>> = None;
+    let groups: [(&str, &[DetailParam]); 2] =
+        [("Sharpening", &DetailParam::SHARPENING), ("Noise Reduction", &DetailParam::NOISE)];
+    for (title, params) in groups {
+        sub_header(ui, title, |_| {});
+        for p in params {
+            // Like LrC, a noise reduction's Detail / Contrast / Smoothness only matter
+            // while its amount is above 0.
+            let enabled = match p {
+                DetailParam::LuminanceDetail | DetailParam::LuminanceContrast => st.detail.luminance > 0.0,
+                DetailParam::ColorDetail | DetailParam::ColorSmoothness => st.detail.color > 0.0,
+                _ => true,
+            };
+            let slider = Slider::Detail(*p);
+            let spec = Spec {
+                slider,
+                range: slider.range(false),
+                default: p.get(&defaults.detail),
+                log: false,
+                gradient: None,
+                kelvin: false,
+            };
+            let mut v = slider.get(&st);
+            let row = ui.add_enabled_ui(enabled, |ui| slider_row(ui, &spec, &mut v));
+            if row.inner.changed {
+                slider.set(&mut st, v);
+            }
+            if row.inner.done {
+                done = Some(None);
+            }
+        }
+    }
     if st != d.settings {
         d.set_live(st);
     }

@@ -335,6 +335,8 @@ pub struct DevelopState {
     pub before: bool,
     /// W: the White Balance Selector is active (click the photo to pick).
     pub picking_wb: bool,
+    /// The photo is a RAW: its defaults include some sharpening and noise reduction.
+    raw: bool,
     /// Long side, in pixels, the center view shows the photo at (rounded up), and the
     /// proxy size the current photo was loaded at: renders cost in proportion.
     pub view_px: u32,
@@ -394,6 +396,7 @@ impl DevelopState {
             shown: HashMap::new(),
             before: false,
             picking_wb: false,
+            raw: false,
             view_px: 1536,
             loaded_px: 0,
             clipping: false,
@@ -426,6 +429,7 @@ impl DevelopState {
         }
         let changed = self.commit(catalog, None)?;
         self.photo = Some(photo.id);
+        self.raw = photo.kind == FileKind::Raw;
         self.info = None;
         self.textures.clear();
         self.region = None;
@@ -481,9 +485,15 @@ impl DevelopState {
         self.redo.clear();
     }
 
+    /// A new photo's settings: LrC's defaults for its file type (RAWs get some sharpening
+    /// and colour noise reduction).
+    pub fn defaults(&self) -> DevelopSettings {
+        DevelopSettings::default_for(self.raw)
+    }
+
     /// Take stored settings (JSON) as both shown and saved.
     fn adopt(&mut self, json: Option<&str>) {
-        let s = json.and_then(DevelopSettings::from_json).unwrap_or_default();
+        let s = json.and_then(DevelopSettings::from_json).unwrap_or_else(|| self.defaults());
         self.settings = s.clone();
         self.saved = s;
         self.request_renders();
@@ -495,7 +505,7 @@ impl DevelopState {
         let clipping = self.clipping;
         let mut wanted = vec![(Slot::Current, self.settings.clone())];
         if self.before {
-            wanted.push((Slot::Before, DevelopSettings::default()));
+            wanted.push((Slot::Before, self.defaults()));
         }
         for (slot, settings) in wanted {
             if self.sent.get(&slot).is_some_and(|(s, c, _)| *s == settings && *c == clipping) {
@@ -592,7 +602,7 @@ impl DevelopState {
             return Ok(None);
         }
         let label = label.unwrap_or_else(|| self.settings.describe_change(&self.saved, self.kelvin()));
-        let json = (!self.settings.is_default()).then(|| self.settings.to_json());
+        let json = (!self.settings.is_default_for(self.raw)).then(|| self.settings.to_json());
         catalog.set_develop_settings(id, json.as_deref(), &label)?;
         self.saved = self.settings.clone();
         self.redo.clear();
@@ -690,7 +700,7 @@ impl DevelopState {
 
     /// What the center view shows: the settings (none for Before) and clipping.
     fn shown_view(&self, region: Region) -> RegionView {
-        let settings = if self.before { DevelopSettings::default() } else { self.settings.clone() };
+        let settings = if self.before { self.defaults() } else { self.settings.clone() };
         RegionView { settings, clipping: self.clipping, region }
     }
 

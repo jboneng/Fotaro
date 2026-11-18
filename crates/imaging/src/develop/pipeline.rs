@@ -11,8 +11,9 @@ use rayon::prelude::*;
 
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
+use super::detail::apply as apply_detail;
 use super::grading::Grading;
-use super::hsl::HslAdjust;
+use super::hsl::{HslAdjust, oklab_to_srgb, srgb_to_oklab};
 use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast_log2, tone_gain};
 use super::matrix::{self, Mat3f};
 use super::settings::{DevelopSettings, Treatment};
@@ -445,10 +446,19 @@ pub fn render_srgb8(img: &WorkingImage, s: &DevelopSettings) -> RgbImage {
 /// the region's size.
 pub fn render_region_srgb8(img: &WorkingImage, s: &DevelopSettings, region: Region) -> RgbImage {
     let region = region.clipped(img);
-    let prep = Prepared::new(img, s, region);
     let enc = SrgbEncoder::new();
     let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
     let mut out = RgbImage::new(region.w, region.h);
+    if s.detail.is_active() {
+        let detailed = Detailed::render(img, s, region);
+        out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
+            for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                *o = detailed.srgb(i, j).map(|v| enc.encode(v));
+            }
+        });
+        return out;
+    }
+    let prep = Prepared::new(img, s, region);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         let l = matrix::apply(&to_srgb, prep.pixel(p, x, y));
         o.copy_from_slice(&l.map(|v| enc.encode(v)));
@@ -459,12 +469,79 @@ pub fn render_region_srgb8(img: &WorkingImage, s: &DevelopSettings, region: Regi
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
 pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<Rgb<u16>, Vec<u16>> {
     let region = Region::whole(img);
-    let prep = Prepared::new(img, s, region);
     let mut out = ImageBuffer::<Rgb<u16>, Vec<u16>>::new(img.width(), img.height());
+    let to_u16 = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+    if s.detail.is_active() {
+        let detailed = Detailed::render(img, s, region);
+        let to_work = matrix::to_f32(&matrix::srgb_to_work());
+        out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
+            for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                *o = matrix::apply(&to_work, detailed.srgb(i, j)).map(to_u16);
+            }
+        });
+        return out;
+    }
+    let prep = Prepared::new(img, s, region);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
-        o.copy_from_slice(&prep.pixel(p, x, y).map(|v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16));
+        o.copy_from_slice(&prep.pixel(p, x, y).map(to_u16));
     });
     out
+}
+
+/// A region rendered with Detail (sharpening, noise reduction): those filters reach across
+/// pixels, so the region is rendered with a margin, filtered as Oklab planes, then read
+/// back without the margin.
+struct Detailed {
+    planes: [Vec<f32>; 3],
+    /// The rendered area's width, and where the requested region starts in it.
+    width: usize,
+    offset: (usize, usize),
+}
+
+impl Detailed {
+    fn render(img: &WorkingImage, s: &DevelopSettings, region: Region) -> Detailed {
+        // Rendered pixels per full-size pixel: the filters' radii are in full-size pixels.
+        let scale = img.width() as f32 / img.full_size.0.max(1) as f32;
+        let m = s.detail.margin(scale) as u32;
+        let g = s.detail.grid(scale) as u32;
+        let (x0, y0) = (region.x.saturating_sub(m) / g * g, region.y.saturating_sub(m) / g * g);
+        let area = Region {
+            x: x0,
+            y: y0,
+            w: (region.x + region.w + m).min(img.width()) - x0,
+            h: (region.y + region.h + m).min(img.height()) - y0,
+        };
+        let prep = Prepared::new(img, s, area);
+        let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
+        let (aw, ah, w) = (area.w as usize, area.h as usize, img.width() as usize);
+        let mut planes: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; aw * ah]);
+        let [l, a, b] = &mut planes;
+        let src = img.pixels.as_raw();
+        (l.par_chunks_mut(aw), a.par_chunks_mut(aw), b.par_chunks_mut(aw))
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(j, (l, a, b))| {
+                let (x0, y) = (area.x as usize, area.y as usize + j);
+                let row = &src[3 * (y * w + x0)..3 * (y * w + x0 + aw)];
+                for (i, p) in row.as_chunks::<3>().0.iter().enumerate() {
+                    let lab = srgb_to_oklab(matrix::apply(&to_srgb, prep.pixel(*p, x0 + i, y)));
+                    (l[i], a[i], b[i]) = (lab[0], lab[1], lab[2]);
+                }
+            });
+        apply_detail(&mut planes, area.w as usize, area.h as usize, &s.detail, scale);
+        Detailed {
+            planes,
+            width: area.w as usize,
+            offset: ((region.x - x0) as usize, (region.y - y0) as usize),
+        }
+    }
+
+    /// Linear sRGB at (i, j) of the requested region.
+    #[inline]
+    fn srgb(&self, i: usize, j: usize) -> [f32; 3] {
+        let k = (j + self.offset.1) * self.width + i + self.offset.0;
+        oklab_to_srgb([self.planes[0][k], self.planes[1][k], self.planes[2][k]]).map(|v| v.max(0.0))
+    }
 }
 
 /// Percentile (0..1) of sorted values.

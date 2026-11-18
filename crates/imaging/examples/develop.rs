@@ -8,6 +8,11 @@ use std::time::Instant;
 use imaging::SourceKind;
 use imaging::develop::{DevelopSettings, WorkingImage, render_srgb8};
 
+// The app's allocator, so timings match the app (the system allocator's fresh large
+// blocks page-fault on first use).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = std::path::PathBuf::from(args.next().expect("usage: develop <file> [out.png] [k=v...]"));

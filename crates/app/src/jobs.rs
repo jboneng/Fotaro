@@ -33,9 +33,10 @@ pub struct PhotoRef {
     pub develop: Option<imaging::develop::DevelopSettings>,
 }
 
-/// A photo's Develop settings from their stored JSON, if they change anything.
-pub fn develop_settings(json: Option<&str>) -> Option<imaging::develop::DevelopSettings> {
-    json.and_then(imaging::develop::DevelopSettings::from_json).filter(|s| !s.is_default())
+/// A photo's Develop settings from their stored JSON, if they differ from the defaults
+/// of its file type (`raw`).
+pub fn develop_settings(json: Option<&str>, raw: bool) -> Option<imaging::develop::DevelopSettings> {
+    json.and_then(imaging::develop::DevelopSettings::from_json).filter(|s| !s.is_default_for(raw))
 }
 
 /// Where a photo's previews live in the cache: (cache id, fingerprint). Unedited photos
@@ -52,7 +53,7 @@ pub fn preview_key(
     let file = imaging::fingerprint(size, mtime_ms);
     match develop {
         // An unedited RAW, rendered at default settings: shared with its virtual copies.
-        Some(s) if s.is_default() => (master_id, imaging::developed_fingerprint(file, s)),
+        Some(s) if s.is_default_for(true) => (master_id, imaging::developed_fingerprint(file, s)),
         Some(s) => (-id, imaging::developed_fingerprint(file, s)),
         None => (master_id, file),
     }
@@ -62,8 +63,8 @@ pub fn preview_key(
 /// without any the defaults (so the Library shows what Develop shows, as LrC's Standard
 /// previews do, not the camera's embedded JPEG). `None`: the file's pixels as they are.
 pub fn render_settings(json: Option<&str>, kind: FileKind) -> Option<imaging::develop::DevelopSettings> {
-    develop_settings(json)
-        .or_else(|| (kind == FileKind::Raw).then(imaging::develop::DevelopSettings::default))
+    let raw = kind == FileKind::Raw;
+    develop_settings(json, raw).or_else(|| raw.then(|| imaging::develop::DevelopSettings::default_for(true)))
 }
 
 impl From<&PhotoRow> for PhotoRef {
@@ -749,8 +750,9 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
                     .into_iter()
                     .flat_map(|(id, size, mtime, json)| {
                         let plain = (id, imaging::fingerprint(size, mtime));
-                        let defaults = preview_key(id, id, size, mtime, Some(&Default::default()));
-                        let developed = develop_settings(json.as_deref())
+                        let raw_defaults = imaging::develop::DevelopSettings::default_for(true);
+                        let defaults = preview_key(id, id, size, mtime, Some(&raw_defaults));
+                        let developed = develop_settings(json.as_deref(), false)
                             .map(|s| preview_key(id, id, size, mtime, Some(&s)));
                         [plain, defaults].into_iter().chain(developed)
                     })
@@ -1082,13 +1084,21 @@ mod preview_key_tests {
         // An unedited RAW renders at the default settings (as Develop shows it), with a key of
         // its own that its virtual copies share; other files keep their own pixels.
         let raw = render_settings(None, FileKind::Raw).expect("RAWs render");
-        assert!(raw.is_default());
+        assert!(raw.is_default_for(true));
         assert!(render_settings(None, FileKind::Image).is_none());
         let unedited = preview_key(8, 3, 100, 5, Some(&raw));
         assert_eq!(unedited.0, 3);
         assert_ne!(unedited.1, imaging::fingerprint(100, 5), "not the embedded-preview key");
         // Default settings (a reset) count as none.
-        assert!(develop_settings(Some(&imaging::develop::DevelopSettings::default().to_json())).is_none());
-        assert!(develop_settings(Some(&s.to_json())).is_some());
+        assert!(
+            develop_settings(Some(&imaging::develop::DevelopSettings::default().to_json()), false).is_none()
+        );
+        assert!(develop_settings(Some(&s.to_json()), false).is_some());
+        // A RAW's defaults include Detail: plain neutral settings are an edit there.
+        let raw_defaults = imaging::develop::DevelopSettings::default_for(true);
+        assert!(develop_settings(Some(&raw_defaults.to_json()), true).is_none());
+        assert!(
+            develop_settings(Some(&imaging::develop::DevelopSettings::default().to_json()), true).is_some()
+        );
     }
 }

@@ -410,3 +410,69 @@ fn grading_settings_round_trip_and_name_history_steps() {
     assert_eq!(h.describe_change(&old, true), "Color Grading: Highlights Luminance -10");
     assert_eq!(DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap().grading, ColorGrading::default());
 }
+
+#[test]
+fn detail_defaults_depend_on_the_file_type() {
+    let raw = DevelopSettings::default_for(true);
+    assert_eq!((raw.detail.sharpen_amount, raw.detail.color), (40.0, 25.0));
+    assert!(raw.is_default_for(true) && !raw.is_default_for(false));
+    assert!(DevelopSettings::default_for(false).is_default());
+    // Settings saved before Detail existed keep their look: no Detail.
+    assert!(!DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap().detail.is_active());
+    let s = DevelopSettings {
+        detail: Detail { sharpen_amount: 60.0, ..Detail::default() },
+        ..Default::default()
+    };
+    assert_eq!(s.describe_change(&DevelopSettings::default(), true), "Sharpening: Amount 60");
+    assert_ne!(s.stable_hash(), DevelopSettings::default().stable_hash());
+}
+
+#[test]
+fn detail_sharpens_and_smooths_and_regions_still_match() {
+    // A soft edge with a little noise.
+    let img: RgbImage = ImageBuffer::from_fn(160, 120, |x, y| {
+        let base = if x < 80 { 70.0 } else { 170.0 };
+        let soft = base + (x as f32 - 80.0).clamp(-3.0, 3.0) * 4.0;
+        let n = ((x * 31 + y * 17) % 7) as f32 - 3.0;
+        let v = (soft + n * 3.0).clamp(0.0, 255.0) as u8;
+        Rgb([v, v, v])
+    });
+    let w = rendered(&img);
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    let sharp = render_srgb8(
+        &w,
+        &DevelopSettings {
+            detail: Detail { sharpen_amount: 120.0, ..Detail::default() },
+            ..Default::default()
+        },
+    );
+    // The steepest step across the soft edge.
+    let edge = |i: &RgbImage| {
+        (76..84)
+            .map(|x| f32::from(i.get_pixel(x + 1, 60)[1]) - f32::from(i.get_pixel(x, 60)[1]))
+            .fold(0.0, f32::max)
+    };
+    assert!(edge(&sharp) > edge(&plain) + 5.0, "{} vs {}", edge(&sharp), edge(&plain));
+    let smooth = render_srgb8(
+        &w,
+        &DevelopSettings { detail: Detail { luminance: 90.0, ..Detail::default() }, ..Default::default() },
+    );
+    let s = |i: &RgbImage| spread_in(i, 10..60, 20..100);
+    assert!(s(&smooth) < s(&plain) * 0.7, "noise drops: {} vs {}", s(&smooth), s(&plain));
+
+    // A region of a detailed render matches that part of the full render (the margin).
+    let st = DevelopSettings {
+        detail: Detail { sharpen_amount: 80.0, luminance: 40.0, color: 50.0, ..Detail::default() },
+        ..Default::default()
+    };
+    let whole = render_srgb8(&w, &st);
+    let part = render_region_srgb8(&w, &st, Region { x: 50, y: 30, w: 60, h: 50 });
+    for y in 0..50 {
+        for x in 0..60 {
+            let (a, b) = (part.get_pixel(x, y), whole.get_pixel(x + 50, y + 30));
+            for c in 0..3 {
+                assert!(a[c].abs_diff(b[c]) <= 1, "({x}, {y}): {a:?} vs {b:?}");
+            }
+        }
+    }
+}

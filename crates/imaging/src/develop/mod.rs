@@ -3,6 +3,7 @@
 
 mod curve;
 mod dehaze;
+mod detail;
 mod grading;
 mod hsl;
 mod local;
@@ -16,6 +17,7 @@ mod wb;
 mod tests;
 
 pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, ToneCurve};
+pub use detail::{Detail, DetailParam};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use pipeline::{Region, auto_tone, render_linear16, render_region_srgb8, render_srgb8};
