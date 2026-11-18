@@ -353,6 +353,8 @@ pub enum Command {
     SetLights(Lights),
     /// Develop: save the shown settings as a History step (named, or after what changed).
     DevelopCommit(Option<String>),
+    /// An Upright button in the Transform panel.
+    DevelopUpright(imaging::develop::Upright),
     /// Develop: go back to a History step.
     DevelopRevert(i64),
     /// A not-yet-implemented feature; shows when it arrives.
@@ -699,6 +701,8 @@ impl Session {
     pub fn develop_changed(&mut self, id: i64) -> Result<()> {
         let json = self.catalog.develop_settings(id)?;
         self.update_rows(&[id], |p| p.develop = json.clone());
+        // Its developed size may have changed (Constrain Crop).
+        self.dims.remove(&id);
         let row = self
             .index_of
             .get(&id)
@@ -839,7 +843,8 @@ impl Session {
         &self.facets.as_ref().expect("just set").1
     }
 
-    /// A photo's stored pixel size (file orientation applied), cached.
+    /// A photo's pixel size as developed (file orientation applied; smaller than the file
+    /// with Constrain Crop), cached.
     pub fn photo_dims(&mut self, id: i64) -> Option<egui::Vec2> {
         if let Some(d) = self.dims.get(&id) {
             return *d;
@@ -849,7 +854,14 @@ impl Session {
             .metadata(id)
             .ok()
             .flatten()
-            .and_then(|m| Some(egui::vec2(m.width? as f32, m.height? as f32)));
+            .and_then(|m| Some((m.width?, m.height?)))
+            // As developed: Constrain Crop makes it smaller than the file.
+            .map(|(w, h)| {
+                let develop = self.index_of.get(&id).and_then(|&i| self.photos[i].develop.as_deref());
+                let t = develop.and_then(imaging::develop::DevelopSettings::from_json).map(|s| s.transform);
+                let (w, h) = t.map_or((w, h), |t| t.output_size(w, h));
+                egui::vec2(w as f32, h as f32)
+            });
         self.dims.insert(id, d);
         d
     }
@@ -1316,6 +1328,7 @@ impl PhotoLibraryApp {
                 } else if self.module == Module::Develop {
                     if let Some(s) = &mut self.session {
                         s.develop.picking_wb = false;
+                        s.develop.picking_detail = false;
                     }
                 } else {
                     self.view = View::Grid;
@@ -1901,6 +1914,8 @@ impl PhotoLibraryApp {
         self.module = Module::Library;
         self.develop_op(|d, catalog| {
             d.picking_wb = false;
+            d.picking_detail = false;
+            d.set_sharpen_view(None);
             d.commit(catalog, None)
         });
     }
@@ -1911,7 +1926,10 @@ impl PhotoLibraryApp {
         let d = &mut s.develop;
         match action {
             Action::BeforeAfter => d.set_before(!d.before),
-            Action::WhiteBalanceSelector => d.picking_wb = !d.picking_wb,
+            Action::WhiteBalanceSelector => {
+                d.picking_wb = !d.picking_wb;
+                d.picking_detail = false;
+            }
             Action::AutoTone => d.auto_tone(),
             Action::ClippingIndicators => d.set_clipping(!d.clipping),
             Action::CopySettings => {
@@ -2106,6 +2124,7 @@ impl PhotoLibraryApp {
             Command::SetLights(l) => self.lights = l,
             Command::Planned(what, phase) => self.notify(format!("{what} arrives in {phase}")),
             Command::DevelopCommit(label) => self.develop_op(|d, c| d.commit(c, label)),
+            Command::DevelopUpright(mode) => self.develop_op(|d, c| d.upright(c, mode)),
             Command::DevelopRevert(step) => self.develop_op(|d, c| d.revert_to(c, step)),
             Command::RemoveFolder(id) => {
                 if let Some(s) = &self.session

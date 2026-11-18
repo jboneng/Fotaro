@@ -287,7 +287,14 @@ fn guided_coeffs(
 
 /// Apply Detail to Oklab planes (L, a, b) of a `w × h` image rendered at `scale` rendered
 /// pixels per full-size pixel.
-pub(super) fn apply(planes: &mut [Vec<f32>; 3], w: usize, h: usize, d: &Detail, scale: f32) {
+pub(super) fn apply(
+    planes: &mut [Vec<f32>; 3],
+    w: usize,
+    h: usize,
+    d: &Detail,
+    scale: f32,
+    view: Option<SharpenView>,
+) {
     let px = |full: f32| (full * scale).max(0.0);
 
     // Colour noise: smooth a and b, guided by lightness so colour edges along real edges
@@ -338,7 +345,7 @@ pub(super) fn apply(planes: &mut [Vec<f32>; 3], w: usize, h: usize, d: &Detail, 
 
     // Sharpening: unsharp mask on L. Detail limits halos (low Detail: small differences
     // only); Masking keeps it to edges.
-    if d.sharpen_amount > 0.0 {
+    if d.sharpen_amount > 0.0 || view.is_some() {
         let sigma = px(d.sharpen_radius);
         let blurred = blur(&planes[0], w, h, sigma);
         let k = 1.5 * d.sharpen_amount / 100.0;
@@ -361,9 +368,45 @@ pub(super) fn apply(planes: &mut [Vec<f32>; 3], w: usize, h: usize, d: &Detail, 
                 } else {
                     1.0
                 };
-                *v = (*v + k * m * soft).max(0.0);
+                *v = match view {
+                    None | Some(SharpenView::Amount) => (*v + k * m * soft).max(0.0),
+                    // The detail sharpening adds, on grey, at a fixed strength.
+                    Some(SharpenView::Edges) => (0.6 + 4.0 * soft).clamp(0.0, 1.0),
+                    // White where sharpening applies.
+                    Some(SharpenView::Mask) => m,
+                };
             }
         });
+    }
+    // The views are greyscale.
+    if view.is_some() {
+        let [_, a, b] = planes;
+        a.fill(0.0);
+        b.fill(0.0);
+    }
+}
+
+/// LrC's sharpening previews (Alt while dragging a Sharpening slider): the image in
+/// greyscale so the effect is easier to judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SharpenView {
+    /// The sharpened lightness (Amount).
+    Amount,
+    /// The edges sharpening enhances, on grey (Radius, Detail).
+    Edges,
+    /// Where sharpening applies: white, and black where Masking holds it back.
+    Mask,
+}
+
+impl SharpenView {
+    /// The preview for dragging `p`, if it has one.
+    pub fn for_param(p: DetailParam) -> Option<SharpenView> {
+        match p {
+            DetailParam::SharpenAmount => Some(Self::Amount),
+            DetailParam::SharpenRadius | DetailParam::SharpenDetail => Some(Self::Edges),
+            DetailParam::SharpenMasking => Some(Self::Mask),
+            _ => None,
+        }
     }
 }
 
@@ -394,7 +437,7 @@ mod tests {
             vec![0.0; w * h],
         ];
         let mut p = base.clone();
-        apply(&mut p, w, h, &Detail { luminance: 80.0, color: 80.0, ..Detail::default() }, 1.0);
+        apply(&mut p, w, h, &Detail { luminance: 80.0, color: 80.0, ..Detail::default() }, 1.0, None);
         assert!(spread(&p[0]) < spread(&base[0]) * 0.6, "luminance noise drops");
         assert!(spread(&p[1]) < spread(&base[1]) * 0.6, "colour noise drops");
 
@@ -402,7 +445,7 @@ mod tests {
         let edge: Vec<f32> = (0..w * h).map(|i| if i % w < w / 2 { 0.3 } else { 0.7 }).collect();
         let soft = blur(&edge, w, h, 1.5);
         let mut s = [soft.clone(), vec![0.0; w * h], vec![0.0; w * h]];
-        apply(&mut s, w, h, &Detail { sharpen_amount: 100.0, ..Detail::default() }, 1.0);
+        apply(&mut s, w, h, &Detail { sharpen_amount: 100.0, ..Detail::default() }, 1.0, None);
         let step = |v: &[f32]| v[w * 10 + w / 2] - v[w * 10 + w / 2 - 1];
         assert!(step(&s[0]) > step(&soft) * 1.2, "edge contrast rises");
         // Default settings do nothing.

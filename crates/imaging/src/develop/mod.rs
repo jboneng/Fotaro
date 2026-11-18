@@ -12,16 +12,22 @@ mod matrix;
 mod pipeline;
 mod settings;
 mod source;
+mod transform;
+mod upright;
 mod wb;
 
 #[cfg(test)]
 mod tests;
 
 pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, ToneCurve};
-pub use detail::{Detail, DetailParam};
+pub use detail::{Detail, DetailParam, SharpenView};
 pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
-pub use pipeline::{Region, auto_tone, render_linear16, render_region_srgb8, render_srgb8};
+pub use pipeline::{
+    Region, auto_tone, render_linear16, render_region_srgb8, render_region_srgb8_view, render_srgb8,
+};
 pub use settings::{DevelopSettings, PROCESS_VERSION, Slider, Treatment, WbPreset};
 pub use source::{ResolvedWb, SourceColor, WorkingImage};
+pub use transform::{MAX_GUIDES, Transform, TransformParam, Upright};
+pub use upright::{apply_upright, guided_angles};

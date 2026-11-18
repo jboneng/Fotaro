@@ -13,7 +13,8 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use imaging::SourceKind;
 use imaging::develop::{
-    DevelopSettings, Region, ResolvedWb, WbPreset, WorkingImage, auto_tone, render_region_srgb8, render_srgb8,
+    DevelopSettings, Region, ResolvedWb, SharpenView, Upright, WbPreset, WorkingImage, apply_upright,
+    auto_tone, render_region_srgb8_view,
 };
 
 use crate::jobs::Histogram;
@@ -23,6 +24,24 @@ use crate::jobs::Histogram;
 pub enum Slot {
     Current,
     Before,
+}
+
+/// Upright Guided: what a drag on the photo is doing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GuideDrag {
+    /// Drawing a new guide from this screen point.
+    New { start: egui::Pos2 },
+    /// Moving one end (0 or 1) of a guide.
+    End { index: usize, end: usize },
+}
+
+/// Where a full-resolution region is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RegionTarget {
+    /// The center view zoomed to 1:1 (or more).
+    Zoom,
+    /// The Detail panel's 1:1 preview box.
+    DetailBox,
 }
 
 enum Request {
@@ -39,10 +58,12 @@ enum Request {
         settings: DevelopSettings,
         /// Paint clipped pixels (J): highlights red, shadows blue.
         clipping: bool,
+        /// A greyscale sharpening preview instead of the photo.
+        view: Option<SharpenView>,
         seq: u64,
     },
-    /// Render part of the full-size photo (1:1 zoom), loading it first if needed.
-    Region { photo_id: i64, view: RegionView, seq: u64 },
+    /// Render part of the full-size photo (1:1), loading it first if needed.
+    Region { photo_id: i64, target: RegionTarget, view: RegionView, seq: u64 },
     /// Settings computed from the pixels.
     Adjust { photo_id: i64, op: Adjust, settings: DevelopSettings },
 }
@@ -52,6 +73,7 @@ enum Request {
 pub struct RegionView {
     pub settings: DevelopSettings,
     pub clipping: bool,
+    pub view: Option<SharpenView>,
     /// Pixels of the full-size image, in file orientation.
     pub region: Region,
 }
@@ -65,13 +87,16 @@ enum Adjust {
         y: f32,
     },
     AutoTone,
+    /// Upright: analyse the photo's lines (or use its guides) for this mode.
+    Upright(Upright),
 }
 
 impl Adjust {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Adjust::PickWb { .. } => "White Balance: Custom",
-            Adjust::AutoTone => "Auto Settings",
+            Adjust::PickWb { .. } => "White Balance: Custom".into(),
+            Adjust::AutoTone => "Auto Settings".into(),
+            Adjust::Upright(mode) => format!("Upright: {}", mode.label()),
         }
     }
 }
@@ -92,6 +117,7 @@ enum Reply {
     },
     Region {
         photo_id: i64,
+        target: RegionTarget,
         seq: u64,
         view: RegionView,
         image: egui::ColorImage,
@@ -169,11 +195,11 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut source: Option<(i64, PathBuf, SourceKind)> = None;
     let mut full: Option<(i64, WorkingImage)> = None;
     let mut full_loading: Option<i64> = None;
-    let mut pending_region: Option<(i64, RegionView, u64)> = None;
+    let mut pending_regions: HashMap<RegionTarget, (i64, RegionView, u64)> = HashMap::new();
     let (full_tx, full_rx) = crossbeam_channel::unbounded::<FullLoaded>();
     // Requests wait here until their photo is loaded: a render may arrive before (or in
     // another batch than) the load it needs.
-    let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, u64)> = HashMap::new();
+    let mut renders: HashMap<Slot, (i64, DevelopSettings, bool, Option<SharpenView>, u64)> = HashMap::new();
     let mut adjusts: Vec<(i64, Adjust, DevelopSettings)> = Vec::new();
     loop {
         let first = crossbeam_channel::select! {
@@ -188,7 +214,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                         Ok(img) if source.as_ref().is_some_and(|s| s.0 == photo_id) => full = Some((photo_id, img)),
                         Ok(_) => {}
                         Err(error) => {
-                            pending_region = None;
+                            pending_regions.clear();
                             let _ = tx.send(Reply::Failed { photo_id, error });
                         }
                     }
@@ -202,18 +228,20 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         for req in first.into_iter().chain(rx.try_iter()) {
             match req {
                 Request::Load { photo_id, path, kind, max_px } => load = Some((photo_id, path, kind, max_px)),
-                Request::Render { photo_id, slot, settings, clipping, seq } => {
-                    renders.insert(slot, (photo_id, settings, clipping, seq));
+                Request::Render { photo_id, slot, settings, clipping, view, seq } => {
+                    renders.insert(slot, (photo_id, settings, clipping, view, seq));
                 }
-                Request::Region { photo_id, view, seq } => pending_region = Some((photo_id, view, seq)),
+                Request::Region { photo_id, target, view, seq } => {
+                    pending_regions.insert(target, (photo_id, view, seq));
+                }
                 Request::Adjust { photo_id, op, settings } => adjusts.push((photo_id, op, settings)),
             }
         }
         if let Some((photo_id, path, kind, max_px)) = load {
             if source.as_ref().is_none_or(|s| s.0 != photo_id) {
-                // Another photo: forget this one's full-size image and pending region.
+                // Another photo: forget this one's full-size image and pending regions.
                 full = None;
-                pending_region = pending_region.filter(|r| r.0 == photo_id);
+                pending_regions.retain(|_, r| r.0 == photo_id);
             }
             source = Some((photo_id, path.clone(), kind));
             // A new photo, or this one at another size.
@@ -249,14 +277,14 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             continue;
         };
         for slot in [Slot::Current, Slot::Before] {
-            let Some((photo_id, settings, paint, seq)) =
+            let Some((photo_id, settings, paint, view, seq)) =
                 renders.get(&slot).is_some_and(|r| r.0 == *id).then(|| renders.remove(&slot)).flatten()
             else {
                 continue;
             };
-            let mut rgb = render_srgb8(img, &settings);
+            let mut rgb = render_region_srgb8_view(img, &settings, Region::whole(img), view);
             let histogram = histogram(rgb.as_raw());
-            let clipped = clipping(&mut rgb, paint);
+            let clipped = clipping(&mut rgb, paint && view.is_none());
             let wb = img.resolve_wb(&settings);
             let image = color_image(&rgb);
             let _ = tx.send(Reply::Rendered { photo_id, slot, seq, image, histogram, wb, clipped });
@@ -267,22 +295,33 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         for (photo_id, op, settings) in ready {
             let settings = match op {
                 Adjust::PickWb { x, y } => {
+                    // The click is on the transformed photo: sample what is shown there.
+                    let (x, y) = settings.transform.source_point(x, y, img.width(), img.height());
                     img.picked_multipliers(x, y).map(|m| img.settings_with_multipliers(&settings, m))
                 }
                 Adjust::AutoTone => Some(auto_tone(img, &settings)),
+                Adjust::Upright(mode) => Some(apply_upright(img, &settings, mode)),
             };
             let _ = tx.send(Reply::Adjusted { photo_id, op, settings });
         }
-        // 1:1: render the region from the full-size image, loading that first.
-        if let Some((photo_id, view, seq)) = pending_region.take_if(|r| r.0 == *id) {
+        // 1:1: render the regions from the full-size image, loading that first.
+        for target in [RegionTarget::DetailBox, RegionTarget::Zoom] {
+            let Some((photo_id, view, seq)) = pending_regions
+                .get(&target)
+                .is_some_and(|r| r.0 == *id)
+                .then(|| pending_regions.remove(&target))
+                .flatten()
+            else {
+                continue;
+            };
             match &full {
                 Some((fid, full_img)) if *fid == photo_id => {
                     let started = std::time::Instant::now();
-                    let mut rgb = render_region_srgb8(full_img, &view.settings, view.region);
-                    clipping(&mut rgb, view.clipping);
-                    log::debug!("develop: 1:1 region {:?} in {:.0?}", view.region, started.elapsed());
+                    let mut rgb = render_region_srgb8_view(full_img, &view.settings, view.region, view.view);
+                    clipping(&mut rgb, view.clipping && view.view.is_none());
+                    log::debug!("develop: 1:1 {target:?} {:?} in {:.0?}", view.region, started.elapsed());
                     let image = color_image(&rgb);
-                    let _ = tx.send(Reply::Region { photo_id, seq, view, image });
+                    let _ = tx.send(Reply::Region { photo_id, target, seq, view, image });
                 }
                 _ => {
                     if full_loading != Some(photo_id)
@@ -303,7 +342,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                             ctx.request_repaint();
                         });
                     }
-                    pending_region = Some((photo_id, view, seq));
+                    pending_regions.insert(target, (photo_id, view, seq));
                 }
             }
         }
@@ -327,8 +366,9 @@ pub struct DevelopState {
     /// The white balance of the last render (what Temp/Tint show for As Shot, Auto…).
     pub wb: Option<ResolvedWb>,
     pub error: Option<String>,
-    /// Settings (and their sequence number) last sent per slot; the numbers drop outdated renders.
-    sent: HashMap<Slot, (DevelopSettings, bool, u64)>,
+    /// What was last sent per slot (settings, clipping, sharpening preview) and its
+    /// sequence number; the numbers drop outdated renders.
+    sent: HashMap<Slot, (DevelopSettings, bool, Option<SharpenView>, u64)>,
     seq: u64,
     shown: HashMap<Slot, u64>,
     /// `\`: show the photo before any adjustments.
@@ -344,12 +384,21 @@ pub struct DevelopState {
     /// J: show clipped pixels; and how many there are in the current render.
     pub clipping: bool,
     pub clipped: Clipped,
-    /// 1:1 zoom: the full-resolution render of the visible region, and what it shows.
-    pub region: Option<(RegionView, egui::TextureHandle)>,
-    /// The region view last requested, its sequence number, and the newest one shown.
-    region_sent: Option<RegionView>,
+    /// Full-resolution renders: of the visible part when zoomed to 1:1, and for the Detail
+    /// panel's preview box.
+    regions: HashMap<RegionTarget, RegionRender>,
     region_seq: u64,
-    region_shown: u64,
+    /// Alt or Shift while dragging a Sharpening slider: LrC's greyscale preview.
+    pub sharpen_view: Option<SharpenView>,
+    /// The Detail panel's preview box: open, the point it shows (0..1 of the photo in file
+    /// orientation), and whether the next click on the photo picks that point.
+    pub detail_box_open: bool,
+    pub detail_focus: (f32, f32),
+    pub picking_detail: bool,
+    /// A Transform slider is being dragged: show a grid over the photo.
+    pub transform_grid: bool,
+    /// Upright Guided: the guide being drawn or moved on the photo.
+    pub guide_drag: Option<GuideDrag>,
     /// When the shown settings last changed (regions wait until they settle).
     changed_at: std::time::Instant,
     /// Copy Settings / Paste Settings.
@@ -366,6 +415,16 @@ pub struct DevelopState {
     pub history: Vec<HistoryStep>,
     /// Steps undone (Ctrl+Z, or clicking an earlier History step), newest last.
     redo: Vec<(String, Option<String>)>,
+}
+
+/// A full-resolution region render: the newest one shown (and what it shows), the one last
+/// asked for, and their sequence numbers.
+#[derive(Default)]
+struct RegionRender {
+    shown: Option<(RegionView, egui::TextureHandle)>,
+    sent: Option<RegionView>,
+    sent_seq: u64,
+    shown_seq: u64,
 }
 
 /// Which photos' catalog settings a call changed (for sidecars and filters).
@@ -401,10 +460,14 @@ impl DevelopState {
             loaded_px: 0,
             clipping: false,
             clipped: Clipped::default(),
-            region: None,
-            region_sent: None,
+            regions: HashMap::new(),
             region_seq: 0,
-            region_shown: 0,
+            sharpen_view: None,
+            detail_box_open: true,
+            detail_focus: (0.5, 0.5),
+            picking_detail: false,
+            transform_grid: false,
+            guide_drag: None,
             changed_at: std::time::Instant::now(),
             clipboard: None,
             curve_point_mode: false,
@@ -432,8 +495,10 @@ impl DevelopState {
         self.raw = photo.kind == FileKind::Raw;
         self.info = None;
         self.textures.clear();
-        self.region = None;
-        self.region_sent = None;
+        self.regions.clear();
+        self.detail_focus = (0.5, 0.5);
+        self.picking_detail = false;
+        self.guide_drag = None;
         self.histogram = None;
         self.wb = None;
         self.error = None;
@@ -503,17 +568,18 @@ impl DevelopState {
     pub fn request_renders(&mut self) {
         let Some(photo_id) = self.photo else { return };
         let clipping = self.clipping;
-        let mut wanted = vec![(Slot::Current, self.settings.clone())];
+        let mut wanted = vec![(Slot::Current, self.settings.clone(), self.sharpen_view)];
         if self.before {
-            wanted.push((Slot::Before, self.defaults()));
+            wanted.push((Slot::Before, self.defaults(), None));
         }
-        for (slot, settings) in wanted {
-            if self.sent.get(&slot).is_some_and(|(s, c, _)| *s == settings && *c == clipping) {
+        for (slot, settings, view) in wanted {
+            if self.sent.get(&slot).is_some_and(|(s, c, v, _)| *s == settings && *c == clipping && *v == view)
+            {
                 continue;
             }
             self.seq += 1;
-            self.sent.insert(slot, (settings.clone(), clipping, self.seq));
-            let _ = self.tx.send(Request::Render { photo_id, slot, settings, clipping, seq: self.seq });
+            self.sent.insert(slot, (settings.clone(), clipping, view, self.seq));
+            let _ = self.tx.send(Request::Render { photo_id, slot, settings, clipping, view, seq: self.seq });
         }
     }
 
@@ -521,7 +587,7 @@ impl DevelopState {
     pub fn rendering(&self) -> bool {
         self.sent
             .get(&Slot::Current)
-            .is_some_and(|(_, _, sent)| self.shown.get(&Slot::Current).copied().unwrap_or(0) < *sent)
+            .is_some_and(|(.., sent)| self.shown.get(&Slot::Current).copied().unwrap_or(0) < *sent)
     }
 
     /// Handle the worker's replies. Adjustments (picked white balance, Auto) are saved
@@ -546,7 +612,8 @@ impl DevelopState {
                                 .insert(slot, ctx.load_texture(format!("develop_{slot:?}"), image, opts));
                         }
                     }
-                    if slot == Slot::Current {
+                    // A sharpening preview's grey says nothing about the photo's histogram.
+                    if slot == Slot::Current && self.sharpen_view.is_none() {
                         self.histogram = Some(histogram);
                         self.wb = Some(wb);
                         self.clipped = clipped;
@@ -556,23 +623,32 @@ impl DevelopState {
                     match settings {
                         Some(s) => {
                             self.set_live(s);
-                            changed = changed.or(self.commit(catalog, Some(op.label().into()))?);
+                            changed = changed.or(self.commit(catalog, Some(op.label()))?);
                         }
                         None => self.error = Some("Pick a neutral, unclipped area".into()),
                     }
                 }
-                Reply::Region { photo_id, seq, view, image } if Some(photo_id) == self.photo => {
-                    if seq < self.region_shown {
+                Reply::Region { photo_id, target, seq, view, image } if Some(photo_id) == self.photo => {
+                    let r = self.regions.entry(target).or_default();
+                    if seq < r.shown_seq {
                         continue;
                     }
-                    self.region_shown = seq;
-                    let opts = egui::TextureOptions::LINEAR;
-                    match &mut self.region {
+                    r.shown_seq = seq;
+                    // Nearest: these are shown pixel for pixel (or enlarged, as pixels).
+                    let opts = if target == RegionTarget::DetailBox {
+                        egui::TextureOptions::NEAREST
+                    } else {
+                        egui::TextureOptions::LINEAR
+                    };
+                    match &mut r.shown {
                         Some((v, t)) if t.size() == image.size => {
                             t.set(image, opts);
                             *v = view;
                         }
-                        _ => self.region = Some((view, ctx.load_texture("develop_region", image, opts))),
+                        _ => {
+                            let name = format!("develop_region_{target:?}");
+                            r.shown = Some((view, ctx.load_texture(name, image, opts)));
+                        }
                     }
                 }
                 Reply::Failed { photo_id, error } if Some(photo_id) == self.photo => {
@@ -685,6 +761,49 @@ impl DevelopState {
         let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
     }
 
+    /// An Upright button: the automatic modes analyse the photo (on the worker), Off and
+    /// Guided are worked out here. Saved as a History step either way.
+    pub fn upright(&mut self, catalog: &mut Catalog, mode: Upright) -> Result<Changed> {
+        let Some(photo_id) = self.photo else { return Ok(None) };
+        match mode {
+            Upright::Off | Upright::Guided => {
+                let mut s = self.settings.clone();
+                s.transform.upright = mode;
+                s.transform.upright_angles = match (mode, self.info.as_ref()) {
+                    (Upright::Guided, Some(info)) => imaging::develop::guided_angles(
+                        &s.transform.guides,
+                        info.full_size.0,
+                        info.full_size.1,
+                    ),
+                    _ => [0.0; 3],
+                };
+                self.apply(catalog, s, &format!("Upright: {}", mode.label()))
+            }
+            _ => {
+                let op = Adjust::Upright(mode);
+                let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
+                Ok(None)
+            }
+        }
+    }
+
+    /// Set Upright Guided's guides (0..1 of the untransformed photo) and straighten them.
+    pub fn set_guides(&mut self, guides: Vec<[f32; 4]>) {
+        let Some(info) = self.info.as_ref() else { return };
+        let mut s = self.settings.clone();
+        s.transform.upright_angles =
+            imaging::develop::guided_angles(&guides, info.full_size.0, info.full_size.1);
+        s.transform.guides = guides;
+        self.set_live(s);
+    }
+
+    /// The developed photo's size in full-size pixels (smaller than the file with
+    /// Constrain Crop), as the center view shows it.
+    pub fn output_size(&self) -> Option<(u32, u32)> {
+        let (w, h) = self.info.as_ref()?.full_size;
+        Some(if self.before { (w, h) } else { self.settings.transform.output_size(w, h) })
+    }
+
     /// Auto (Tone), from the photo's pixels; saved when the worker answers.
     pub fn auto_tone(&mut self) {
         let Some(photo_id) = self.photo else { return };
@@ -698,43 +817,61 @@ impl DevelopState {
         self.request_renders();
     }
 
-    /// What the center view shows: the settings (none for Before) and clipping.
-    fn shown_view(&self, region: Region) -> RegionView {
-        let settings = if self.before { self.defaults() } else { self.settings.clone() };
-        RegionView { settings, clipping: self.clipping, region }
+    /// What a full-resolution region shows: the settings (none for Before in the center
+    /// view; the Detail box always shows the edit), clipping and the sharpening preview.
+    fn shown_view(&self, target: RegionTarget, region: Region) -> RegionView {
+        let before = self.before && target == RegionTarget::Zoom;
+        let settings = if before { self.defaults() } else { self.settings.clone() };
+        let view = if before { None } else { self.sharpen_view };
+        RegionView { settings, clipping: self.clipping && target == RegionTarget::Zoom, view, region }
     }
 
-    /// 1:1 zoom shows `region` of the full-size image: ask for it once the settings have
-    /// settled (not on every step of a slider drag). Returns how long to wait before
-    /// asking again, if it's too early.
-    pub fn want_region(&mut self, region: Region) -> Option<std::time::Duration> {
-        const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+    /// `target` shows `region` of the full-size image: ask for it once the settings have
+    /// settled (the zoomed view waits until a slider drag pauses; the small Detail box
+    /// follows sooner). Returns how long to wait before asking again, if it's too early.
+    pub fn want_region(&mut self, target: RegionTarget, region: Region) -> Option<std::time::Duration> {
+        let settle = std::time::Duration::from_millis(match target {
+            RegionTarget::Zoom => 200,
+            RegionTarget::DetailBox => 60,
+        });
         let photo_id = self.photo?;
-        let view = self.shown_view(region);
-        if self.region_sent.as_ref() == Some(&view) {
+        let view = self.shown_view(target, region);
+        let r = self.regions.entry(target).or_default();
+        if r.sent.as_ref() == Some(&view) {
             return None;
         }
         let since = self.changed_at.elapsed();
-        if since < SETTLE {
-            return Some(SETTLE - since);
+        if since < settle {
+            return Some(settle - since);
         }
         self.region_seq += 1;
-        self.region_sent = Some(view.clone());
-        let _ = self.tx.send(Request::Region { photo_id, view, seq: self.region_seq });
+        r.sent = Some(view.clone());
+        r.sent_seq = self.region_seq;
+        let _ = self.tx.send(Request::Region { photo_id, target, view, seq: self.region_seq });
         None
     }
 
-    /// The full-resolution region to draw over the proxy, if it shows what the view
-    /// shows now (same settings and clipping; it may cover another part while panning).
-    pub fn region_for_view(&self) -> Option<(Region, &egui::TextureHandle)> {
-        let (v, t) = self.region.as_ref()?;
-        let now = self.shown_view(v.region);
+    /// The full-resolution region `target` shows, if it shows what it should now (same
+    /// settings, clipping and preview; it may cover another part while panning).
+    pub fn region_for(&self, target: RegionTarget) -> Option<(Region, &egui::TextureHandle)> {
+        let (v, t) = self.regions.get(&target)?.shown.as_ref()?;
+        let now = self.shown_view(target, v.region);
         (*v == now).then_some((v.region, t))
     }
 
-    /// Is a 1:1 render on its way (or the full-size image loading)?
-    pub fn region_pending(&self) -> bool {
-        self.region_seq > self.region_shown
+    /// Is a 1:1 render for `target` on its way (or the full-size image loading)?
+    pub fn region_pending(&self, target: RegionTarget) -> bool {
+        self.regions.get(&target).is_some_and(|r| r.sent_seq > r.shown_seq)
+    }
+
+    /// Alt / Shift held while dragging a Sharpening slider (or not).
+    pub fn set_sharpen_view(&mut self, view: Option<SharpenView>) {
+        if view != self.sharpen_view {
+            self.sharpen_view = view;
+            // Regions follow at once: the box should switch with the main view.
+            self.changed_at = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            self.request_renders();
+        }
     }
 
     /// Show the Before slot too (rendered on demand).

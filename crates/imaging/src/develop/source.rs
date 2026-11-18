@@ -1,6 +1,7 @@
 //! The pixels Develop works from: linear, full precision, oriented.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageBuffer, Rgb, Rgb32FImage};
@@ -9,6 +10,7 @@ use rayon::prelude::*;
 
 use super::matrix::{self, Mat3, Mat3f};
 use super::settings::{DevelopSettings, WbPreset};
+use super::transform::TransformCache;
 use super::wb;
 use crate::decode::{SourceKind, fit_image, open_image, orient_raw};
 use crate::export::space;
@@ -45,6 +47,11 @@ pub struct WorkingImage {
     pub color: SourceColor,
     /// The file's full (oriented) size, whatever size `pixels` is.
     pub full_size: (u32, u32),
+    /// After a Transform: how much of each pixel the transformed photo covers (the rest
+    /// renders white).
+    pub(super) coverage: Option<Arc<Vec<f32>>>,
+    /// The transformed copy last rendered (see [`super::transform`]).
+    pub(super) transform_cache: TransformCache,
 }
 
 /// The resolved white balance: multipliers to apply and the Temp/Tint the panel shows.
@@ -56,6 +63,17 @@ pub struct ResolvedWb {
 }
 
 impl WorkingImage {
+    fn new(pixels: Rgb32FImage, color: SourceColor, full_size: (u32, u32)) -> WorkingImage {
+        WorkingImage { pixels, color, full_size, coverage: None, transform_cache: TransformCache::default() }
+    }
+
+    /// Linear working-space pixels as a rendered photo of their own size.
+    #[cfg(test)]
+    pub(super) fn for_tests(pixels: Rgb32FImage) -> WorkingImage {
+        let size = (pixels.width(), pixels.height());
+        WorkingImage::new(pixels, SourceColor::Rendered, size)
+    }
+
     /// Load `path` for developing. `max_px` limits the long side (a proxy for interactive
     /// editing); `None` loads full size.
     pub fn load(path: &Path, kind: SourceKind, max_px: Option<u32>) -> Result<(Self, Metadata)> {
@@ -93,7 +111,13 @@ impl WorkingImage {
     /// A smaller copy (longest side at most `max_px`).
     pub fn downscaled(&self, max_px: u32) -> WorkingImage {
         let pixels = fit_image(DynamicImage::ImageRgb32F(self.pixels.clone()), max_px).into_rgb32f();
-        WorkingImage { pixels, color: self.color.clone(), full_size: self.full_size }
+        WorkingImage {
+            pixels,
+            color: self.color.clone(),
+            full_size: self.full_size,
+            coverage: None,
+            transform_cache: TransformCache::default(),
+        }
     }
 
     /// The white balance `s` asks for, as multipliers (camera RGB for RAW files, the
@@ -237,10 +261,10 @@ fn load_raw(path: &Path, max_px: Option<u32>) -> Result<(WorkingImage, Metadata)
                 let q = [(p[0] * m[0]).min(1.0), (p[1] * m[1]).min(1.0), (p[2] * m[2]).min(1.0)];
                 p.copy_from_slice(&matrix::apply(&mf, q));
             });
-            return Ok((WorkingImage { pixels: img, color: SourceColor::LinearRaw, full_size }, meta));
+            return Ok((WorkingImage::new(img, SourceColor::LinearRaw, full_size), meta));
         }
     };
-    Ok((WorkingImage { pixels: img, color: source, full_size }, meta))
+    Ok((WorkingImage::new(img, source, full_size), meta))
 }
 
 /// sRGB-encoded 0..1 → linear.
@@ -288,5 +312,5 @@ fn load_image(path: &Path, max_px: Option<u32>) -> Result<(WorkingImage, Metadat
             f
         }
     };
-    Ok((WorkingImage { pixels, color: SourceColor::Rendered, full_size }, meta))
+    Ok((WorkingImage::new(pixels, SourceColor::Rendered, full_size), meta))
 }

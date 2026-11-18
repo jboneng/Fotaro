@@ -521,3 +521,120 @@ fn effects_vignette_and_grain_render_and_regions_still_match() {
         }
     }
 }
+
+#[test]
+fn sharpening_previews_are_grey_and_show_the_mask() {
+    // A hard edge in a colourful image.
+    let img: RgbImage =
+        ImageBuffer::from_fn(80, 60, |x, _| if x < 40 { Rgb([90, 20, 10]) } else { Rgb([150, 200, 255]) });
+    let w = rendered(&img);
+    let st = DevelopSettings {
+        detail: Detail { sharpen_amount: 60.0, sharpen_masking: 60.0, ..Detail::default() },
+        ..Default::default()
+    };
+    let whole = Region::whole(&w);
+    for view in [SharpenView::Amount, SharpenView::Edges, SharpenView::Mask] {
+        let out = render_region_srgb8_view(&w, &st, whole, Some(view));
+        assert!(
+            out.pixels().all(|p| p[0].abs_diff(p[1]) <= 1 && p[1].abs_diff(p[2]) <= 1),
+            "{view:?} is grey"
+        );
+    }
+    // The mask: white along the edge, black in the flat areas.
+    let mask = render_region_srgb8_view(&w, &st, whole, Some(SharpenView::Mask));
+    let row: Vec<u8> = (30..50).map(|x| mask.get_pixel(x, 30)[0]).collect();
+    assert!(mask.get_pixel(40, 30)[0] > 200 && mask.get_pixel(10, 30)[0] < 30, "{row:?}");
+    // Edges: mid grey in flat areas, lighter and darker on either side of the edge.
+    let edges = render_region_srgb8_view(&w, &st, whole, Some(SharpenView::Edges));
+    let flat = edges.get_pixel(10, 30)[0];
+    let (a, b) = (edges.get_pixel(39, 30)[0], edges.get_pixel(40, 30)[0]);
+    assert!(a.abs_diff(flat) > 10 && b.abs_diff(flat) > 10, "{flat} {a} {b}");
+    // Without a preview the photo renders normally.
+    let normal = render_region_srgb8_view(&w, &st, whole, None);
+    assert_eq!(normal, render_srgb8(&w, &st));
+}
+
+#[test]
+fn transform_moves_pixels_fills_white_and_regions_still_match() {
+    // A dark frame with a bright square in the middle.
+    let img: RgbImage = ImageBuffer::from_fn(120, 80, |x, y| {
+        if (50..70).contains(&x) && (30..50).contains(&y) { Rgb([220, 220, 220]) } else { Rgb([40, 40, 40]) }
+    });
+    let w = rendered(&img);
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    // Identity changes nothing.
+    let same = DevelopSettings { transform: Transform::default(), ..Default::default() };
+    assert_eq!(render_srgb8(&w, &same), plain);
+    // Shrinking leaves white around the photo; offset moves the square.
+    let small =
+        DevelopSettings { transform: Transform { scale: 60.0, ..Default::default() }, ..Default::default() };
+    let out = render_srgb8(&w, &small);
+    assert_eq!(out.get_pixel(1, 1).0, [255, 255, 255]);
+    assert!(out.get_pixel(60, 40)[0] > 200, "the centre stays");
+    let moved = DevelopSettings {
+        transform: Transform { x_offset: 50.0, ..Default::default() },
+        ..Default::default()
+    };
+    let out = render_srgb8(&w, &moved);
+    assert!(out.get_pixel(60, 40)[0] < 100 && out.get_pixel(90, 40)[0] > 200, "the square moved right");
+
+    // With everything that reaches across pixels on, a region matches the whole render.
+    let st = DevelopSettings {
+        transform: Transform { vertical: -40.0, rotate: 3.0, scale: 90.0, ..Default::default() },
+        detail: Detail { sharpen_amount: 50.0, color: 30.0, ..Detail::default() },
+        clarity: 30.0,
+        ..Default::default()
+    };
+    let whole = render_srgb8(&w, &st);
+    let part = render_region_srgb8(&w, &st, Region { x: 30, y: 20, w: 50, h: 40 });
+    for y in 0..40 {
+        for x in 0..50 {
+            let (a, b) = (part.get_pixel(x, y), whole.get_pixel(x + 30, y + 20));
+            assert!((0..3).all(|c| a[c].abs_diff(b[c]) <= 1), "({x}, {y}): {a:?} vs {b:?}");
+        }
+    }
+    // The picker samples what is shown: the square's centre after the offset.
+    let (sx, _) = moved.transform.source_point(0.75, 0.5, 120, 80);
+    assert!((sx - 0.5).abs() < 0.01, "{sx}");
+}
+
+#[test]
+fn constrain_crop_removes_the_white_and_upright_straightens_a_leaning_frame() {
+    // Mid grey with dark vertical bars leaning outwards towards the top (converging
+    // verticals, as when looking up at a building), and level bars.
+    let (w, h) = (240u32, 160u32);
+    let img: RgbImage = ImageBuffer::from_fn(w, h, |x, y| {
+        let t = 1.0 - y as f32 / h as f32;
+        let lean = |base: f32| base + (base - 120.0) * 0.12 * t;
+        let near = |c: f32| (x as f32 - c).abs() < 2.0;
+        let bar = [40.0, 80.0, 160.0, 200.0].iter().any(|&b| near(lean(b))) || y % 40 < 2;
+        if bar { Rgb([30, 30, 30]) } else { Rgb([150, 150, 150]) }
+    });
+    let src = rendered(&img);
+    let s = apply_upright(&src, &DevelopSettings::default(), Upright::Vertical);
+    let [pitch, yaw, roll] = s.transform.upright_angles;
+    assert!(pitch.abs() > 1.0 && yaw == 0.0 && roll.abs() < 1.0, "{:?}", s.transform.upright_angles);
+
+    // Without the crop the corners turn white; with it, they don't, and the photo is smaller
+    // in the same shape.
+    let open = render_srgb8(&src, &s);
+    assert_eq!(open.dimensions(), (w, h));
+    let white = |i: &RgbImage| {
+        [(0, 0), (i.width() - 1, 0), (0, i.height() - 1), (i.width() - 1, i.height() - 1)]
+            .iter()
+            .filter(|&&(x, y)| i.get_pixel(x, y).0 == [255, 255, 255])
+            .count()
+    };
+    assert!(white(&open) >= 2);
+    let cropped =
+        DevelopSettings { transform: Transform { constrain_crop: true, ..s.transform.clone() }, ..s.clone() };
+    let out = render_srgb8(&src, &cropped);
+    let (cw, ch) = out.dimensions();
+    assert!(cw < w && ch < h, "{cw}x{ch}");
+    assert!((cw as f32 / ch as f32 - 1.5).abs() < 0.03);
+    assert_eq!(white(&out), 0);
+    assert_eq!((cw, ch), cropped.transform.output_size(w, h));
+    // Regions of the cropped photo match it.
+    let part = render_region_srgb8(&src, &cropped, Region { x: 10, y: 10, w: 40, h: 30 });
+    assert_eq!(part.get_pixel(5, 5), out.get_pixel(15, 15));
+}

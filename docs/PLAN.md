@@ -595,3 +595,46 @@ All nine steps of the Basic panel plan are done.
       match; grains smaller than a rendered pixel average out (weaker, finer grain in a fit
       view, as in LrC). Applied last, after Detail, so noise reduction doesn't remove it and
       sharpening doesn't sharpen it; strongest in the midtones. Auto Tone ignores Effects.
+
+## Develop: Detail preview box and sharpening previews
+- [x] The Detail panel's preview box, as in LrC: the photo at 1:1 around a point (the
+      centre at first), rendered from the full-size image; drag inside it to look around;
+      the target button, then hovering over the photo, moves the point (a click keeps it);
+      the triangle hides the box. Renders through the same full-resolution region path as
+      the zoomed view (a second region target), following a slider about 60 ms after it
+      pauses.
+- [x] Holding Alt (as in LrC) or Shift while dragging a Sharpening slider shows its
+      greyscale preview in the view and the box: Amount the sharpened image, Radius and
+      Detail the edges being enhanced on grey, Masking the mask (white where sharpening
+      applies). The histogram keeps the photo's.
+
+## Develop: Transform
+- [x] Stage 1, Manual Transform: Vertical and Horizontal (keystone: the photo is turned
+      as if by a camera with a ~35 mm lens, centre kept in place; Vertical below 0 widens
+      the top, as in LrC), Rotate (±10°), Aspect, Scale (50–150%), X / Y Offset. A grid
+      shows over the photo while a slider is dragged. The transformed image is made first
+      (bilinear) and cached with the source until the Transform changes, so everything
+      after it (local adjustments, Detail, Effects, 1:1 regions, the Detail box, previews,
+      export) works unchanged; uncovered parts render white, as LrC shows them before a
+      crop. The White Balance Selector samples through the Transform. ~7–11 ms to warp a
+      1280 px proxy.
+- [x] Stage 2, Upright Level / Vertical / Full / Auto: straight edges are found (edge pixels
+      grown into regions of one direction, long thin ones kept as segments, on a ~900 px
+      copy), then the camera turn (pitch, yaw, roll) is fitted by robust least squares so
+      near-verticals come out vertical and near-horizontals level. Level fits the roll only,
+      Vertical adds pitch, Full adds yaw, Auto weighs horizontals less and resists big turns.
+      A turn needs two lines of its kind; a result that straightens under 30% of the lines
+      (whiskers, branches) falls back to levelling, then to nothing. The angles are stored in
+      the settings, so renders never analyse again; the Manual sliders apply on top.
+      ~100–200 ms per analysis.
+- [x] Stage 3, Upright Guided: drag on the photo to draw up to four guides (kept in the
+      untransformed photo's coordinates), drag an end to move one, right-click to remove;
+      two verticals fix pitch and roll, two horizontals yaw, one guide only levels; solved
+      exactly on the UI thread.
+- [x] Constrain Crop: the output becomes the largest rectangle of the photo's shape inside
+      both the frame and the transformed photo (searched over centres), so no white is left.
+      The crop is part of the Transform's mapping: the developed photo is really smaller
+      (previews, 1:1, export), and the Loupe and Develop size it as developed. A crop tool
+      can build on it.
+- [x] Fix found on the way: sliders with one decimal (Detail's Radius) rounded to whole
+      numbers; they now step by their own precision.

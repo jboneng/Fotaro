@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
-use super::detail::apply as apply_detail;
+use super::detail::{SharpenView, apply as apply_detail};
 use super::effects::{Effects, Grain, Vignette, VignetteStyle};
 use super::grading::Grading;
 use super::hsl::{HslAdjust, oklab_to_srgb, srgb_to_oklab};
@@ -21,6 +21,7 @@ use super::local::{BaseMap, CLARITY_MAP, TONE_MAP, box_blur_par, fast_exp2, fast
 use super::matrix::{self, Mat3f};
 use super::settings::{DevelopSettings, Treatment};
 use super::source::{SourceColor, WorkingImage};
+use super::transform::transformed;
 
 /// Extra exposure for scene-referred (RAW) data: cameras keep highlight headroom, so a
 /// straight linear render looks dark next to their JPEGs.
@@ -461,28 +462,36 @@ pub fn render_srgb8(img: &WorkingImage, s: &DevelopSettings) -> RgbImage {
 /// Render part of the image for display (1:1 views of a full-size image): 8-bit sRGB,
 /// the region's size.
 pub fn render_region_srgb8(img: &WorkingImage, s: &DevelopSettings, region: Region) -> RgbImage {
+    render_region_srgb8_view(img, s, region, None)
+}
+
+/// [`render_region_srgb8`], or one of LrC's greyscale sharpening previews (`view`).
+pub fn render_region_srgb8_view(
+    img: &WorkingImage,
+    s: &DevelopSettings,
+    region: Region,
+    view: Option<SharpenView>,
+) -> RgbImage {
+    let geometry = transformed(img, &s.transform);
+    let img: &WorkingImage = &geometry;
     let region = region.clipped(img);
     let enc = SrgbEncoder::new();
     let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
     let mut out = RgbImage::new(region.w, region.h);
-    let grain = Grain::new(&s.effects, render_scale(img));
-    let grained = |rgb: [f32; 3], x: usize, y: usize| match &grain {
-        Some(g) => g.apply(rgb, x, y),
-        None => rgb,
-    };
+    let finish = Finish::new(img, s, view.is_none());
     let (rx, ry) = (region.x as usize, region.y as usize);
-    if s.detail.is_active() {
-        let detailed = Detailed::render(img, s, region);
+    if s.detail.is_active() || view.is_some() {
+        let detailed = Detailed::render(img, s, region, view);
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-                *o = grained(detailed.srgb(i, j), rx + i, ry + j).map(|v| enc.encode(v));
+                *o = finish.apply(detailed.srgb(i, j), rx + i, ry + j).map(|v| enc.encode(v));
             }
         });
         return out;
     }
     let prep = Prepared::new(img, s, region);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
-        let l = grained(matrix::apply(&to_srgb, prep.pixel(p, x, y)), x, y);
+        let l = finish.apply(matrix::apply(&to_srgb, prep.pixel(p, x, y)), x, y);
         o.copy_from_slice(&l.map(|v| enc.encode(v)));
     });
     out
@@ -493,29 +502,60 @@ fn render_scale(img: &WorkingImage) -> f32 {
     img.width() as f32 / img.full_size.0.max(1) as f32
 }
 
+/// The last steps, on final linear RGB: grain, then white where a Transform left the frame
+/// uncovered (as LrC shows it before cropping).
+struct Finish<'a> {
+    grain: Option<Grain>,
+    coverage: Option<&'a [f32]>,
+    width: usize,
+}
+
+impl<'a> Finish<'a> {
+    fn new(img: &'a WorkingImage, s: &DevelopSettings, grain: bool) -> Finish<'a> {
+        Finish {
+            grain: Grain::new(&s.effects, render_scale(img)).filter(|_| grain),
+            coverage: img.coverage.as_deref().map(Vec::as_slice),
+            width: img.width() as usize,
+        }
+    }
+
+    #[inline]
+    fn apply(&self, rgb: [f32; 3], x: usize, y: usize) -> [f32; 3] {
+        let rgb = match &self.grain {
+            Some(g) => g.apply(rgb, x, y),
+            None => rgb,
+        };
+        match self.coverage {
+            Some(c) if c[y * self.width + x] < 1.0 => {
+                let a = c[y * self.width + x];
+                rgb.map(|v| v * a + (1.0 - a))
+            }
+            _ => rgb,
+        }
+    }
+}
+
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
 pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<Rgb<u16>, Vec<u16>> {
+    let geometry = transformed(img, &s.transform);
+    let img: &WorkingImage = &geometry;
     let region = Region::whole(img);
     let mut out = ImageBuffer::<Rgb<u16>, Vec<u16>>::new(img.width(), img.height());
     let to_u16 = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
-    let grain = Grain::new(&s.effects, render_scale(img));
-    let grained = |rgb: [f32; 3], x: usize, y: usize| match &grain {
-        Some(g) => g.apply(rgb, x, y),
-        None => rgb,
-    };
+    let finish = Finish::new(img, s, true);
     if s.detail.is_active() {
-        let detailed = Detailed::render(img, s, region);
+        let detailed = Detailed::render(img, s, region, None);
         let to_work = matrix::to_f32(&matrix::srgb_to_work());
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-                *o = grained(matrix::apply(&to_work, detailed.srgb(i, j)), i, j).map(to_u16);
+                *o = finish.apply(matrix::apply(&to_work, detailed.srgb(i, j)), i, j).map(to_u16);
             }
         });
         return out;
     }
     let prep = Prepared::new(img, s, region);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
-        o.copy_from_slice(&grained(prep.pixel(p, x, y), x, y).map(to_u16));
+        o.copy_from_slice(&finish.apply(prep.pixel(p, x, y), x, y).map(to_u16));
     });
     out
 }
@@ -531,7 +571,12 @@ struct Detailed {
 }
 
 impl Detailed {
-    fn render(img: &WorkingImage, s: &DevelopSettings, region: Region) -> Detailed {
+    fn render(
+        img: &WorkingImage,
+        s: &DevelopSettings,
+        region: Region,
+        view: Option<SharpenView>,
+    ) -> Detailed {
         // Rendered pixels per full-size pixel: the filters' radii are in full-size pixels.
         let scale = render_scale(img);
         let m = s.detail.margin(scale) as u32;
@@ -560,7 +605,7 @@ impl Detailed {
                     (l[i], a[i], b[i]) = (lab[0], lab[1], lab[2]);
                 }
             });
-        apply_detail(&mut planes, area.w as usize, area.h as usize, &s.detail, scale);
+        apply_detail(&mut planes, area.w as usize, area.h as usize, &s.detail, scale, view);
         Detailed {
             planes,
             width: area.w as usize,

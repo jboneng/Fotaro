@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use imaging::SourceKind;
-use imaging::develop::{DevelopSettings, WorkingImage, render_srgb8};
+use imaging::develop::{DevelopSettings, Upright, WorkingImage, apply_upright, render_srgb8};
 
 // The app's allocator, so timings match the app (the system allocator's fresh large
 // blocks page-fault on first use).
@@ -27,7 +27,12 @@ fn main() {
         let (k, v) = kv.split_once('=').unwrap();
         json[k] = serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into()));
     }
-    let settings: DevelopSettings = serde_json::from_value(json).expect("valid settings");
+    let mut settings: DevelopSettings = serde_json::from_value(json).expect("valid settings");
+    // `upright=Full` (or Level, Vertical, Auto): analyse the photo, as the panel's buttons do.
+    let upright: Option<Upright> = rest
+        .iter()
+        .find_map(|a| a.strip_prefix("upright="))
+        .map(|m| serde_json::from_value(serde_json::Value::String(m.into())).expect("an Upright mode"));
     let raw = ["nef", "dng", "cr2", "cr3", "arw", "raf", "orf", "rw2"]
         .iter()
         .any(|e| path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e)));
@@ -41,6 +46,11 @@ fn main() {
     )
     .expect("load");
     println!("load proxy {}x{} in {:?} ({:?})", img.width(), img.height(), t.elapsed(), img.color);
+    if let Some(mode) = upright {
+        let t = Instant::now();
+        settings = apply_upright(&img, &settings, mode);
+        println!("upright {mode:?}: {:?} in {:?}", settings.transform.upright_angles, t.elapsed());
+    }
     let wb = img.resolve_wb(&settings);
     println!("white balance {:?}", wb);
     let mut rendered = None;

@@ -17,17 +17,19 @@ use imaging::develop::{
     CurveChannel, CurveFns, DEFAULT_SPLITS, GradeParam, GradeWheel, HslGroup, POINT_PRESETS, Region,
     SWATCHES, Slider, ToneCurve, Treatment, WbPreset,
 };
-use imaging::develop::{DetailParam, EffectParam, VignetteStyle};
+use imaging::develop::{
+    DetailParam, EffectParam, MAX_GUIDES, SharpenView, TransformParam, Upright, VignetteStyle,
+};
 
 use super::panels::Side;
 use super::shortcuts::Action;
 use super::theme;
 use super::views::{paint_image, rotated_size};
 use crate::app::{Command, PhotoLibraryApp};
-use crate::develop::Slot;
+use crate::develop::{DevelopState, GuideDrag, RegionTarget, Slot};
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
-const PLANNED_RIGHT: &[&str] = &["Lens Corrections", "Transform"];
+const PLANNED_RIGHT: &[&str] = &["Lens Corrections"];
 const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
@@ -157,6 +159,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                         ui.label(weak("Comes in a later version."));
                     });
                 }
+                stack.section(ui, Side::Right, "Transform", RIGHT, false, |ui| transform_panel(app, ui));
                 stack.section(ui, Side::Right, "Effects", RIGHT, false, |ui| effects_panel(app, ui));
                 app.ui.dev_right = stack;
             });
@@ -190,7 +193,7 @@ impl Spec {
     }
 
     fn round(&self, v: f32) -> f32 {
-        let step = if self.slider.decimals() == 2 { 0.01 } else { 1.0 };
+        let step = 10f32.powi(-(self.slider.decimals() as i32));
         ((v / step).round() * step).clamp(self.range.0, self.range.1)
     }
 }
@@ -202,6 +205,8 @@ struct Moved {
     done: bool,
     /// Double-clicked (label or track): back to the default.
     reset: bool,
+    /// The track or value is being dragged right now.
+    held: bool,
 }
 
 const LABEL_W: f32 = 74.0;
@@ -257,7 +262,7 @@ fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
     }
     reset |= track.double_clicked();
     if reset {
-        out = Moved { changed: *value != spec.default, done: true, reset: true };
+        out = Moved { changed: *value != spec.default, done: true, reset: true, held: false };
         *value = spec.default;
     } else if track.is_pointer_button_down_on()
         && let Some(p) = ui.ctx().pointer_interact_pos()
@@ -268,6 +273,7 @@ fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
             out.changed = true;
         }
     }
+    out.held = track.is_pointer_button_down_on();
     if track.drag_stopped() || track.clicked() {
         out.done = true;
     }
@@ -286,8 +292,8 @@ fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
     let slider = spec.slider;
     let speed = if spec.log {
         10.0
-    } else if slider.decimals() == 2 {
-        0.01
+    } else if slider.decimals() > 0 {
+        10f32.powi(-(slider.decimals() as i32))
     } else {
         0.5
     };
@@ -310,6 +316,7 @@ fn slider_row(ui: &mut egui::Ui, spec: &Spec, value: &mut f32) -> Moved {
             out.done = true;
         }
     }
+    out.held |= resp.dragged();
     if resp.drag_stopped() {
         out.done = true;
     }
@@ -465,6 +472,7 @@ fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
     if toggle_picker {
         d.picking_wb = !d.picking_wb;
+        d.picking_detail = false;
     }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
@@ -537,10 +545,17 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     };
     let painter = ui.painter().with_clip_rect(rect);
 
-    // Size of the photo in pixels as displayed (file orientation, then catalog rotation).
-    let full_size = s.develop.info.as_ref().map(|i| egui::vec2(i.full_size.0 as f32, i.full_size.1 as f32));
+    // Size of the developed photo in pixels as displayed (file orientation, then catalog
+    // rotation): the file's size, or less with Constrain Crop.
+    let full_size = s.develop.output_size().map(|(w, h)| egui::vec2(w as f32, h as f32));
     let img_px = rotated_size(full_size.unwrap_or_else(|| tex.size_vec2()), photo.rotation);
-    let zoomed = app.zoom.zoomed && !photo.missing && !s.develop.picking_wb;
+    let zoomed = app.zoom.zoomed && !photo.missing && !s.develop.picking_wb && !s.develop.picking_detail;
+    // Upright Guided: drags on the photo draw guides.
+    let guiding = !s.develop.before
+        && developed.is_some()
+        && s.develop.settings.transform.upright == Upright::Guided
+        && !s.develop.picking_wb
+        && !s.develop.picking_detail;
     let view = if zoomed { rect } else { fitted };
     let fit = (view.width() / img_px.x).min(view.height() / img_px.y);
     let fill = (view.width() / img_px.x).max(view.height() / img_px.y);
@@ -551,7 +566,7 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         if let Some((q, offset)) = z.anchor.take() {
             z.center = q - offset / size;
         }
-        if resp.dragged() {
+        if resp.dragged() && !guiding {
             z.center -= resp.drag_delta() / size;
         }
         if resp.hovered() {
@@ -594,11 +609,11 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         let wanted =
             Region { x: x0, y: y0, w: x1.saturating_sub(x0).max(1), h: y1.saturating_sub(y0).max(1) };
         if !resp.dragged()
-            && let Some(wait) = s.develop.want_region(wanted)
+            && let Some(wait) = s.develop.want_region(RegionTarget::Zoom, wanted)
         {
             ui.ctx().request_repaint_after(wait);
         }
-        match s.develop.region_for_view() {
+        match s.develop.region_for(RegionTarget::Zoom) {
             Some((region, region_tex)) => {
                 // Its corners in display coordinates (0..1 of the photo as shown).
                 let p = |x: u32, y: u32| rotate((x as f32 / full.x, y as f32 / full.y), photo.rotation);
@@ -615,6 +630,23 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         }
     }
 
+    // While a Transform slider is dragged: a grid to line verticals and horizontals up with.
+    if s.develop.transform_grid {
+        let area = view.intersect(img_rect);
+        let step = (img_rect.width().min(img_rect.height()) / 8.0).max(24.0);
+        let stroke = egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 90));
+        let mut x = img_rect.left() + step;
+        while x < img_rect.right() - 1.0 {
+            painter.line_segment([egui::pos2(x, area.top()), egui::pos2(x, area.bottom())], stroke);
+            x += step;
+        }
+        let mut y = img_rect.top() + step;
+        while y < img_rect.bottom() - 1.0 {
+            painter.line_segment([egui::pos2(area.left(), y), egui::pos2(area.right(), y)], stroke);
+            y += step;
+        }
+    }
+
     let corner = |text: &str, color: Color32| {
         painter.text(
             rect.left_bottom() + egui::vec2(14.0, -12.0),
@@ -628,7 +660,7 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         corner(e, theme::MISSING);
     } else if developed.is_none() {
         corner("Loading…", theme::TEXT_STRONG);
-    } else if zoomed && !sharp && s.develop.region_pending() {
+    } else if zoomed && !sharp && s.develop.region_pending(RegionTarget::Zoom) {
         corner("Rendering full resolution…", theme::TEXT_STRONG);
     }
     if s.develop.before {
@@ -657,6 +689,23 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         }
         return;
     }
+    if guiding {
+        if guided_tool(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter) {
+            app.run(Command::DevelopCommit(None));
+        }
+        return;
+    }
+    if s.develop.picking_detail {
+        // The Detail panel's target: the box follows the pointer; a click keeps the point.
+        if let Some(p) = resp.hover_pos().filter(|p| img_rect.contains(*p)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            s.develop.detail_focus = unrotate((p - img_rect.min) / img_rect.size(), photo.rotation);
+        }
+        if resp.clicked() {
+            s.develop.picking_detail = false;
+        }
+        return;
+    }
     // As in the Loupe: a click toggles between Fit and the zoom level, at that point.
     if resp.clicked() && !photo.missing {
         if zoomed {
@@ -671,6 +720,114 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     } else if over_photo && !photo.missing {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
     }
+}
+
+/// Upright Guided on the photo: drag to draw a guide (up to four), drag a guide's end to
+/// move it, right-click a guide to remove it. Guides are kept in the untransformed photo's
+/// coordinates and drawn where the transformed photo shows them. Returns true when the
+/// guides changed (to be saved).
+fn guided_tool(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    d: &mut DevelopState,
+    rotation: u8,
+    img_rect: Rect,
+    painter: &egui::Painter,
+) -> bool {
+    let Some((sw, sh)) = d.info.as_ref().map(|i| i.full_size) else { return false };
+    let t = d.settings.transform.clone();
+    let to_screen = |x: f32, y: f32| -> Option<egui::Pos2> {
+        let (u, v) = rotate(t.output_point(x, y, sw, sh)?, rotation);
+        Some(img_rect.min + egui::vec2(u, v) * img_rect.size())
+    };
+    let to_source = |p: egui::Pos2| -> (f32, f32) {
+        let (x, y) = unrotate((p - img_rect.min) / img_rect.size(), rotation);
+        t.source_point(x, y, sw, sh)
+    };
+    let screen: Vec<Option<(egui::Pos2, egui::Pos2)>> =
+        t.guides.iter().map(|g| Some((to_screen(g[0], g[1])?, to_screen(g[2], g[3])?))).collect();
+    if resp.hover_pos().is_some_and(|p| img_rect.contains(p)) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+
+    // A drag starts on a guide's end (moving it) or anywhere else (a new guide).
+    if resp.drag_started()
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+    {
+        let near = screen.iter().enumerate().find_map(|(i, s)| {
+            let (a, b) = (*s)?;
+            if a.distance(origin) < 8.0 {
+                Some((i, 0))
+            } else if b.distance(origin) < 8.0 {
+                Some((i, 1))
+            } else {
+                None
+            }
+        });
+        d.guide_drag = Some(match near {
+            Some((index, end)) => GuideDrag::End { index, end },
+            None => GuideDrag::New { start: origin },
+        });
+    }
+    let pointer = ui.input(|i| i.pointer.latest_pos());
+
+    // The guides, with the one being moved or drawn following the pointer.
+    let color = Color32::from_rgb(255, 205, 60);
+    let stroke = egui::Stroke::new(1.5, color);
+    for (i, s) in screen.iter().enumerate() {
+        let Some((mut a, mut b)) = *s else { continue };
+        if let (Some(GuideDrag::End { index, end }), Some(p)) = (d.guide_drag, pointer)
+            && index == i
+        {
+            if end == 0 { a = p } else { b = p }
+        }
+        painter.line_segment([a, b], stroke);
+        painter.circle_filled(a, 3.5, color);
+        painter.circle_filled(b, 3.5, color);
+    }
+    if let (Some(GuideDrag::New { start }), Some(p)) = (d.guide_drag, pointer) {
+        painter.line_segment([start, p], stroke);
+        painter.circle_filled(start, 3.5, color);
+    }
+
+    let mut guides = t.guides.clone();
+    if resp.drag_stopped()
+        && let Some(drag) = d.guide_drag.take()
+        && let Some(p) = pointer
+    {
+        match drag {
+            GuideDrag::New { start } if start.distance(p) > 12.0 && guides.len() < MAX_GUIDES => {
+                let (a, b) = (to_source(start), to_source(p));
+                guides.push([a.0, a.1, b.0, b.1]);
+            }
+            GuideDrag::End { index, end } if index < guides.len() => {
+                let q = to_source(p);
+                guides[index][2 * end] = q.0;
+                guides[index][2 * end + 1] = q.1;
+            }
+            _ => {}
+        }
+    }
+    // Right-click on a guide removes it.
+    if resp.secondary_clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(i) =
+            screen.iter().position(|s| s.is_some_and(|(a, b)| distance_to_segment(p, a, b) < 6.0))
+    {
+        guides.remove(i);
+    }
+    if guides != t.guides {
+        d.set_guides(guides);
+        return true;
+    }
+    false
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+fn distance_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
 }
 
 /// A point (0..1) of the photo before the catalog's `rotation` clockwise quarter turns →
@@ -1176,7 +1333,7 @@ fn color_wheel(ui: &mut egui::Ui, id: egui::Id, size: f32, hue: &mut f32, sat: &
     }
     if resp.double_clicked() {
         *sat = 0.0;
-        out = Moved { changed: true, done: true, reset: true };
+        out = Moved { changed: true, done: true, reset: true, held: false };
     }
     // The handle: where hue and saturation point.
     let a = hue.to_radians();
@@ -1304,15 +1461,41 @@ fn color_grading(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 /// (Luminance with its Detail and Contrast; Color with its Detail and Smoothness).
 fn detail_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
+    let rotation = s.active_photo().map_or(0, |p| p.rotation);
     let d = &mut s.develop;
     if d.photo.is_none() {
         ui.label(weak("Select a photo to develop."));
         return;
     }
-    ui.label(weak("Zoom to 1:1 (Z) to judge sharpening and noise reduction."));
+    // LrC's preview box: the target picks the point on the photo; the triangle hides it.
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Button::new(RichText::new("⊹").size(15.0)).selected(d.picking_detail))
+            .on_hover_text("Click a point of the photo to show it in the preview")
+            .clicked()
+        {
+            d.picking_detail = !d.picking_detail;
+            d.picking_wb = false;
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let arrow = if d.detail_box_open { "⏷" } else { "⏴" };
+            if ui
+                .add(egui::Button::new(arrow).frame(false))
+                .on_hover_text(if d.detail_box_open { "Hide the preview" } else { "Show the preview" })
+                .clicked()
+            {
+                d.detail_box_open = !d.detail_box_open;
+            }
+        });
+    });
+    if d.detail_box_open {
+        detail_box(ui, d, rotation);
+    }
+    ui.label(weak("Hold Alt or Shift while dragging a Sharpening slider to see what it does."));
     let defaults = d.defaults();
     let mut st = d.settings.clone();
     let mut done: Option<Option<String>> = None;
+    let mut preview = None;
     let groups: [(&str, &[DetailParam]); 2] =
         [("Sharpening", &DetailParam::SHARPENING), ("Noise Reduction", &DetailParam::NOISE)];
     for (title, params) in groups {
@@ -1342,13 +1525,178 @@ fn detail_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             if row.inner.done {
                 done = Some(None);
             }
+            if row.inner.held {
+                preview = SharpenView::for_param(*p);
+            }
         }
+    }
+    // LrC uses Alt; Shift works too (Alt is easy to hit as AltGr on some keyboards).
+    let modifier = ui.input(|i| i.modifiers.alt || i.modifiers.shift);
+    d.set_sharpen_view(preview.filter(|_| modifier));
+    if d.sharpen_view.is_some() {
+        ui.ctx().request_repaint();
     }
     if st != d.settings {
         d.set_live(st);
     }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
+    }
+}
+
+/// The Detail panel's preview box: the photo at 1:1 around the chosen point. Drag to look
+/// around.
+fn detail_box(ui: &mut egui::Ui, d: &mut crate::develop::DevelopState, rotation: u8) {
+    let ppp = ui.ctx().pixels_per_point();
+    let side = (ui.available_width() - 24.0).clamp(80.0, 300.0);
+    let (outer, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), side + 8.0), Sense::drag());
+    let rect = Rect::from_center_size(outer.center(), egui::vec2(side, side));
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 0.0, Color32::from_gray(0x60));
+    ui.painter().rect_stroke(
+        rect.expand(1.0),
+        0.0,
+        egui::Stroke::new(1.0, Color32::from_gray(0x22)),
+        egui::StrokeKind::Outside,
+    );
+    // The developed photo's size (the box always shows the edit, even in Before).
+    let Some(full) = d.info.as_ref().map(|i| d.settings.transform.output_size(i.full_size.0, i.full_size.1))
+    else {
+        return;
+    };
+    let (fw, fh) = (full.0.max(1), full.1.max(1));
+
+    // Dragging moves the point the other way, pixel for pixel on screen.
+    if resp.dragged() {
+        let shown = rotated_size(egui::vec2(fw as f32, fh as f32), rotation);
+        let (u, v) = rotate(d.detail_focus, rotation);
+        let delta = resp.drag_delta() * ppp;
+        let q = egui::vec2(u - delta.x / shown.x, v - delta.y / shown.y);
+        let (x, y) = unrotate(q, rotation);
+        d.detail_focus = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+
+    // The square of full-size pixels around the point (the box is square, so rotation
+    // doesn't change its size).
+    let n = (side * ppp).round() as u32;
+    let (w, h) = (n.min(fw), n.min(fh));
+    let x = ((d.detail_focus.0 * fw as f32) as i64 - i64::from(w / 2)).clamp(0, i64::from(fw - w)) as u32;
+    let y = ((d.detail_focus.1 * fh as f32) as i64 - i64::from(h / 2)).clamp(0, i64::from(fh - h)) as u32;
+    let wanted = Region { x, y, w, h };
+    if let Some(wait) = d.want_region(RegionTarget::DetailBox, wanted) {
+        ui.ctx().request_repaint_after(wait);
+    }
+    match d.region_for(RegionTarget::DetailBox) {
+        Some((region, tex)) => {
+            let size = rotated_size(egui::vec2(region.w as f32, region.h as f32), rotation) / ppp;
+            paint_image(&painter, tex, Rect::from_center_size(rect.center(), size), rotation, Color32::WHITE);
+        }
+        None => {
+            if d.region_pending(RegionTarget::DetailBox) {
+                painter.text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    "Loading…",
+                    FontId::proportional(12.5),
+                    theme::TEXT_STRONG,
+                );
+            }
+        }
+    }
+}
+
+/// LrC's Transform panel: the Manual Transform sliders (Vertical, Horizontal, Rotate,
+/// Aspect, Scale, X / Y Offset). A grid is shown over the photo while one is dragged.
+fn transform_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+    let Some(s) = &mut app.session else { return };
+    let d = &mut s.develop;
+    if d.photo.is_none() {
+        ui.label(weak("Select a photo to develop."));
+        return;
+    }
+    let defaults = d.defaults();
+    let mut st = d.settings.clone();
+    let mut done: Option<Option<String>> = None;
+    let mut held = false;
+    let mut upright = None;
+
+    // Upright: the automatic modes analyse the photo; Guided uses guides drawn on it.
+    sub_header(ui, "Upright", |_| {});
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        for mode in Upright::ALL {
+            let tip = match mode {
+                Upright::Off => "No Upright correction",
+                Upright::Auto => "Balanced: level, and perspective corrected in moderation",
+                Upright::Guided => "Draw guides on the photo along lines that should be straight",
+                Upright::Level => "Level the photo",
+                Upright::Vertical => "Level, and make converging verticals parallel",
+                Upright::Full => "Level, and correct vertical and horizontal perspective",
+            };
+            let current = st.transform.upright == mode;
+            if ui
+                .add(egui::Button::new(RichText::new(mode.label()).size(11.5)).selected(current))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                upright = Some(mode);
+            }
+        }
+    });
+    if st.transform.upright == Upright::Guided {
+        let n = st.transform.guides.len();
+        ui.label(weak(format!(
+            "Drag on the photo to draw a guide along a line that should be vertical or level ({n} of {MAX_GUIDES}). Drag an end to move it; right-click a guide to remove it."
+        )));
+        if n > 0 && ui.small_button("Clear Guides").clicked() {
+            d.set_guides(Vec::new());
+            st = d.settings.clone();
+            done = Some(None);
+        }
+    }
+    let mut constrain = st.transform.constrain_crop;
+    if ui
+        .checkbox(&mut constrain, "Constrain Crop")
+        .on_hover_text("Crop to the largest part of the frame the transformed photo covers")
+        .changed()
+    {
+        st.transform.constrain_crop = constrain;
+        done = Some(None);
+    }
+
+    sub_header(ui, "Manual Transform", |_| {});
+    for p in TransformParam::ALL {
+        let slider = Slider::Transform(p);
+        let spec = Spec {
+            slider,
+            range: slider.range(false),
+            default: p.get(&defaults.transform),
+            log: false,
+            gradient: None,
+            kelvin: false,
+        };
+        let mut v = slider.get(&st);
+        let row = slider_row(ui, &spec, &mut v);
+        if row.changed {
+            slider.set(&mut st, v);
+        }
+        if row.done {
+            done = Some(None);
+        }
+        held |= row.held;
+    }
+    d.transform_grid = held;
+    if st != d.settings {
+        d.set_live(st);
+    }
+    if let Some(label) = done {
+        app.run(Command::DevelopCommit(label));
+    }
+    if let Some(mode) = upright {
+        app.run(Command::DevelopUpright(mode));
     }
 }
 

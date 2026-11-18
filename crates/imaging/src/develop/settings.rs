@@ -7,6 +7,7 @@ use super::detail::{Detail, DetailParam};
 use super::effects::{EffectParam, Effects};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::hsl::{COLORS, Hsl, HslGroup};
+use super::transform::{Transform, TransformParam};
 
 /// Bumped when the renderer changes how existing settings look.
 pub const PROCESS_VERSION: u32 = 1;
@@ -110,6 +111,8 @@ pub struct DevelopSettings {
     pub detail: Detail,
     /// The Effects panel (post-crop vignetting, grain).
     pub effects: Effects,
+    /// The Transform panel (perspective, rotation, scale…).
+    pub transform: Transform,
 }
 
 impl Default for DevelopSettings {
@@ -137,6 +140,7 @@ impl Default for DevelopSettings {
             grading: ColorGrading::default(),
             detail: Detail::default(),
             effects: Effects::default(),
+            transform: Transform::default(),
         }
     }
 }
@@ -174,6 +178,8 @@ pub enum Slider {
     Detail(DetailParam),
     /// The Effects panel.
     Effect(EffectParam),
+    /// The Transform panel.
+    Transform(TransformParam),
 }
 
 impl Slider {
@@ -211,6 +217,7 @@ impl Slider {
             Self::GradeBalance => "Balance",
             Self::Detail(p) => p.label(),
             Self::Effect(p) => p.label(),
+            Self::Transform(p) => p.label(),
         }
     }
 
@@ -222,6 +229,7 @@ impl Slider {
             Self::Exposure => (-5.0, 5.0),
             Self::Detail(p) => p.range(),
             Self::Effect(p) => p.range(),
+            Self::Transform(p) => p.range(),
             Self::Grade(_, GradeParam::Hue) => (0.0, 360.0),
             Self::Grade(_, GradeParam::Saturation) | Self::GradeBlending => (0.0, 100.0),
             _ => (-100.0, 100.0),
@@ -232,6 +240,7 @@ impl Slider {
         match self {
             Self::Exposure => 2,
             Self::Detail(DetailParam::SharpenRadius) => 1,
+            Self::Transform(p) => p.decimals(),
             _ => 0,
         }
     }
@@ -262,6 +271,7 @@ impl Slider {
             Self::GradeBalance => s.grading.balance,
             Self::Detail(p) => p.get(&s.detail),
             Self::Effect(p) => p.get(&s.effects),
+            Self::Transform(p) => p.get(&s.transform),
         }
     }
 
@@ -294,6 +304,7 @@ impl Slider {
             Self::GradeBalance => &mut s.grading.balance,
             Self::Detail(p) => p.get_mut(&mut s.detail),
             Self::Effect(p) => p.get_mut(&mut s.effects),
+            Self::Transform(p) => p.get_mut(&mut s.transform),
         };
         *field = v;
     }
@@ -308,6 +319,7 @@ impl Slider {
             }
             Self::Detail(_) => format!("{v:.*}", self.decimals()),
             Self::Effect(p) if !p.signed() => format!("{v:.0}"),
+            Self::Transform(TransformParam::Scale) => format!("{v:.0}"),
             _ if v.abs() < 0.5 * 10f32.powi(-(self.decimals() as i32)) => {
                 format!("{:.*}", self.decimals(), 0.0)
             }
@@ -402,6 +414,21 @@ impl DevelopSettings {
                 eat(p.get(&self.detail).to_bits());
             }
         }
+        if self.transform != Transform::default() {
+            let t = &self.transform;
+            eat(0x7a_f0);
+            for p in TransformParam::ALL {
+                eat(p.get(t).to_bits());
+            }
+            eat(t.upright as u32);
+            for a in t.upright_angles {
+                eat(a.to_bits());
+            }
+            eat(u32::from(t.constrain_crop));
+            for v in t.guides.iter().flatten() {
+                eat(v.to_bits());
+            }
+        }
         if self.effects != Effects::default() {
             eat(0xeff_ec75);
             eat(self.effects.vignette_style as u32);
@@ -461,6 +488,32 @@ impl DevelopSettings {
                     format!("{}: {} {}", p.group(), p.label(), s.format(s.get(self), kelvin))
                 }
                 _ => "Detail".into(),
+            };
+        }
+        if self.transform != old.transform {
+            let (t, o) = (&self.transform, &old.transform);
+            if t.upright != o.upright {
+                return format!("Upright: {}", t.upright.label());
+            }
+            if t.guides != o.guides {
+                return "Upright: Guided".into();
+            }
+            if t.constrain_crop != o.constrain_crop {
+                return format!("Constrain Crop: {}", if t.constrain_crop { "On" } else { "Off" });
+            }
+            if t.upright_angles != o.upright_angles {
+                return format!("Upright: {}", t.upright.label());
+            }
+            let changed: Vec<TransformParam> = TransformParam::ALL
+                .into_iter()
+                .filter(|p| p.get(&self.transform) != p.get(&old.transform))
+                .collect();
+            return match changed.as_slice() {
+                [p] => {
+                    let s = Slider::Transform(*p);
+                    format!("Transform: {} {}", p.label(), s.format(s.get(self), kelvin))
+                }
+                _ => "Transform".into(),
             };
         }
         if self.effects != old.effects {
