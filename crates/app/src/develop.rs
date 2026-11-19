@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use catalog::{Catalog, FileKind, HistoryStep, PhotoRow};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -57,6 +57,12 @@ pub fn spot_size(radius: f32) -> f32 {
 pub enum RemoveDrag {
     /// Painting a new brushed spot (its path so far, 0..1 of the photo).
     Paint(Vec<[f32; 2]>),
+    /// Painting more area into spot `index`, or (with `erase`) taking some away.
+    Extend {
+        index: usize,
+        path: Vec<[f32; 2]>,
+        erase: bool,
+    },
     /// Moving spot `index` (the source stays put), its source, or its size.
     Spot {
         index: usize,
@@ -79,6 +85,9 @@ pub enum RemoveDrag {
 pub struct RemoveTool {
     pub selected: Option<usize>,
     pub drag: Option<RemoveDrag>,
+    /// Editing the selected spot's area: painting adds to it (`Some(false)`) or takes away
+    /// (`Some(true)`). Shift+drag and Ctrl+drag do the same for one stroke.
+    pub area: Option<bool>,
 }
 
 /// What a drag on the photo does with the crop tool.
@@ -444,6 +453,75 @@ fn run_ai(
     Ok((id, device.label()))
 }
 
+/// The overlay index that stands for Dust & Scratches' found defects (not a mask).
+const DUST_OVERLAY: usize = usize::MAX;
+
+/// A film scan's infrared pass beside it in its unit: `<name>_IR` (and its valid mask,
+/// `<name>_IR_valid`), as NegPy writes them.
+fn find_ir_pass(catalog: &Catalog, photo: &PhotoRow) -> Option<IrFiles> {
+    let stem = photo.path.file_stem()?.to_string_lossy().to_lowercase();
+    let members = catalog.unit_members(photo.id).ok()?;
+    let named = |suffix: &str| {
+        let want = format!("{stem}{suffix}");
+        members
+            .iter()
+            .find(|m| {
+                !m.photo.missing
+                    && m.photo.path.file_stem().is_some_and(|s| s.to_string_lossy().to_lowercase() == want)
+            })
+            .map(|m| m.photo.path.clone())
+    };
+    Some(IrFiles { pass: named("_ir")?, valid: named("_ir_valid") })
+}
+
+/// Dust & Scratches: find the defects (`lum` is the full-size photo's lightness, `w × h`)
+/// and keep them as a mask picture; returns its id.
+fn run_dust(
+    photo_id: i64,
+    lum: &[f32],
+    w: usize,
+    h: usize,
+    layer: &imaging::develop::DustLayer,
+    ir: Option<&IrFiles>,
+) -> Result<String> {
+    let started = std::time::Instant::now();
+    let ir = match ir.filter(|_| layer.source.uses_ir()) {
+        Some(files) => {
+            let pass = image::open(&files.pass)
+                .with_context(|| format!("read the infrared pass {}", files.pass.display()))?
+                .to_luma32f();
+            anyhow::ensure!(
+                pass.width() as usize == w && pass.height() as usize == h,
+                "the infrared pass is {}×{}, the photo {w}×{h}",
+                pass.width(),
+                pass.height()
+            );
+            // Its valid mask only if it fits.
+            let valid = files
+                .valid
+                .as_ref()
+                .and_then(|p| image::open(p).ok())
+                .map(|m| m.to_luma8())
+                .filter(|m| m.width() as usize == w && m.height() as usize == h)
+                .map(image::GrayImage::into_raw);
+            Some(imaging::develop::IrPass { pixels: pass.into_raw(), valid })
+        }
+        None => None,
+    };
+    let mask = imaging::develop::detect_dust(lum, w, h, layer, ir.as_ref());
+    let found = mask.iter().filter(|v| **v > 0).count();
+    let picture = image::GrayImage::from_raw(w as u32, h as u32, mask).context("the mask's size")?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let id = format!("{photo_id}-dust-{:x}", stamp.as_nanos());
+    imaging::develop::save_mask_picture(&id, &picture)?;
+    log::info!(
+        "Dust & Scratches: {found} px from {} in {:.1?}",
+        if ir.is_some() { layer.source.label() } else { "Picture" },
+        started.elapsed()
+    );
+    Ok(id)
+}
+
 /// Upright Guided: what a drag on the photo is doing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GuideDrag {
@@ -500,6 +578,18 @@ enum Request {
     Thumbs { photo_id: i64, settings: DevelopSettings, seq: u64 },
     /// Make an AI mask of the photo developed with `settings`.
     Select { photo_id: i64, job: AiJob, settings: DevelopSettings, rotation: u8, gpu: bool },
+    /// Dust & Scratches: find the defects for `layer` (its key `key`) in the full-size photo,
+    /// with its infrared pass (and that pass's valid mask) if it has one.
+    Dust { photo_id: i64, key: u64, layer: imaging::develop::DustLayer, ir: Option<IrFiles> },
+    /// Dust & Scratches' found defects over the proxy, for the red overlay.
+    DustOverlay { photo_id: i64, settings: DevelopSettings, seq: u64 },
+}
+
+/// A scan's infrared pass and, if there is one, its valid mask (NegPy's `_IR`, `_IR_valid`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IrFiles {
+    pub pass: PathBuf,
+    pub valid: Option<PathBuf>,
 }
 
 /// What a full-resolution region render shows.
@@ -532,6 +622,10 @@ enum Adjust {
         index: usize,
         other: bool,
     },
+    /// Distractions: find sensor dust (as spots, in place of those found before).
+    SensorDust {
+        sensitivity: f32,
+    },
 }
 
 impl Adjust {
@@ -543,6 +637,7 @@ impl Adjust {
             Adjust::AutoStraighten { .. } => "Auto Straighten".into(),
             Adjust::FindSource { other: true, .. } => "Remove: New Source".into(),
             Adjust::FindSource { .. } => "Remove: Spot".into(),
+            Adjust::SensorDust { .. } => "Find Sensor Dust".into(),
         }
     }
 }
@@ -598,6 +693,12 @@ enum Reply {
     Selected {
         photo_id: i64,
         result: std::result::Result<(String, &'static str), String>,
+    },
+    /// Dust & Scratches' mask picture for the layer key `key`, or why it failed.
+    Dusted {
+        photo_id: i64,
+        key: u64,
+        result: std::result::Result<String, String>,
     },
 }
 
@@ -676,6 +777,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut selects: Vec<(i64, AiJob, DevelopSettings, u8, bool)> = Vec::new();
     let mut thumbs: Option<(i64, DevelopSettings, u64)> = None;
     let mut fills: Vec<(i64, AiJob, usize, u64, DevelopSettings, bool, bool)> = Vec::new();
+    let mut dusts: Vec<(i64, u64, imaging::develop::DustLayer, Option<IrFiles>)> = Vec::new();
+    let mut dust_overlay: Option<(i64, DevelopSettings, u64)> = None;
     // The photo small, for thumbnails.
     let mut small: Option<(i64, WorkingImage)> = None;
     loop {
@@ -722,6 +825,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 Request::Select { photo_id, job, settings, rotation, gpu } => {
                     selects.push((photo_id, job, settings, rotation, gpu))
                 }
+                Request::Dust { photo_id, key, layer, ir } => dusts.push((photo_id, key, layer, ir)),
+                Request::DustOverlay { photo_id, settings, seq } => dust_overlay = Some((photo_id, settings, seq)),
             }
         }
         if let Some((photo_id, path, kind, max_px)) = load {
@@ -763,6 +868,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         selects.retain(|s| Some(s.0) == wanted);
         thumbs = thumbs.filter(|t| Some(t.0) == wanted);
         fills.retain(|f| Some(f.0) == wanted);
+        dusts.retain(|d| Some(d.0) == wanted);
+        dust_overlay = dust_overlay.filter(|o| Some(o.0) == wanted);
         let Some((id, img)) = &current else {
             ctx.request_repaint();
             continue;
@@ -792,6 +899,14 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 }
                 Adjust::AutoTone => Some(auto_tone(img, &settings)),
                 Adjust::Upright(mode) => Some(apply_upright(img, &settings, mode)),
+                Adjust::SensorDust { sensitivity } => {
+                    // Found spots are found again (edited ones aren't marked found any more).
+                    let mut s = settings.clone();
+                    s.spots.retain(|spot| !spot.found);
+                    let feather = RemoveSettings::default().feather;
+                    s.spots.extend(imaging::develop::sensor_dust_spots(img, sensitivity, feather));
+                    Some(s)
+                }
                 Adjust::FindSource { index, other } => settings.spots.get(index).cloned().map(|spot| {
                     let mut s = settings.clone();
                     s.spots[index].offset = find_source(img, &spot, other.then_some(spot.offset));
@@ -861,6 +976,37 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
             let _ = tx.send(Reply::Overlay { photo_id, seq, image });
         }
+        // Dust & Scratches' overlay: the found mask, as the photo is shown.
+        if let Some((photo_id, settings, seq)) = dust_overlay.take_if(|o| o.0 == *id)
+            && let Some(mask) = imaging::develop::render_dust_overlay(img, &settings)
+        {
+            let (w, h) = (mask.width() as usize, mask.height() as usize);
+            let rgba: Vec<u8> = mask.as_raw().iter().flat_map(|v| [255, 40, 40, *v]).collect();
+            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            let _ = tx.send(Reply::Overlay { photo_id, seq, image });
+        }
+        // Dust & Scratches: from the full-size photo (loading it first) and its infrared
+        // pass, on a thread of its own (seconds).
+        let (ready, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut dusts).into_iter().partition(|d| full.as_ref().is_some_and(|(fid, _)| *fid == d.0));
+        dusts = waiting;
+        if let Some(d) = dusts.first() {
+            load_full(&mut full_loading, &source, d.0, &full_tx, &ctx);
+        }
+        for (photo_id, key, layer, ir) in ready {
+            let Some((_, full_img)) = &full else { continue };
+            let (w, h) = (full_img.width() as usize, full_img.height() as usize);
+            let lum = imaging::develop::dust_lightness(full_img);
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            std::thread::Builder::new()
+                .name("dust".into())
+                .spawn(move || {
+                    let result = run_dust(photo_id, &lum, w, h, &layer, ir.as_ref()).map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Reply::Dusted { photo_id, key, result });
+                    ctx.request_repaint();
+                })
+                .expect("start a dust thread");
+        }
         // Remove fills: from the full-size photo (loading it first), then the model on a
         // thread of its own.
         let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut fills)
@@ -873,7 +1019,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         for (photo_id, job, index, key, settings, gpu, best) in ready {
             let Some((_, full_img)) = &full else { continue };
             let wb = full_img.resolve_wb(&settings).multipliers;
-            let input = imaging::develop::fill_input(full_img, &settings.spots, index, wb);
+            let input =
+                imaging::develop::fill_input(full_img, &settings.spots, settings.dust.as_ref(), index, wb);
             let (tx, ctx) = (tx.clone(), ctx.clone());
             std::thread::Builder::new()
                 .name("ai-remove".into())
@@ -1026,6 +1173,16 @@ pub struct DevelopState {
     pub fill_declined: bool,
     /// Remove at best quality (big-LaMa) instead of fast (LaMa-Dilated).
     pub remove_best: bool,
+    /// Distractions: the photo's infrared pass, if it is a scan that has one.
+    pub ir_pass: Option<IrFiles>,
+    /// Dust & Scratches: the detection running (for this layer key), and keys that failed
+    /// (not tried again).
+    pub dust_job: Option<u64>,
+    dust_failed: Vec<u64>,
+    /// Show Dust & Scratches' found defects in red.
+    pub show_dust: bool,
+    /// Sensor dust: Find's sensitivity (0..100).
+    pub sensor_sensitivity: f32,
     /// Select Object draws a rectangle (else it brushes over the object).
     pub object_rect: bool,
     /// The photo's catalog rotation (clockwise quarter turns): AI models see it upright.
@@ -1124,6 +1281,11 @@ impl DevelopState {
             fill_allowed: false,
             fill_declined: false,
             remove_best: true,
+            ir_pass: None,
+            dust_job: None,
+            dust_failed: Vec::new(),
+            show_dust: false,
+            sensor_sensitivity: 50.0,
             object_rect: false,
             rotation: 0,
             changed_at: std::time::Instant::now(),
@@ -1161,6 +1323,9 @@ impl DevelopState {
         self.ai_consent = None;
         self.fill_job = None;
         self.fill_failed.clear();
+        self.dust_job = None;
+        self.dust_failed.clear();
+        self.ir_pass = find_ir_pass(catalog, photo);
         self.info = None;
         self.textures.clear();
         self.regions.clear();
@@ -1237,6 +1402,7 @@ impl DevelopState {
         self.settings = s.clone();
         self.saved = s;
         self.request_renders();
+        self.request_dust();
     }
 
     /// Ask for renders of whatever changed since the last request.
@@ -1264,7 +1430,12 @@ impl DevelopState {
             let settings = self.settings.clone();
             let _ = self.tx.send(Request::Thumbs { photo_id, settings, seq: self.thumbs_seq });
         }
-        // The mask overlay (masking with O on, or a mask hovered in the Masks panel).
+        // The mask overlay (masking with O on, or a mask hovered in the Masks panel), or
+        // Dust & Scratches' found defects (the Remove tool with Show found on).
+        let dust_overlay = self.removing.is_some()
+            && self.show_dust
+            && !self.before
+            && self.settings.dust.as_ref().is_some_and(|l| l.current().is_some());
         match self.masking.as_ref().and_then(Masking::overlay_mask).filter(|_| !self.before) {
             Some(index) => {
                 let want = (self.settings.clone(), index);
@@ -1273,6 +1444,15 @@ impl DevelopState {
                     let settings = want.0.clone();
                     let _ =
                         self.tx.send(Request::Overlay { photo_id, settings, index, seq: self.overlay_seq });
+                    self.overlay_sent = Some(want);
+                }
+            }
+            None if dust_overlay => {
+                let want = (self.view_settings(), DUST_OVERLAY);
+                if self.overlay_sent.as_ref() != Some(&want) {
+                    self.overlay_seq += 1;
+                    let settings = want.0.clone();
+                    let _ = self.tx.send(Request::DustOverlay { photo_id, settings, seq: self.overlay_seq });
                     self.overlay_sent = Some(want);
                 }
             }
@@ -1399,6 +1579,30 @@ impl DevelopState {
                     log::warn!("develop: {error}");
                     self.error = Some(error);
                 }
+                Reply::Dusted { photo_id, key, result } if Some(photo_id) == self.photo => {
+                    self.dust_job = None;
+                    match result {
+                        Ok(id) => {
+                            // Still the settings it was made for: keep it, and save (with
+                            // the slider moves that asked for it).
+                            let mut st = self.settings.clone();
+                            if let Some(layer) = st.dust.as_mut().filter(|l| l.key() == key) {
+                                layer.picture = Some(id);
+                                layer.made_for = key;
+                                self.set_live(st);
+                                changed = changed.or(self.commit(catalog, Some("Dust & Scratches".into()))?);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Dust & Scratches: {e}");
+                            self.dust_failed.push(key);
+                            self.error = Some(format!("Couldn't find dust: {e}"));
+                        }
+                    }
+                    // The settings may have moved on meanwhile.
+                    self.request_dust();
+                    self.request_renders();
+                }
                 Reply::Selected { photo_id, result } if Some(photo_id) == self.photo => {
                     let Some(job) = self.ai_job.take() else { continue };
                     match result {
@@ -1453,6 +1657,28 @@ impl DevelopState {
         let (gpu, best) = (self.ai_gpu, self.remove_best);
         let _ = self.tx.send(Request::Fill { photo_id, job: job.clone(), index, key, settings, gpu, best });
         self.fill_job = Some((job, key));
+    }
+
+    /// Dust & Scratches: find the defects if the layer is on and its mask is missing or
+    /// was made for other settings (one detection at a time; the answer asks again).
+    pub fn request_dust(&mut self) {
+        let Some(photo_id) = self.photo else { return };
+        let Some(layer) = self.settings.dust.clone().filter(|l| l.needs_detection()) else { return };
+        let key = layer.key();
+        if self.dust_job.is_some() || self.dust_failed.contains(&key) {
+            return;
+        }
+        let ir = self.ir_pass.clone();
+        let _ = self.tx.send(Request::Dust { photo_id, key, layer, ir });
+        self.dust_job = Some(key);
+    }
+
+    /// Sensor dust: find it (on the worker) as Heal spots, in place of those found before;
+    /// saved when it answers.
+    pub fn find_sensor_dust(&mut self) {
+        let Some(photo_id) = self.photo else { return };
+        let op = Adjust::SensorDust { sensitivity: self.sensor_sensitivity };
+        let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
     }
 
     /// A fill arrived: put it on the spot it was made for (if it is still that shape) and

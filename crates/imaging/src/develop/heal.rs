@@ -53,6 +53,20 @@ pub struct Spot {
     pub offset: [f32; 2],
     /// Remove: the model's fill (made for the spot's current shape, else ignored).
     pub fill: Option<Fill>,
+    /// Strokes painted into the spot afterwards: more area, or less (`erase`).
+    pub strokes: Vec<SpotStroke>,
+    /// Made by Find (sensor dust), not painted: Find again replaces it, Clear found removes it.
+    pub found: bool,
+}
+
+/// A stroke added to a spot: a path (0..1 of the photo) and its radius (half long sides);
+/// `erase` takes area away instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpotStroke {
+    pub points: Vec<[f32; 2]>,
+    pub size: f32,
+    #[serde(default)]
+    pub erase: bool,
 }
 
 impl Default for Spot {
@@ -65,6 +79,8 @@ impl Default for Spot {
             opacity: 100.0,
             offset: [0.05, 0.0],
             fill: None,
+            strokes: Vec::new(),
+            found: false,
         }
     }
 }
@@ -88,8 +104,15 @@ impl Spot {
     /// What a fill depends on: the spot's path and size.
     pub fn shape_key(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |v: u32| h = (h ^ u64::from(v)).wrapping_mul(0x0000_0100_0000_01b3);
         for v in self.points.iter().flatten().chain([&self.size]) {
-            h = (h ^ u64::from(v.to_bits())).wrapping_mul(0x0000_0100_0000_01b3);
+            eat(v.to_bits());
+        }
+        for s in &self.strokes {
+            for v in s.points.iter().flatten().chain([&s.size]) {
+                eat(v.to_bits());
+            }
+            eat(u32::from(s.erase) + 7);
         }
         h
     }
@@ -139,9 +162,15 @@ pub struct FillInput {
 /// The input for spot `index` of `spots` on `img`: a square around the spot grown by 1.5
 /// radii (at least 64 px), white balanced by `wb` and scaled so the bright end sits near
 /// 0.9 before sRGB encoding.
-pub fn fill_input(img: &WorkingImage, spots: &[Spot], index: usize, wb: [f32; 3]) -> Option<FillInput> {
+pub fn fill_input(
+    img: &WorkingImage,
+    spots: &[Spot],
+    dust: Option<&super::dust::DustLayer>,
+    index: usize,
+    wb: [f32; 3],
+) -> Option<FillInput> {
     let spot = spots.get(index)?;
-    let before = healed(img, &spots[..index]);
+    let before = healed(img, &spots[..index], dust);
     let img: &WorkingImage = &before;
     let f = Frame::of(img);
     let s = SpotPx::new(spot, f);
@@ -227,43 +256,141 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// A spot in pixels: its path, radius, the solid inner radius, and the source offset.
-struct SpotPx {
+/// One stroke of a spot in pixels: its path, radius, solid inner radius, and whether it
+/// takes area away.
+struct StrokePx {
     path: Vec<[f32; 2]>,
     r: f32,
     r_in: f32,
+    erase: bool,
+}
+
+/// A spot in pixels: its strokes (the first is the spot's own path), the largest radius of
+/// those adding area, and the source offset.
+struct SpotPx {
+    strokes: Vec<StrokePx>,
+    r: f32,
     off: (isize, isize),
 }
 
 impl SpotPx {
     fn new(s: &Spot, f: Frame) -> SpotPx {
-        let r = (s.size * f.half).max(1.0);
+        let feather = s.feather.clamp(0.0, 100.0) / 100.0;
+        let stroke = |points: &[[f32; 2]], size: f32, erase: bool| {
+            let r = (size * f.half).max(1.0);
+            StrokePx {
+                path: points.iter().map(|p| f.px(*p)).collect(),
+                r,
+                r_in: (r * (1.0 - feather)).min(r - 0.75).max(0.0),
+                erase,
+            }
+        };
+        let strokes: Vec<StrokePx> = std::iter::once(stroke(&s.points, s.size, false))
+            .chain(
+                s.strokes.iter().filter(|t| !t.points.is_empty()).map(|t| stroke(&t.points, t.size, t.erase)),
+            )
+            .collect();
+        let r = strokes.iter().filter(|t| !t.erase).map(|t| t.r).fold(1.0, f32::max);
         SpotPx {
-            path: s.points.iter().map(|p| f.px(*p)).collect(),
+            strokes,
             r,
-            r_in: (r * (1.0 - s.feather.clamp(0.0, 100.0) / 100.0)).min(r - 0.75).max(0.0),
             off: ((s.offset[0] * f.w).round() as isize, (s.offset[1] * f.h).round() as isize),
         }
     }
 
-    /// How much of the spot covers pixel (x, y): 1 inside, fading over the feather.
+    /// How much of the spot covers point (x, y) (pixels): 1 inside, fading over the
+    /// feather; strokes that erase take their part away.
+    #[inline]
+    fn at(&self, x: f32, y: f32) -> f32 {
+        let (mut add, mut sub) = (0.0f32, 0.0f32);
+        for t in &self.strokes {
+            let d = dist_to_path(&t.path, x, y);
+            if d >= t.r {
+                continue;
+            }
+            let v = 1.0 - smoothstep(t.r_in, t.r, d);
+            if t.erase {
+                sub = sub.max(v);
+            } else {
+                add = add.max(v);
+            }
+        }
+        add * (1.0 - sub)
+    }
+
+    /// Signed distance (pixels) to the spot's outer edge at (x, y): positive inside, negative
+    /// outside (linear, unlike the coverage, so its outline traces cleanly).
+    fn edge(&self, x: f32, y: f32) -> f32 {
+        let (mut add, mut sub) = (f32::MIN, f32::MIN);
+        for t in &self.strokes {
+            let v = t.r - dist_to_path(&t.path, x, y);
+            if t.erase {
+                sub = sub.max(v);
+            } else {
+                add = add.max(v);
+            }
+        }
+        if sub == f32::MIN { add } else { add.min(-sub) }
+    }
+
+    /// How much of the spot covers pixel (x, y).
     #[inline]
     fn coverage(&self, x: usize, y: usize) -> f32 {
-        let d = dist_to_path(&self.path, x as f32 + 0.5, y as f32 + 0.5);
-        if d >= self.r { 0.0 } else { 1.0 - smoothstep(self.r_in, self.r, d) }
+        self.at(x as f32 + 0.5, y as f32 + 0.5)
+    }
+
+    /// The bounds of the strokes adding area: left, top, right, bottom (pixels).
+    fn bounds(&self) -> [f32; 4] {
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for t in self.strokes.iter().filter(|t| !t.erase) {
+            for p in &t.path {
+                b = [b[0].min(p[0] - t.r), b[1].min(p[1] - t.r), b[2].max(p[0] + t.r), b[3].max(p[1] + t.r)];
+            }
+        }
+        b
     }
 
     /// The spot's bounding box grown by `grow` pixels, within a `w × h` image.
     fn bbox(&self, grow: f32, w: usize, h: usize) -> (usize, usize, usize, usize) {
-        let lo_x = self.path.iter().map(|p| p[0]).fold(f32::MAX, f32::min) - self.r - grow;
-        let hi_x = self.path.iter().map(|p| p[0]).fold(f32::MIN, f32::max) + self.r + grow;
-        let lo_y = self.path.iter().map(|p| p[1]).fold(f32::MAX, f32::min) - self.r - grow;
-        let hi_y = self.path.iter().map(|p| p[1]).fold(f32::MIN, f32::max) + self.r + grow;
-        let x0 = lo_x.floor().clamp(0.0, w as f32) as usize;
-        let y0 = lo_y.floor().clamp(0.0, h as f32) as usize;
-        let x1 = hi_x.ceil().clamp(0.0, w as f32) as usize;
-        let y1 = hi_y.ceil().clamp(0.0, h as f32) as usize;
+        let [lo_x, lo_y, hi_x, hi_y] = self.bounds();
+        if lo_x > hi_x {
+            return (0, 0, 0, 0);
+        }
+        let x0 = (lo_x - grow).floor().clamp(0.0, w as f32) as usize;
+        let y0 = (lo_y - grow).floor().clamp(0.0, h as f32) as usize;
+        let x1 = (hi_x + grow).ceil().clamp(0.0, w as f32) as usize;
+        let y1 = (hi_y + grow).ceil().clamp(0.0, h as f32) as usize;
         (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    }
+}
+
+/// A spot's area on a photo `w × h` pixels, for drawing its outline and hit testing.
+pub struct SpotArea(SpotPx);
+
+impl SpotArea {
+    pub fn new(spot: &Spot, w: u32, h: u32) -> SpotArea {
+        let (w, h) = (w as f32, h as f32);
+        SpotArea(SpotPx::new(spot, Frame { w, h, half: w.max(h) / 2.0 }))
+    }
+
+    /// Coverage (0..1) at photo pixel (x, y).
+    pub fn at(&self, x: f32, y: f32) -> f32 {
+        self.0.at(x, y)
+    }
+
+    /// Signed distance (photo pixels) to the area's edge: positive inside.
+    pub fn edge(&self, x: f32, y: f32) -> f32 {
+        self.0.edge(x, y)
+    }
+
+    /// The smallest radius of the strokes (pixels): how fine the outline must be traced.
+    pub fn finest(&self) -> f32 {
+        self.0.strokes.iter().map(|t| t.r).fold(f32::MAX, f32::min)
+    }
+
+    /// Left, top, right, bottom of the area, in photo pixels.
+    pub fn bounds(&self) -> [f32; 4] {
+        self.0.bounds()
     }
 }
 
@@ -383,7 +510,10 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
 
 /// The healed copy cached with the image.
 #[derive(Debug, Default)]
-pub(super) struct HealCache(Mutex<Option<(Vec<Spot>, Arc<WorkingImage>)>>);
+pub(super) struct HealCache(Mutex<Option<HealKey>>);
+
+/// The spots and the dust mask (its id) a cached healed copy was made with.
+type HealKey = ((Vec<Spot>, Option<String>), Arc<WorkingImage>);
 
 impl Clone for HealCache {
     /// A copy starts without the cache (it is only a cache).
@@ -393,14 +523,22 @@ impl Clone for HealCache {
 }
 
 /// `img` with `spots` removed (the same image when there are none).
-pub(super) fn healed<'a>(img: &'a WorkingImage, spots: &[Spot]) -> super::transform::Geometry<'a> {
+pub(super) fn healed<'a>(
+    img: &'a WorkingImage,
+    spots: &[Spot],
+    dust: Option<&super::dust::DustLayer>,
+) -> super::transform::Geometry<'a> {
     use super::transform::Geometry;
-    if spots.is_empty() {
+    // Dust & Scratches: its mask, if on and made for these settings.
+    let dust_id = dust.and_then(|d| d.current()).map(str::to_owned);
+    let dust = dust_id.as_deref().and_then(super::masks::mask_picture);
+    if spots.is_empty() && dust.is_none() {
         return Geometry::Same(img);
     }
     let mut cache = img.heal_cache.0.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((key, out)) = cache.as_ref()
+    if let Some(((key, k_dust), out)) = cache.as_ref()
         && key == spots
+        && *k_dust == dust_id
     {
         return Geometry::Transformed(out.clone());
     }
@@ -408,12 +546,16 @@ pub(super) fn healed<'a>(img: &'a WorkingImage, spots: &[Spot]) -> super::transf
     let (w, h) = (img.width() as usize, img.height() as usize);
     let f = Frame::of(img);
     let mut px = std::mem::take(&mut out.pixels).into_raw();
+    // Film dust first (the spots go over it).
+    if let Some(pic) = &dust {
+        super::dust::fill_masked(&mut px, w, h, &super::dust::mask_at(pic, w, h));
+    }
     for spot in spots {
         apply_spot(&mut px, w, h, spot, f);
     }
     out.pixels = image::ImageBuffer::from_raw(w as u32, h as u32, px).expect("buffer size");
     let out = Arc::new(out);
-    *cache = Some((spots.to_vec(), out.clone()));
+    *cache = Some(((spots.to_vec(), dust_id), out.clone()));
     Geometry::Transformed(out)
 }
 
@@ -425,15 +567,19 @@ pub fn find_source(img: &WorkingImage, spot: &Spot, avoid: Option<[f32; 2]>) -> 
     let s = SpotPx::new(spot, f);
     let (w, h) = (img.width() as usize, img.height() as usize);
     let px = img.pixels.as_raw();
-    // The ring just outside the spot, sampled sparsely.
+    // The ring just outside the spot (its whole area), sampled sparsely.
     let stride = ((s.r / 6.0) as usize).max(1);
     let (x0, y0, bw, bh) = s.bbox(0.7 * s.r, w, h);
+    // How far a source must be: by the whole spot's size (a long stroke's source must clear
+    // all of it), as a radius.
+    let [bl, bt, br, bb] = s.bounds();
+    let extent = ((br - bl).max(bb - bt) / 2.0).max(s.r);
     let ring: Vec<(usize, usize)> = (y0..y0 + bh)
         .step_by(stride)
         .flat_map(|y| (x0..x0 + bw).step_by(stride).map(move |x| (x, y)))
         .filter(|&(x, y)| {
-            let d = dist_to_path(&s.path, x as f32 + 0.5, y as f32 + 0.5);
-            d >= s.r && d < 1.7 * s.r
+            let e = s.edge(x as f32 + 0.5, y as f32 + 0.5);
+            e <= 0.0 && e > -0.7 * s.r
         })
         .collect();
     let lum = |x: usize, y: usize| {
@@ -447,7 +593,7 @@ pub fn find_source(img: &WorkingImage, spot: &Spot, avoid: Option<[f32; 2]>) -> 
     for dist in [2.3f32, 3.2, 4.5] {
         for k in 0..24 {
             let a = k as f32 / 24.0 * std::f32::consts::TAU;
-            let (ox, oy) = (a.cos() * dist * s.r, a.sin() * dist * s.r);
+            let (ox, oy) = (a.cos() * dist * extent, a.sin() * dist * extent);
             let (ix, iy) = (ox.round() as isize, oy.round() as isize);
             let inside = |x: usize, y: usize| {
                 let (x, y) = (x as isize + ix, y as isize + iy);
@@ -457,7 +603,7 @@ pub fn find_source(img: &WorkingImage, spot: &Spot, avoid: Option<[f32; 2]>) -> 
                 continue;
             }
             if let Some((ax, ay)) = avoid_px
-                && (ox - ax).hypot(oy - ay) < s.r
+                && (ox - ax).hypot(oy - ay) < extent
             {
                 continue;
             }
@@ -479,7 +625,7 @@ pub fn find_source(img: &WorkingImage, spot: &Spot, avoid: Option<[f32; 2]>) -> 
             }
         }
     }
-    let (ox, oy) = best.map_or((2.5 * s.r, 0.0), |(_, o)| o);
+    let (ox, oy) = best.map_or((2.5 * extent, 0.0), |(_, o)| o);
     [ox / f.w, oy / f.h]
 }
 
@@ -511,18 +657,20 @@ mod tests {
             opacity: 100.0,
             offset: [0.25, 0.0], // 50 px to the right: brighter there
             fill: None,
+            strokes: vec![],
+            found: false,
         };
         // Clone: the source's value (from x = 110).
-        let cloned = healed(&img, &[spot(SpotMode::Clone)]);
+        let cloned = healed(&img, &[spot(SpotMode::Clone)], None);
         assert!((at(&cloned, 60, 50) - at(&img, 110, 50)).abs() < 1e-4);
         // Heal: the blemish gone, at the destination's own brightness (not the source's).
-        let healed_img = healed(&img, &[spot(SpotMode::Heal)]);
+        let healed_img = healed(&img, &[spot(SpotMode::Heal)], None);
         let v = at(&healed_img, 60, 50);
         assert!((v - at(&img, 60, 40)).abs() < 0.02, "{v} vs {}", at(&img, 60, 40));
         // Away from the spot nothing changes.
         assert_eq!(at(&healed_img, 150, 20), at(&img, 150, 20));
         // Cached: the same image again.
-        let again = healed(&img, &[spot(SpotMode::Heal)]);
+        let again = healed(&img, &[spot(SpotMode::Heal)], None);
         assert_eq!(at(&again, 60, 50), v);
     }
 
@@ -538,8 +686,10 @@ mod tests {
             opacity: 100.0,
             offset: [0.0, 0.25],
             fill: None,
+            strokes: vec![],
+            found: false,
         };
-        let out = healed(&img, &[spot]);
+        let out = healed(&img, &[spot], None);
         let at = |x, y| out.pixels.get_pixel(x, y)[0];
         assert!(at(80, 50) > 0.4, "healed along the path: {}", at(80, 50));
         assert!(at(180, 50) < 0.05, "untouched past it");

@@ -699,7 +699,7 @@ pub fn render_region_srgb8_view(
     view: Option<SharpenView>,
 ) -> RgbImage {
     // The Remove tool's spots first, on the photo's own pixels.
-    let spotless = healed(img, &s.spots);
+    let spotless = healed(img, &s.spots, s.dust.as_ref());
     let img: &WorkingImage = &spotless;
     let source = img;
     let geometry = transformed(img, &s.transform);
@@ -787,7 +787,7 @@ impl<'a> Finish<'a> {
 /// Render for export: 16-bit linear working space (linear ProPhoto RGB).
 pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<Rgb<u16>, Vec<u16>> {
     // The Remove tool's spots first, on the photo's own pixels.
-    let spotless = healed(img, &s.spots);
+    let spotless = healed(img, &s.spots, s.dust.as_ref());
     let img: &WorkingImage = &spotless;
     let source = img;
     let geometry = transformed(img, &s.transform);

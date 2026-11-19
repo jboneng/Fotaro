@@ -721,7 +721,18 @@ later as another component kind.
 - [x] Visualize Spots (A, or the toolbar checkbox while the Remove tool is open): what is
       shown, as its edges in white on black (the difference from a 1.5-pixel blur, scaled by
       the threshold slider), so dust and blemishes stand out; the spot outlines stay on top.
-- [ ] Later: Content-Aware Remove (AI).
+- [x] Content-Aware Remove (AI): see "Design: Remove (content-aware and generative)".
+
+- [x] UI pass (2026-11-19): a spot's outline is traced from its area (marching squares on
+      the signed distance to its strokes, cached per shape and relative to its first
+      point, so moving is free): one clean line however a stroke went, instead of offset
+      polylines that crossed. Clicks within a few points of an outline hit it (thin
+      strokes). A spot's area can be edited: Area Add / Subtract in the panel (or
+      Shift+drag / Ctrl+drag) paints strokes into the selected spot (`Spot::strokes`,
+      `erase` for subtracting); Remove spots fill again. Heal / Clone sources are found
+      at distances by the whole spot's size (a long stroke's source used to land on the
+      stroke itself); the help text says where the source outline is and that `/` picks
+      another.
 
 ## Design: AI masks (Subject, Sky, Background, Objects)
 Decided with the user (2026-11-18): PhotoLibrary will never be a commercial product, so
@@ -848,3 +859,37 @@ a cat's eye, a whole ball), cut as the app will: a square around the area, at 51
    - With this, big-LaMa is as fast per fill as LaMa-Dilated and clearly better: worth
      making "Best quality" the default. Done: "Best quality" (big-LaMa) is on by default;
      unticked uses LaMa-Dilated (smaller to load, for machines without a good GPU).
+
+## Design: Remove → Distractions (Sensor Dust, Dust & Scratches)
+
+LrC's Distractions has Dust (sensor dust). Film scans need more, so two parts:
+
+- **Sensor Dust** (digital captures): Find turns soft, round, slightly darker blobs in
+  smooth areas into Heal spots marked `found` (differences of blurs at five scales in log
+  lightness at ~1500 px, a local minimum, a smooth ring around it, no fine detail around
+  it, not in deep shadow). Each spot gets a source from `find_source`. Find again replaces
+  the found spots; moving, resizing, painting or changing one makes it the user's own.
+  Clear Found deletes the found ones. On the sample digital captures it finds nothing
+  false; on film scans it flags some soft round picture details (it is not meant for them).
+- **Dust & Scratches** (film scans): one layer (`DevelopSettings.dust`) with Find in IR /
+  Picture / Both, Sensitivity and Max Size. The found mask is kept as a picture in the
+  catalog's mask store (made on a thread from the full-size photo, ~2–8 s for 20–24 MP)
+  and filled at render time by a push-pull pyramid before the spots. A History step
+  "Dust & Scratches" when the mask arrives. Show found draws it in red.
+  - **IR**: the infrared pass (`<name>_IR`, with NegPy's `<name>_IR_valid`, found in the
+    photo's unit) lightly smoothed, its dips under the local background. Scanners see a
+    little of the dyes in IR (about a tenth of the picture's own dips on the test scan:
+    dense picture detail passed for dust): that share is measured per scan (the median
+    ratio where the picture departs strongly) and taken away. Not for silver B&W film.
+  - **Picture**: black-hat and white-hat (closing/opening, van Herk min/max) of the lightly
+    smoothed lightness against the local usual level (clipped, so a hair doesn't raise its
+    own), hysteresis from clear seeds into fainter rest, thin parts only, long ones only
+    when strong and not straight (frames, edges and the film border are straight; hairs
+    curl, so straight scratches are left to spots). Plus a **hair finder** for heavy grain:
+    a 5 px black/white-hat averaged along short lines in 8 directions at half size, its
+    score against the local spread, hysteresis along the hair, long, thin and curling.
+    Finds the faint hairs on the B&W test scan while leaving the soft drawn outlines.
+  - **Both**: what IR finds, plus picture finds the IR confirms (its dip averaged over the
+    find); adds the small specks IR only hints at, never wires or edges. The default with
+    an IR pass.
+- Not done: Reflections and People (LrC's other Distractions).

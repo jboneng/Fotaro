@@ -4,7 +4,7 @@
 //! Heal matches the source to the spot's surroundings, Clone copies it.
 
 use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Stroke};
-use imaging::develop::{DevelopSettings, Slider, Spot, SpotMode};
+use imaging::develop::{DevelopSettings, DustLayer, DustSource, Slider, Spot, SpotArea, SpotMode, SpotStroke};
 
 use super::develop::{Spec, slider_row_as, weak};
 use super::masking::{Canvas, header, pill};
@@ -54,71 +54,134 @@ fn hit(c: &Canvas, spots: &[Spot], selected: Option<usize>, p: Pos2) -> Option<R
         selected.into_iter().chain((0..spots.len()).rev().filter(|i| Some(*i) != selected)).collect();
     for i in order {
         let s = &spots[i];
-        let r = s.size * c.half();
-        let dest = path_px(c, s, [0.0, 0.0]);
-        let d = dist_to_path(&dest, q);
+        let area = SpotArea::new(s, c.size.0, c.size.1);
         let scale = screen_scale(c, q);
         // The edge resizes a round spot; on a small one only its outer part does, so the
         // middle still moves it.
-        let (ds, rs) = (d * scale, r * scale);
-        if s.points.len() == 1 && (ds - rs).abs() < EDGE && ds > rs * 0.6 {
-            return Some(RemoveDrag::Resize { index: i, original: s.clone() });
+        if s.points.len() == 1 && s.strokes.is_empty() {
+            let r = s.size * c.half();
+            let (ds, rs) = ((q - c.px(s.points[0])).length() * scale, r * scale);
+            if (ds - rs).abs() < EDGE && ds > rs * 0.6 {
+                return Some(RemoveDrag::Resize { index: i, original: s.clone() });
+            }
         }
-        if d < r {
+        // Inside, or within a few screen points of the edge (thin strokes are hard to hit).
+        let near = -EDGE / scale.max(1e-3);
+        if area.edge(q.x, q.y) > near {
             return Some(RemoveDrag::Spot { index: i, grab, original: s.clone() });
         }
-        if Some(i) == selected && s.mode != SpotMode::Remove && dist_to_path(&path_px(c, s, s.offset), q) < r
-        {
+        let off = c.px(s.offset);
+        if Some(i) == selected && s.mode != SpotMode::Remove && area.edge(q.x - off.x, q.y - off.y) > near {
             return Some(RemoveDrag::Source { index: i, grab, original: s.clone() });
         }
     }
     None
 }
 
-/// A spot's outline on screen: a circle, or the brushed band (both edges of the path).
-fn outline(c: &Canvas, spot: &Spot, shift: [f32; 2]) -> Vec<Vec<Pos2>> {
-    let r = spot.size * c.half();
-    let path = path_px(c, spot, shift);
-    match path.as_slice() {
-        [] => Vec::new(),
-        [o] => {
-            let ring = (0..=48)
-                .filter_map(|k| {
-                    let t = k as f32 / 48.0 * std::f32::consts::TAU;
-                    c.screen_px(*o + egui::vec2(t.cos(), t.sin()) * r)
-                })
-                .collect();
-            vec![ring]
-        }
-        _ => {
-            // The band's two sides, and round ends.
-            let side = |sign: f32| -> Vec<Pos2> {
-                path.windows(2)
-                    .flat_map(|w| {
-                        let n = (w[1] - w[0]).normalized().rot90() * r * sign;
-                        [w[0] + n, w[1] + n]
-                    })
-                    .filter_map(|p| c.screen_px(p))
-                    .collect()
-            };
-            let cap = |o: egui::Vec2| -> Vec<Pos2> {
-                (0..=24)
-                    .filter_map(|k| {
-                        let t = k as f32 / 24.0 * std::f32::consts::TAU;
-                        c.screen_px(o + egui::vec2(t.cos(), t.sin()) * r)
-                    })
-                    .collect()
-            };
-            vec![side(1.0), side(-1.0), cap(path[0]), cap(*path.last().expect("two points"))]
+/// A spot's outline in photo pixels: line segments around where it covers anything
+/// (marching squares over its area), cached per shape and photo size.
+fn contour_px(spot: &Spot, size: (u32, u32)) -> std::sync::Arc<Vec<[egui::Vec2; 2]>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Cache = Mutex<HashMap<(u64, u32, (u32, u32)), Arc<Vec<[egui::Vec2; 2]>>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let key = (spot.shape_key(), spot.feather.to_bits(), size);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(v) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return v.clone();
+    }
+    let area = SpotArea::new(spot, size.0, size.1);
+    let [l, t, r, b] = area.bounds();
+    let mut segs = Vec::new();
+    if l < r {
+        let (l, t, r, b) = (l - 2.0, t - 2.0, r + 2.0, b + 2.0);
+        // Cells about a third of the finest stroke's radius (so thin strokes trace smoothly),
+        // at most ~200 across, never under half a pixel.
+        let step = (area.finest() / 3.0).max((r - l).max(b - t) / 200.0).max(0.5);
+        let (nx, ny) = (((r - l) / step).ceil() as usize + 1, ((b - t) / step).ceil() as usize + 1);
+        // The signed distance to the edge: linear, so the crossings interpolate exactly.
+        let v: Vec<f32> =
+            (0..nx * ny).map(|k| area.edge(l + (k % nx) as f32 * step, t + (k / nx) as f32 * step)).collect();
+        let at = |i: usize, j: usize| v[j * nx + i];
+        let pt = |i: usize, j: usize| egui::vec2(l + i as f32 * step, t + j as f32 * step);
+        // Where the edge between two corners crosses the iso line.
+        let cross =
+            |p: egui::Vec2, q: egui::Vec2, a: f32, b: f32| p + (q - p) * (a / (a - b)).clamp(0.0, 1.0);
+        for j in 0..ny - 1 {
+            for i in 0..nx - 1 {
+                let (a, b2, c2, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+                let case = usize::from(a > 0.0)
+                    | usize::from(b2 > 0.0) << 1
+                    | usize::from(c2 > 0.0) << 2
+                    | usize::from(d > 0.0) << 3;
+                if case == 0 || case == 15 {
+                    continue;
+                }
+                let (pa, pb, pc, pd) = (pt(i, j), pt(i + 1, j), pt(i + 1, j + 1), pt(i, j + 1));
+                let top = cross(pa, pb, a, b2);
+                let right = cross(pb, pc, b2, c2);
+                let bottom = cross(pd, pc, d, c2);
+                let left = cross(pa, pd, a, d);
+                let mut push = |p: egui::Vec2, q: egui::Vec2| segs.push([p, q]);
+                match case {
+                    1 | 14 => push(left, top),
+                    2 | 13 => push(top, right),
+                    3 | 12 => push(left, right),
+                    4 | 11 => push(right, bottom),
+                    6 | 9 => push(top, bottom),
+                    7 | 8 => push(left, bottom),
+                    5 => {
+                        push(left, top);
+                        push(right, bottom);
+                    }
+                    10 => {
+                        push(top, right);
+                        push(left, bottom);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
+    let segs = Arc::new(segs);
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() > 512 {
+        map.clear();
+    }
+    map.insert(key, segs.clone());
+    segs
 }
 
-fn draw_outline(painter: &egui::Painter, lines: &[Vec<Pos2>], stroke: Stroke) {
+/// A spot's outline on screen, moved by `shift` (0..1 units; its source with the offset):
+/// one clean line around the whole area, however the strokes went.
+fn outline(c: &Canvas, spot: &Spot, shift: [f32; 2]) -> Vec<[Pos2; 2]> {
+    // Traced relative to the first point, so a moved spot reuses its outline.
+    let o = spot.points.first().copied().unwrap_or_default();
+    let mv = |p: &[f32; 2]| [p[0] - o[0], p[1] - o[1]];
+    let local = Spot {
+        points: spot.points.iter().map(mv).collect(),
+        strokes: spot
+            .strokes
+            .iter()
+            .map(|t| SpotStroke { points: t.points.iter().map(mv).collect(), ..t.clone() })
+            .collect(),
+        fill: None,
+        ..spot.clone()
+    };
+    let d = c.px([shift[0] + o[0], shift[1] + o[1]]);
+    contour_px(&local, c.size)
+        .iter()
+        .filter_map(|[p, q]| Some([c.screen_px(*p + d)?, c.screen_px(*q + d)?]))
+        .collect()
+}
+
+fn draw_outline(painter: &egui::Painter, segs: &[[Pos2; 2]], stroke: Stroke) {
     let shadow = Stroke::new(stroke.width + 2.0, Color32::from_black_alpha(110));
-    for l in lines {
-        painter.add(egui::Shape::line(l.clone(), shadow));
-        painter.add(egui::Shape::line(l.clone(), stroke));
+    for s in segs {
+        painter.line_segment(*s, shadow);
+    }
+    for s in segs {
+        painter.line_segment(*s, stroke);
     }
 }
 
@@ -173,14 +236,20 @@ pub(super) fn canvas(
             opacity: settings.opacity,
             offset: [2.5 * radius * half / w, 0.0],
             fill: None,
+            strokes: Vec::new(),
+            found: false,
         }
     };
 
-    // The wheel sizes new spots (or the selected one), as the brush.
+    // Painting into the selected spot: area mode on, or Shift (add) / Ctrl (subtract) held.
+    let mods = ui.input(|i| i.modifiers);
+    let extending = tool.selected.filter(|_| tool.area.is_some() || mods.shift || mods.ctrl);
+    let erasing = mods.ctrl || (tool.area == Some(true) && !mods.shift);
+    // The wheel sizes new spots (or the selected one; the brush while editing an area).
     if resp.hover_pos().is_some_and(|p| img_rect.contains(p)) {
         let dy = ui.input(|i| i.smooth_scroll_delta.y);
         if dy != 0.0 {
-            match tool.selected {
+            match tool.selected.filter(|_| extending.is_none()) {
                 Some(i) => {
                     let s = &mut st.spots[i];
                     s.size = spot_radius((spot_size(s.size) * (dy / 300.0).exp2()).clamp(1.0, 100.0));
@@ -193,24 +262,29 @@ pub(super) fn canvas(
     if resp.drag_started()
         && let Some(origin) = ui.input(|i| i.pointer.press_origin())
     {
-        tool.drag = Some(match hit(&c, &st.spots, tool.selected, origin) {
-            Some(drag) => {
-                if let RemoveDrag::Spot { index, .. }
-                | RemoveDrag::Source { index, .. }
-                | RemoveDrag::Resize { index, .. } = drag
-                {
-                    tool.selected = Some(index);
+        tool.drag = Some(
+            match extending.map_or_else(
+                || hit(&c, &st.spots, tool.selected, origin),
+                |index| Some(RemoveDrag::Extend { index, path: vec![c.photo(origin)], erase: erasing }),
+            ) {
+                Some(drag) => {
+                    if let RemoveDrag::Spot { index, .. }
+                    | RemoveDrag::Source { index, .. }
+                    | RemoveDrag::Resize { index, .. } = drag
+                    {
+                        tool.selected = Some(index);
+                    }
+                    drag
                 }
-                drag
-            }
-            None => RemoveDrag::Paint(vec![c.photo(origin)]),
-        });
+                None => RemoveDrag::Paint(vec![c.photo(origin)]),
+            },
+        );
     }
     let pointer = ui.input(|i| i.pointer.latest_pos());
     if let Some(q) = pointer {
         let at = c.photo(q);
         match &mut tool.drag {
-            Some(RemoveDrag::Paint(path)) => {
+            Some(RemoveDrag::Paint(path) | RemoveDrag::Extend { path, .. }) => {
                 let step = (spot_radius(settings.size) * c.half() / 4.0).max(1.0);
                 if path.last().is_none_or(|last| (c.px(at) - c.px(*last)).length() >= step) {
                     path.push(at);
@@ -221,6 +295,9 @@ pub(super) fn canvas(
                 let (dx, dy) = (at[0] - grab[0], at[1] - grab[1]);
                 let s = &mut st.spots[*index];
                 s.points = original.points.iter().map(|p| [p[0] + dx, p[1] + dy]).collect();
+                for (t, o) in s.strokes.iter_mut().zip(&original.strokes) {
+                    t.points = o.points.iter().map(|p| [p[0] + dx, p[1] + dy]).collect();
+                }
                 s.offset = [original.offset[0] - dx, original.offset[1] - dy];
             }
             Some(RemoveDrag::Source { index, grab, original }) => {
@@ -243,31 +320,73 @@ pub(super) fn canvas(
                 tool.selected = Some(st.spots.len() - 1);
                 find = tool.selected;
             }
-            _ => done = true,
+            RemoveDrag::Extend { index, path, erase } => {
+                let s = &mut st.spots[index];
+                s.strokes.push(SpotStroke { points: path, size: spot_radius(settings.size), erase });
+                // Edited: the user's own now (Find again leaves it).
+                s.found = false;
+                done = true;
+            }
+            RemoveDrag::Spot { index, original, .. }
+            | RemoveDrag::Source { index, original, .. }
+            | RemoveDrag::Resize { index, original } => {
+                // Moved, resized or given another source: the user's own now.
+                if let Some(s) = st.spots.get_mut(index)
+                    && *s != original
+                {
+                    s.found = false;
+                }
+                done = true;
+            }
         }
     }
     // A click: select the spot under it, or make a round one.
     if resp.clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
-        match hit(&c, &st.spots, tool.selected, p) {
-            Some(
-                RemoveDrag::Spot { index, .. }
-                | RemoveDrag::Source { index, .. }
-                | RemoveDrag::Resize { index, .. },
-            ) => {
-                tool.selected = Some(index);
+        let other = match hit(&c, &st.spots, None, p) {
+            Some(RemoveDrag::Spot { index, .. } | RemoveDrag::Resize { index, .. })
+                if Some(index) != tool.selected =>
+            {
+                Some(index)
             }
-            _ => {
-                st.spots.push(new_spot(vec![c.photo(p)]));
-                tool.selected = Some(st.spots.len() - 1);
-                find = tool.selected;
+            _ => None,
+        };
+        if let (Some(_), Some(index)) = (extending, other) {
+            // Another spot: select it (and edit its area next).
+            tool.selected = Some(index);
+        } else if let Some(index) = extending {
+            // A dab of area.
+            let size = spot_radius(settings.size);
+            st.spots[index].strokes.push(SpotStroke { points: vec![c.photo(p)], size, erase: erasing });
+            st.spots[index].found = false;
+            done = true;
+        } else {
+            match hit(&c, &st.spots, tool.selected, p) {
+                Some(
+                    RemoveDrag::Spot { index, .. }
+                    | RemoveDrag::Source { index, .. }
+                    | RemoveDrag::Resize { index, .. },
+                ) => {
+                    tool.selected = Some(index);
+                }
+                _ => {
+                    st.spots.push(new_spot(vec![c.photo(p)]));
+                    tool.selected = Some(st.spots.len() - 1);
+                    find = tool.selected;
+                }
             }
         }
     }
 
-    // Spots: outlines; the selected one with its source and an arrow from it.
+    // Dust & Scratches' found defects (Show found), under the spots.
     let painter = painter.with_clip_rect(img_rect.intersect(painter.clip_rect()));
+    if d.show_dust
+        && let Some(t) = &d.overlay
+    {
+        super::views::paint_image(&painter, t, img_rect, rotation, Color32::WHITE);
+    }
+    // Spots: outlines; the selected one with its source and an arrow from it.
     let filling = d.fill_job.as_ref().map(|(_, key)| *key);
     for (i, s) in st.spots.iter().enumerate() {
         let selected = tool.selected == Some(i);
@@ -316,20 +435,39 @@ pub(super) fn canvas(
             Stroke::new(1.5, Color32::from_rgb(255, 205, 60)),
         );
     }
+    if let Some(RemoveDrag::Extend { path, erase, .. }) = &tool.drag {
+        let preview = Spot { points: path.clone(), ..new_spot(Vec::new()) };
+        let color = if *erase { Color32::from_rgb(255, 90, 90) } else { Color32::from_rgb(120, 220, 120) };
+        draw_outline(&painter, &outline(&c, &preview, [0.0, 0.0]), Stroke::new(1.5, color));
+    }
     if let Some(p) = resp.hover_pos().filter(|p| img_rect.contains(*p)) {
-        match (&tool.drag, hit(&c, &st.spots, tool.selected, p)) {
+        let under = if extending.is_some() { None } else { hit(&c, &st.spots, tool.selected, p) };
+        match (&tool.drag, under) {
             (None, None) => {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                 let at = c.px(c.photo(p));
                 let r = spot_radius(d.remove.size) * c.half() * screen_scale(&c, at);
                 painter.circle_stroke(p, r.max(2.0), Stroke::new(3.0, Color32::from_black_alpha(110)));
                 painter.circle_stroke(p, r.max(2.0), Stroke::new(1.3, Color32::WHITE));
+                // Editing an area: + adds, − takes away.
+                if extending.is_some() {
+                    let sign = if erasing { "−" } else { "+" };
+                    painter.text(
+                        p,
+                        egui::Align2::CENTER_CENTER,
+                        sign,
+                        egui::FontId::proportional(14.0),
+                        Color32::WHITE,
+                    );
+                }
             }
             (None, Some(RemoveDrag::Resize { .. })) => {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal)
             }
             (None, Some(_)) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
-            (Some(RemoveDrag::Paint(_)), _) => ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair),
+            (Some(RemoveDrag::Paint(_) | RemoveDrag::Extend { .. }), _) => {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair)
+            }
             (Some(_), _) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing),
         }
     }
@@ -365,6 +503,9 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let mut done: Option<Option<String>> = None;
     let mut leave = false;
     let mut new_source = false;
+    let mut find_dust = false;
+    let mut dust_changed = false;
+    let mut show_changed = false;
     tool.selected = tool.selected.filter(|&i| i < st.spots.len());
     let title = match tool.selected {
         Some(i) => format!("Remove: Spot {}", i + 1),
@@ -439,6 +580,7 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     let s = &mut st.spots[i];
                     (s.mode, s.size, s.feather, s.opacity) =
                         (values.mode, spot_radius(values.size), values.feather, values.opacity);
+                    s.found = false;
                 }
                 None => d.remove = values,
             }
@@ -446,6 +588,25 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         // Settings for new spots aren't History steps.
         if tool.selected.is_none() {
             done = None;
+        }
+        // Editing the selected spot's area: paint to add to it, or to take some away.
+        if tool.selected.is_some() {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(super::develop::LABEL_W - 40.0);
+                ui.label(RichText::new("Area").size(12.5).color(theme::TEXT));
+                for (erase, label, tip) in [
+                    (false, "Add", "Paint to add to this spot (or Shift+drag)"),
+                    (true, "Subtract", "Paint to take area away from this spot (or Ctrl+drag)"),
+                ] {
+                    let on = tool.area == Some(erase);
+                    if mode_button(ui, label, on).on_hover_text(tip).clicked() {
+                        tool.area = (!on).then_some(erase);
+                    }
+                }
+            });
+        } else {
+            tool.area = None;
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -474,11 +635,12 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.add_space(6.0);
             super::masking::ai_progress(ui, job);
         }
+        distractions(ui, d, &mut st, &mut tool, &mut done, &mut find_dust, &mut dust_changed, &mut show_changed);
         ui.add_space(6.0);
         let n = st.spots.len();
         ui.label(RichText::new(format!("{n} spot{}", if n == 1 { "" } else { "s" })).size(12.0).color(theme::TEXT_WEAK));
         ui.label(weak(
-            "Click a blemish to remove it, or paint over it. Remove fills it with what is around it (an AI model, on this computer); Heal and Clone copy from a source you can drag. Drag a spot to move it, a round spot's edge to resize it. The wheel or [ ] sets the size.",
+            "Click a blemish to remove it, or paint over it. Remove fills it with what is around it (an AI model, on this computer); Heal and Clone copy from a source: with the spot selected, drag the source outline (the thin one, with the arrow) to choose where from, or press / for another. Drag a spot to move it, a round spot's edge to resize it. Area: Add or Subtract (or Shift+drag, Ctrl+drag) paints the selected spot bigger or smaller. The wheel or [ ] sets the size.",
         ));
     });
     let index = tool.selected;
@@ -492,8 +654,151 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     if new_source && let Some(i) = index {
         d.find_source(i, true);
     }
+    if find_dust {
+        d.find_sensor_dust();
+    }
+    if show_changed {
+        d.request_renders();
+    }
+    // Dust & Scratches: saved now if nothing needs finding, else when the defects are found.
+    if dust_changed {
+        if d.settings.dust.as_ref().is_some_and(DustLayer::needs_detection) {
+            d.request_dust();
+        } else {
+            done = Some(None);
+        }
+    }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
+    }
+}
+
+/// The Remove panel's Distractions: Sensor Dust (Find makes spots) and Dust & Scratches
+/// (film defects found from the infrared pass or the picture, filled as one layer).
+#[allow(clippy::too_many_arguments)]
+fn distractions(
+    ui: &mut egui::Ui,
+    d: &mut DevelopState,
+    st: &mut DevelopSettings,
+    tool: &mut RemoveTool,
+    done: &mut Option<Option<String>>,
+    find_dust: &mut bool,
+    dust_changed: &mut bool,
+    show_changed: &mut bool,
+) {
+    let spec = |id: u8, range: (f32, f32), default: f32| Spec {
+        slider: Slider::MaskAmount(id),
+        range,
+        default,
+        log: false,
+        gradient: None,
+        kelvin: false,
+    };
+    let row_label = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).size(12.5).color(theme::TEXT));
+    };
+    ui.add_space(10.0);
+    ui.separator();
+    ui.label(RichText::new("Distractions").size(13.5).strong().color(theme::TEXT));
+    ui.add_space(6.0);
+
+    // Sensor dust: soft round blobs in a digital photo's smooth areas, found as Heal spots.
+    ui.horizontal(|ui| {
+        row_label(ui, "Sensor Dust");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let tip = "Find the soft, round spots dust on the sensor leaves in smooth areas \
+                       (skies, walls), as Heal spots you can check, move or delete. Finding \
+                       again replaces the found spots you haven't changed";
+            if pill(ui, "Find", false).on_hover_text(tip).clicked() {
+                *find_dust = true;
+            }
+        });
+    });
+    slider_row_as(ui, &spec(243, (0.0, 100.0), 50.0), "Sensitivity", &mut d.sensor_sensitivity);
+    let found = st.spots.iter().filter(|s| s.found).count();
+    if found > 0 {
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            ui.label(weak(format!("{found} found")).size(12.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if pill(ui, "Clear Found", false).on_hover_text("Delete the found spots you haven't changed").clicked() {
+                    st.spots.retain(|s| !s.found);
+                    tool.selected = None;
+                    *done = Some(Some("Clear Sensor Dust".into()));
+                }
+            });
+        });
+    }
+
+    // Dust & Scratches: a film scan's many specks, hairs and scratches.
+    ui.add_space(8.0);
+    let has_ir = d.ir_pass.is_some();
+    let mut layer = st.dust.clone();
+    ui.horizontal(|ui| {
+        let on = layer.as_ref().is_some_and(|l| l.enabled);
+        let tip = "Find a film scan's dust, hairs and scratches and fill them from around \
+                   them. With an infrared pass (NegPy's _IR file beside the scan) they are \
+                   found from that";
+        if super::icons::toggle_switch(ui, on, egui::vec2(24.0, 13.0)).on_hover_text(tip).clicked() {
+            match &mut layer {
+                Some(l) => l.enabled = !on,
+                None => {
+                    let source = if has_ir { DustSource::Both } else { DustSource::Picture };
+                    layer = Some(DustLayer { source, ..Default::default() });
+                }
+            }
+            *dust_changed = true;
+        }
+        row_label(ui, "Dust & Scratches");
+        if d.dust_job.is_some() {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(weak("Finding…").size(12.0));
+                ui.add(egui::Spinner::new().size(12.0));
+            });
+        }
+    });
+    if let Some(l) = layer.as_mut().filter(|l| l.enabled) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            row_label(ui, "Find in");
+            for source in DustSource::ALL {
+                let tip = match source {
+                    DustSource::Ir => "The infrared pass: dust and scratches block infrared, the film's dyes don't. Most exact; not for black & white (silver) film",
+                    DustSource::Picture => "The picture itself: specks and hairs that stand out from the grain. For scans without infrared, and black & white film",
+                    DustSource::Both => "The infrared pass, and small specks the picture shows where the infrared agrees",
+                };
+                let usable = has_ir || !source.uses_ir();
+                let r = ui
+                    .add_enabled_ui(usable, |ui| mode_button(ui, source.label(), l.source == source))
+                    .inner
+                    .on_hover_text(tip)
+                    .on_disabled_hover_text("This photo has no infrared pass (a file named like it, ending in _IR)");
+                if r.clicked() && l.source != source {
+                    l.source = source;
+                    *dust_changed = true;
+                }
+            }
+        });
+        if slider_row_as(ui, &spec(244, (0.0, 100.0), 50.0), "Sensitivity", &mut l.sensitivity).done {
+            *dust_changed = true;
+        }
+        if slider_row_as(ui, &spec(245, (2.0, 60.0), 12.0), "Max Size", &mut l.max_size).done {
+            *dust_changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            let tip = "Show what was found in red";
+            if ui.checkbox(&mut d.show_dust, "Show found").on_hover_text(tip).changed() {
+                *show_changed = true;
+            }
+        });
+        if !has_ir && l.source == DustSource::Picture {
+            ui.label(weak("Without an infrared pass, specks and hairs are found from the picture: check with Show found, and paint out what it misses with spots.").size(11.5));
+        }
+    }
+    if layer != st.dust {
+        st.dust = layer;
     }
 }
 

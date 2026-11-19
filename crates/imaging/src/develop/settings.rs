@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::curve::ToneCurve;
 use super::detail::{Detail, DetailParam};
+use super::dust::DustLayer;
 use super::effects::{EffectParam, Effects};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::heal::Spot;
@@ -119,6 +120,8 @@ pub struct DevelopSettings {
     pub masks: Vec<Mask>,
     /// The Remove tool's spots (Heal, Clone), applied first.
     pub spots: Vec<Spot>,
+    /// Dust & Scratches (film): found defects filled, before the spots.
+    pub dust: Option<DustLayer>,
 }
 
 impl Default for DevelopSettings {
@@ -149,6 +152,7 @@ impl Default for DevelopSettings {
             transform: Transform::default(),
             masks: Vec::new(),
             spots: Vec::new(),
+            dust: None,
         }
     }
 }
@@ -475,6 +479,12 @@ impl DevelopSettings {
                 eat(p.get(&self.detail).to_bits());
             }
         }
+        if let Some(d) = &self.dust {
+            eat(0xd5_57);
+            for b in serde_json::to_vec(d).unwrap_or_default() {
+                eat(u32::from(b));
+            }
+        }
         if !self.spots.is_empty() {
             eat(0x5b_07);
             for b in serde_json::to_vec(&self.spots).unwrap_or_default() {
@@ -569,6 +579,13 @@ impl DevelopSettings {
         }
         if self.spots != old.spots {
             return describe_spots(&self.spots, &old.spots);
+        }
+        if self.dust != old.dust {
+            return match (&self.dust, &old.dust) {
+                (Some(d), _) if !d.enabled => "Dust & Scratches: Off".into(),
+                (None, _) => "Dust & Scratches: Off".into(),
+                _ => "Dust & Scratches".into(),
+            };
         }
         if self.masks != old.masks {
             return describe_masks(&self.masks, &old.masks, kelvin);

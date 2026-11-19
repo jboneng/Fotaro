@@ -1095,7 +1095,7 @@ fn remove_spots_show_their_fill_inside_only_and_follow_their_shape() {
     assert_eq!(render_srgb8(&img, &s), plain);
 
     // The input the model sees: a square around the spot, the hole marked.
-    let input = fill_input(&img, &s.spots, 0, [1.0; 3]).unwrap();
+    let input = fill_input(&img, &s.spots, None, 0, [1.0; 3]).unwrap();
     let (iw, ih) = input.image.dimensions();
     assert_eq!(iw, ih);
     assert_eq!(input.mask.get_pixel(iw / 2, ih / 2)[0], 255);
@@ -1155,3 +1155,90 @@ fn remove_spots_show_their_fill_inside_only_and_follow_their_shape() {
 
 /// Tests that set the (global) mask and fill picture store take turns.
 static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn spot_strokes_add_and_take_away_area() {
+    let spot = Spot { points: vec![[0.3, 0.5]], size: 0.05, feather: 0.0, ..Spot::default() };
+    let (w, h) = (400, 200);
+    let at = |s: &Spot, x: f32, y: f32| SpotArea::new(s, w, h).at(x, y);
+    // Radius 10 px around (120, 100).
+    assert!(at(&spot, 120.0, 100.0) > 0.9);
+    assert_eq!(at(&spot, 160.0, 100.0), 0.0);
+    // A stroke to the right adds area; an erasing one takes some back.
+    let mut bigger = spot.clone();
+    bigger.strokes.push(SpotStroke { points: vec![[0.3, 0.5], [0.45, 0.5]], size: 0.05, erase: false });
+    assert!(at(&bigger, 160.0, 100.0) > 0.9);
+    let mut cut = bigger.clone();
+    cut.strokes.push(SpotStroke { points: vec![[0.4, 0.5]], size: 0.03, erase: true });
+    assert_eq!(at(&cut, 160.0, 100.0), 0.0);
+    assert!(at(&cut, 175.0, 100.0) > 0.9);
+    // The bounds cover what adds, and each change is a new shape (so Remove refills).
+    let b = SpotArea::new(&bigger, w, h).bounds();
+    assert!(b[0] <= 110.5 && b[2] >= 189.5, "{b:?}");
+    assert_ne!(spot.shape_key(), bigger.shape_key());
+    assert_ne!(bigger.shape_key(), cut.shape_key());
+    // Healing covers the added area (it changes pixels there).
+    let photo: RgbImage = ImageBuffer::from_fn(w, h, |x, _| Rgb([(x / 2) as u8, 100, 100]));
+    let img = rendered(&photo);
+    let plain = render_srgb8(&img, &DevelopSettings::default());
+    let s = DevelopSettings {
+        spots: vec![Spot { mode: SpotMode::Clone, offset: [0.0, 0.3], ..bigger }],
+        ..Default::default()
+    };
+    let out = render_srgb8(&img, &s);
+    assert_eq!(out.get_pixel(160, 100), plain.get_pixel(160, 160));
+    // Old settings without strokes still load.
+    let old = r#"{"spots":[{"mode":"Heal","points":[[0.5,0.5]],"size":0.02}]}"#;
+    assert!(DevelopSettings::from_json(old).unwrap().spots[0].strokes.is_empty());
+}
+
+#[test]
+fn dust_and_scratches_fill_the_found_defects_only() {
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // A smooth ramp with a dark speck.
+    let photo: RgbImage = ImageBuffer::from_fn(300, 200, |x, y| {
+        if (x as f32 - 150.0).hypot(y as f32 - 100.0) < 4.0 {
+            Rgb([10, 10, 10])
+        } else {
+            Rgb([(60 + x / 2) as u8, 120, 160])
+        }
+    });
+    let img = rendered(&photo);
+    let plain = render_srgb8(&img, &DevelopSettings::default());
+    // Detect from the picture, store the mask, turn the layer on.
+    let lum: Vec<f32> =
+        img.pixels.pixels().map(|p| (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).sqrt()).collect();
+    let mask = detect_picture(&lum, 300, 200, 50.0, 12.0);
+    assert_eq!(mask[100 * 300 + 150], 255);
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("test-dust", &image::GrayImage::from_raw(300, 200, mask).unwrap()).unwrap();
+    let mut layer = DustLayer { picture: Some("test-dust".into()), ..DustLayer::default() };
+    layer.made_for = layer.key();
+    let s = DevelopSettings { dust: Some(layer.clone()), ..Default::default() };
+    let out = render_srgb8(&img, &s);
+    // The speck is gone (about its surroundings); elsewhere nothing changed.
+    let (c, near) = (out.get_pixel(150, 100), plain.get_pixel(140, 100));
+    assert!((0..3).all(|k| c[k].abs_diff(near[k]) <= 8), "{c:?} vs {near:?}");
+    assert_eq!(out.get_pixel(40, 40), plain.get_pixel(40, 40));
+    // A region renders like that part of the whole.
+    let region = Region { x: 120, y: 70, w: 60, h: 60 };
+    let part = render_region_srgb8(&img, &s, region);
+    for y in 0..region.h {
+        for x in 0..region.w {
+            assert_eq!(part.get_pixel(x, y), out.get_pixel(x + region.x, y + region.y), "({x}, {y})");
+        }
+    }
+    // Other settings than the mask was made for, or off: nothing filled.
+    let mut stale = s.clone();
+    stale.dust.as_mut().unwrap().sensitivity = 80.0;
+    assert!(stale.dust.as_ref().unwrap().needs_detection());
+    assert_eq!(render_srgb8(&img, &stale), plain);
+    let mut off = s.clone();
+    off.dust.as_mut().unwrap().enabled = false;
+    assert_eq!(render_srgb8(&img, &off), plain);
+    // Saved and read back; older settings have none.
+    assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap().dust, s.dust);
+    assert!(DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap().dust.is_none());
+    set_mask_store(None);
+}

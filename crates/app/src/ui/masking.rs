@@ -30,7 +30,7 @@ pub(super) struct Canvas {
     rotation: u8,
     transform: Transform,
     /// The untransformed photo's size in pixels.
-    size: (u32, u32),
+    pub(super) size: (u32, u32),
 }
 
 impl Canvas {

@@ -4,6 +4,7 @@
 mod curve;
 mod dehaze;
 mod detail;
+mod dust;
 mod effects;
 mod grading;
 mod heal;
@@ -23,9 +24,15 @@ mod tests;
 
 pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, ToneCurve};
 pub use detail::{Detail, DetailParam, SharpenView};
+pub use dust::{
+    DustLayer, DustSource, IrPass, detect_both, detect_dust, detect_ir, detect_picture, dust_lightness, fill_masked,
+    find_sensor_dust, mask_at, render_dust_overlay, sensor_dust_spots,
+};
 pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
-pub use heal::{Fill, FillInput, Spot, SpotMode, fill_decode, fill_encode, fill_input, find_source};
+pub use heal::{
+    Fill, FillInput, Spot, SpotArea, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input, find_source,
+};
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use masks::{
     CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke, save_fill_picture,

@@ -128,7 +128,7 @@ pub fn save_mask_picture(id: &str, picture: &image::GrayImage) -> anyhow::Result
 }
 
 /// An AI mask's picture, from memory or the mask store; `None` if it is missing.
-fn mask_picture(id: &str) -> Option<Arc<image::GrayImage>> {
+pub(super) fn mask_picture(id: &str) -> Option<Arc<image::GrayImage>> {
     let mut cache = MASK_PICTURES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, p)) = cache.iter().find(|(k, _)| k == id) {
         return Some(p.clone());
