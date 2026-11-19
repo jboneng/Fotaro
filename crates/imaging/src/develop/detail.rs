@@ -399,6 +399,32 @@ pub(super) fn apply(
     }
 }
 
+/// Masks' Sharpness and Noise on the lightness plane `l` (`w × h`), per pixel:
+/// `sharpness` −1..+1 (sharpen like Amount 100 at +1; blur at −1) and `noise` 0..1 (like
+/// Luminance noise reduction 100 at 1). `scale`: rendered pixels per full-size pixel.
+pub(super) fn apply_local(l: &mut [f32], w: usize, h: usize, sharpness: &[f32], noise: &[f32], scale: f32) {
+    let px = |full: f32| (full * scale).max(0.0);
+    if noise.iter().any(|n| *n > 0.0) {
+        let r = (px(2.0).round() as usize).max(1);
+        let smooth = self_guided(l, w, h, r, 0.003);
+        l.par_iter_mut().zip(&smooth).zip(noise).for_each(|((v, s), n)| {
+            *v += n.clamp(0.0, 1.0) * (s - *v);
+        });
+    }
+    if sharpness.iter().any(|s| *s != 0.0) {
+        let blurred = blur(l, w, h, px(1.0).max(0.5));
+        let limit = 0.02 + 0.3 * 0.25 * 0.25;
+        l.par_iter_mut().zip(&blurred).zip(sharpness).for_each(|((v, b), s)| {
+            if *s > 0.0 {
+                let diff = *v - b;
+                *v = (*v + 1.5 * s.min(1.0) * diff / (1.0 + diff.abs() / limit)).max(0.0);
+            } else if *s < 0.0 {
+                *v += (-s).min(1.0) * (b - *v);
+            }
+        });
+    }
+}
+
 /// LrC's sharpening previews (Alt while dragging a Sharpening slider): the image in
 /// greyscale so the effect is easier to judge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -111,6 +111,7 @@ static MASK_PICTURES: Mutex<Vec<(String, Arc<image::GrayImage>)>> = Mutex::new(V
 pub fn set_mask_store(dir: Option<std::path::PathBuf>) {
     *MASK_STORE.write().unwrap_or_else(|e| e.into_inner()) = dir;
     MASK_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    FILL_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// Save an AI mask's picture as `<id>.png` in the mask store.
@@ -145,6 +146,45 @@ fn mask_picture(id: &str) -> Option<Arc<image::GrayImage>> {
         }
         Err(e) => {
             log::warn!("AI mask {id}: {e}");
+            None
+        }
+    }
+}
+
+/// Remove fills' pictures already read (colour; in the same store as the masks').
+static FILL_PICTURES: Mutex<Vec<(String, Arc<image::RgbImage>)>> = Mutex::new(Vec::new());
+
+/// Save a Remove fill's picture as `<id>.png` in the mask store.
+pub fn save_fill_picture(id: &str, picture: &image::RgbImage) -> anyhow::Result<()> {
+    let dir = MASK_STORE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no catalog to keep the fill in"))?;
+    std::fs::create_dir_all(&dir)?;
+    picture.save(dir.join(format!("{id}.png")))?;
+    FILL_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).push((id.to_owned(), Arc::new(picture.clone())));
+    Ok(())
+}
+
+/// A Remove fill's picture, from memory or the store; `None` if it is missing.
+pub(super) fn fill_picture(id: &str) -> Option<Arc<image::RgbImage>> {
+    let mut cache = FILL_PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, p)) = cache.iter().find(|(k, _)| k == id) {
+        return Some(p.clone());
+    }
+    let dir = MASK_STORE.read().unwrap_or_else(|e| e.into_inner()).clone()?;
+    match image::open(dir.join(format!("{id}.png"))) {
+        Ok(img) => {
+            let p = Arc::new(img.to_rgb8());
+            cache.push((id.to_owned(), p.clone()));
+            if cache.len() > 32 {
+                cache.remove(0);
+            }
+            Some(p)
+        }
+        Err(e) => {
+            log::warn!("Remove fill {id}: {e}");
             None
         }
     }

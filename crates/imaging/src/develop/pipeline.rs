@@ -13,8 +13,8 @@ use rayon::prelude::*;
 
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
-use super::detail::{SharpenView, apply as apply_detail};
-use super::effects::{Effects, Grain, Vignette, VignetteStyle};
+use super::detail::{SharpenView, apply as apply_detail, apply_local};
+use super::effects::{Effects, Glow, Grain, Vignette, VignetteStyle};
 use super::grading::Grading;
 use super::heal::healed;
 use super::hsl::{HslAdjust, oklab_to_srgb, srgb_to_oklab};
@@ -177,12 +177,15 @@ struct Prepared {
     vignette: Option<Vignette>,
     /// Masks' local adjustments, when any mask changes something.
     locals: Option<Locals>,
+    /// Glow, when on.
+    glow: Option<Glow>,
 }
 
 impl Prepared {
-    /// Prepare to render `region` of `img`. Local adjustments look at the whole image,
-    /// so a region renders exactly like that part of a full render.
-    fn new(img: &WorkingImage, s: &DevelopSettings, region: Region) -> Prepared {
+    /// Prepare to render `region` of `img`, with the masks' values over it (`field`).
+    /// Local adjustments look at the whole image, so a region renders exactly like that
+    /// part of a full render.
+    fn new(img: &WorkingImage, s: &DevelopSettings, region: Region, field: Option<MaskField>) -> Prepared {
         let wb = img.resolve_wb(s);
         let input = match &img.color {
             SourceColor::Camera(c) => Input::Camera { m: wb.multipliers, mat: c.cam_to_work },
@@ -224,17 +227,32 @@ impl Prepared {
             dehaze: s.dehaze / 100.0,
             haze: None,
             vignette: Vignette::new(&s.effects, img.width(), img.height()),
-            locals: None,
+            locals: field.map(|field| Locals::new(field, &s.masks)),
+            glow: None,
         };
-        if prep.dehaze != 0.0 {
+        // Masks' Dehaze, Clarity and Texture need the same maps as the global ones.
+        let local = |f: fn(&LocalParams) -> f32| {
+            prep.locals.as_ref().is_some_and(|l| l.params.iter().any(|p| f(p) != 0.0))
+        };
+        let (local_dehaze, local_detail) =
+            (local(|p| p.dehaze), local(|p| p.clarity) || local(|p| p.texture));
+        if prep.dehaze != 0.0 || local_dehaze {
             let (w, h) = (img.width() as usize, img.height() as usize);
-            let map = HazeMap::build(w, h, prep.dehaze.max(0.0), |x, y| prep.linear(input_at(img, x, y)));
+            let map = HazeMap::build(w, h, |x, y| prep.linear(input_at(img, x, y)));
             prep.haze = Some(map);
         }
         let tone = prep.highlights != 0.0 || prep.shadows != 0.0;
-        let detail = prep.clarity != 0.0 || prep.texture != 0.0;
+        let detail = prep.clarity != 0.0 || prep.texture != 0.0 || local_detail;
         if tone || detail {
             prep.gains = Some(prep.local_gains(img));
+        }
+        // Glow: from the whole photo developed (without the region-only parts: local
+        // gains and masks, which only cover the region), so every region agrees.
+        if s.effects.glow_amount > 0.0 {
+            let (gains, locals) = (prep.gains.take(), prep.locals.take());
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            prep.glow = Glow::new(&s.effects, w, h, prep.luma, |x, y| prep.pixel(input_at(img, x, y), x, y));
+            (prep.gains, prep.locals) = (gains, locals);
         }
         prep
     }
@@ -267,17 +285,22 @@ impl Prepared {
             map.transform(|v| tone_gain(v + offset, hl, sh).exp2());
             map
         });
-        let clarity = (self.clarity != 0.0).then(|| BaseMap::build(w, h, CLARITY_MAP, lum_at));
+        // Clarity and Texture: the global amounts, and masks' (per pixel, below).
+        let locals = self.locals.as_ref();
+        let local = |f: fn(&LocalParams) -> f32| locals.is_some_and(|l| l.params.iter().any(|p| f(p) != 0.0));
+        let clarity_on = self.clarity != 0.0 || local(|p| p.clarity);
+        let texture_on = self.texture != 0.0 || local(|p| p.texture);
+        let clarity = clarity_on.then(|| BaseMap::build(w, h, CLARITY_MAP, lum_at));
 
         // log2 luminance over the region, plus the margin Texture's blur reaches into.
         let r = (w.max(h) as f32 / 1000.0).round().max(1.0) as usize;
-        let margin = if self.texture != 0.0 { 2 * r + 1 } else { 0 };
+        let margin = if texture_on { 2 * r + 1 } else { 0 };
         let reg = self.region;
         let (ex0, ey0) = ((reg.x as usize).saturating_sub(margin), (reg.y as usize).saturating_sub(margin));
         let ex1 = (reg.x as usize + reg.w as usize + margin).min(w);
         let ey1 = (reg.y as usize + reg.h as usize + margin).min(h);
         let (ew, eh) = (ex1 - ex0, ey1 - ey0);
-        let ylog: Option<Vec<f32>> = (self.clarity != 0.0 || self.texture != 0.0).then(|| {
+        let ylog: Option<Vec<f32>> = (clarity_on || texture_on).then(|| {
             (ey0..ey1)
                 .into_par_iter()
                 .flat_map_iter(|y| (ex0..ex1).map(move |x| fast_log2(lum_at(x, y).max(1e-6))))
@@ -285,7 +308,7 @@ impl Prepared {
         });
         // Texture: log luminance blurred twice (close to a Gaussian) over a few pixels; the
         // radius follows the image size so a preview and a full-size export agree.
-        let texture = (self.texture != 0.0).then(|| {
+        let texture = texture_on.then(|| {
             let ylog = ylog.as_deref().unwrap_or_default();
             box_blur_par(&box_blur_par(ylog, ew, eh, r), ew, eh, r)
         });
@@ -302,17 +325,28 @@ impl Prepared {
                 let Some(ylog) = &ylog else { continue };
                 let e = (y - ey0) * ew + (x - ex0);
                 let l = ylog[e];
+                // The amounts here: global plus the masks'.
+                let (local_clarity, local_texture) = match locals {
+                    Some(lo) => lo.detail(lo.field.at(x, y)),
+                    None => (0.0, 0.0),
+                };
+                let (clarity_amount, texture_amount) =
+                    (self.clarity + local_clarity, self.texture + local_texture);
                 let mut stops = 0.0;
-                if let Some(map) = &clarity {
+                if let Some(map) = &clarity
+                    && clarity_amount != 0.0
+                {
                     let d = (l - map.sample(x, y)).clamp(-1.5, 1.5);
                     // Mostly the midtones: deep shadows and highlights are left alone.
                     let rel = l + fast_log2(*g) - grey;
-                    stops += self.clarity * 0.9 * d / (1.0 + rel * rel / 6.0);
+                    stops += clarity_amount * 0.9 * d / (1.0 + rel * rel / 6.0);
                 }
-                if let Some(base) = &texture {
+                if let Some(base) = &texture
+                    && texture_amount != 0.0
+                {
                     let d = (l - base[e]).clamp(-1.0, 1.0);
                     // Soft threshold: the smallest differences are mostly noise.
-                    stops += self.texture * 1.2 * d * (d.abs() / (d.abs() + 0.04));
+                    stops += texture_amount * 1.2 * d * (d.abs() / (d.abs() + 0.04));
                 }
                 *g *= fast_exp2(stops);
             }
@@ -356,11 +390,13 @@ impl Prepared {
             lin = l.white_balance(lin, ms);
         }
         if let Some(haze) = &self.haze {
-            lin = if self.dehaze > 0.0 {
-                haze.clear(lin, x, y)
-            } else {
-                add_haze(lin, -self.dehaze, haze.airlight)
-            };
+            // Global Dehaze plus the masks'.
+            let amount = self.dehaze + masks.map_or(0.0, |(l, ms)| l.dehaze(ms));
+            if amount > 0.0 {
+                lin = haze.clear(lin, x, y, amount.min(1.0));
+            } else if amount < 0.0 {
+                lin = add_haze(lin, (-amount).min(1.0), haze.airlight);
+            }
         }
         let g = match &self.gains {
             Some(gains) => {
@@ -418,19 +454,13 @@ impl Prepared {
         if let Some(g) = &self.grading {
             d = g.apply(d);
         }
+        if let Some(glow) = &self.glow {
+            d = glow.apply(d, x, y);
+        }
         match &self.vignette {
             Some(v) => v.after_tone(d, x, y),
             None => d,
         }
-    }
-}
-
-impl Prepared {
-    /// Add the masks' local adjustments (`field`: the active masks' values over the
-    /// region being rendered).
-    fn with_masks(mut self, field: Option<MaskField>, masks: &[Mask]) -> Prepared {
-        self.locals = field.map(|field| Locals::new(field, masks));
-        self
     }
 }
 
@@ -448,6 +478,15 @@ struct LocalParams {
     /// Saturation (−1..+1) and Hue (radians).
     saturation: f32,
     hue: f32,
+    /// Texture, Clarity and Dehaze, −1..+1 (added to the global ones where the mask is).
+    texture: f32,
+    clarity: f32,
+    dehaze: f32,
+    /// Sharpness −1..+1 and Noise 0..1 (applied with Detail).
+    sharpness: f32,
+    noise: f32,
+    /// The Color swatch as an Oklab (a, b) shift.
+    tint: Option<[f32; 2]>,
 }
 
 impl LocalParams {
@@ -477,6 +516,12 @@ impl LocalParams {
             tone,
             saturation: a.saturation / 100.0,
             hue: a.hue.to_radians(),
+            texture: a.texture / 100.0,
+            clarity: a.clarity / 100.0,
+            dehaze: a.dehaze / 100.0,
+            sharpness: a.sharpness / 100.0,
+            noise: a.noise.max(0.0) / 100.0,
+            tint: a.color.filter(|c| c[1] > 0.0).map(|[h, s]| super::grading::tint(h, s)),
         }
     }
 }
@@ -517,6 +562,24 @@ impl Locals {
         lin
     }
 
+    /// Clarity and Texture to add here.
+    #[inline]
+    fn detail(&self, ms: &[f32]) -> (f32, f32) {
+        self.applying(ms).fold((0.0, 0.0), |(c, t), (m, p)| (c + m * p.clarity, t + m * p.texture))
+    }
+
+    /// Sharpness and Noise here.
+    #[inline]
+    fn sharpness_noise(&self, ms: &[f32]) -> (f32, f32) {
+        self.applying(ms).fold((0.0, 0.0), |(s, n), (m, p)| (s + m * p.sharpness, n + m * p.noise))
+    }
+
+    /// Dehaze to add here.
+    #[inline]
+    fn dehaze(&self, ms: &[f32]) -> f32 {
+        self.applying(ms).map(|(m, p)| m * p.dehaze).sum()
+    }
+
     /// Exposure, as a gain.
     #[inline]
     fn exposure(&self, ms: &[f32]) -> f32 {
@@ -543,17 +606,24 @@ impl Locals {
     /// Saturation and Hue, in Oklab.
     #[inline]
     fn color(&self, d: [f32; 3], ms: &[f32]) -> [f32; 3] {
-        let (mut sat, mut hue) = (1.0f32, 0.0f32);
+        let (mut sat, mut hue, mut shift) = (1.0f32, 0.0f32, [0.0f32; 2]);
         for (m, p) in self.applying(ms) {
             sat *= (1.0 + m * p.saturation).max(0.0);
             hue += m * p.hue;
+            if let Some(t) = p.tint {
+                shift = [shift[0] + m * t[0], shift[1] + m * t[1]];
+            }
         }
-        if sat == 1.0 && hue == 0.0 {
+        if sat == 1.0 && hue == 0.0 && shift == [0.0; 2] {
             return d;
         }
         let [l, a, b] = srgb_to_oklab(matrix::apply(&self.to_srgb, d));
         let (cos, sin) = (hue.cos(), hue.sin());
+        // Hue and Saturation, then the Color swatch's tint (scaled down in the deepest
+        // shadows, which it would otherwise colour).
         let (a, b) = ((a * cos - b * sin) * sat, (a * sin + b * cos) * sat);
+        let k = (l / 0.3).min(1.0);
+        let (a, b) = (a + k * shift[0], b + k * shift[1]);
         matrix::apply(&self.to_work, oklab_to_srgb([l, a, b])).map(|v| v.max(0.0))
     }
 }
@@ -640,7 +710,7 @@ pub fn render_region_srgb8_view(
     let mut out = RgbImage::new(region.w, region.h);
     let finish = Finish::new(img, s, view.is_none());
     let (rx, ry) = (region.x as usize, region.y as usize);
-    if s.detail.is_active() || view.is_some() {
+    if uses_detail(s) || view.is_some() {
         let detailed = Detailed::render(source, img, s, region, view);
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
@@ -649,8 +719,7 @@ pub fn render_region_srgb8_view(
         });
         return out;
     }
-    let prep =
-        Prepared::new(img, s, region).with_masks(MaskField::build(source, img, &s.masks, region), &s.masks);
+    let prep = Prepared::new(img, s, region, MaskField::build(source, img, &s.masks, region));
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         let l = finish.apply(matrix::apply(&to_srgb, prep.pixel(p, x, y)), x, y);
         o.copy_from_slice(&l.map(|v| enc.encode(v)));
@@ -727,7 +796,7 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
     let mut out = ImageBuffer::<Rgb<u16>, Vec<u16>>::new(img.width(), img.height());
     let to_u16 = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
     let finish = Finish::new(img, s, true);
-    if s.detail.is_active() {
+    if uses_detail(s) {
         let detailed = Detailed::render(source, img, s, region, None);
         let to_work = matrix::to_f32(&matrix::srgb_to_work());
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
@@ -737,8 +806,7 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
         });
         return out;
     }
-    let prep =
-        Prepared::new(img, s, region).with_masks(MaskField::build(source, img, &s.masks, region), &s.masks);
+    let prep = Prepared::new(img, s, region, MaskField::build(source, img, &s.masks, region));
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         o.copy_from_slice(&finish.apply(prep.pixel(p, x, y), x, y).map(to_u16));
     });
@@ -774,8 +842,7 @@ impl Detailed {
             w: (region.x + region.w + m).min(img.width()) - x0,
             h: (region.y + region.h + m).min(img.height()) - y0,
         };
-        let prep =
-            Prepared::new(img, s, area).with_masks(MaskField::build(source, img, &s.masks, area), &s.masks);
+        let prep = Prepared::new(img, s, area, MaskField::build(source, img, &s.masks, area));
         let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
         let (aw, ah, w) = (area.w as usize, area.h as usize, img.width() as usize);
         let mut planes: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; aw * ah]);
@@ -793,6 +860,23 @@ impl Detailed {
                 }
             });
         apply_detail(&mut planes, area.w as usize, area.h as usize, &s.detail, scale, view);
+        // Masks' Sharpness and Noise, after the global Detail (not in its previews).
+        if let Some(lo) = &prep.locals
+            && view.is_none()
+            && lo.params.iter().any(|p| p.sharpness != 0.0 || p.noise > 0.0)
+        {
+            let n = aw * ah;
+            let (mut sharp, mut noise) = (vec![0.0f32; n], vec![0.0f32; n]);
+            (sharp.par_chunks_mut(aw), noise.par_chunks_mut(aw)).into_par_iter().enumerate().for_each(
+                |(j, (srow, nrow))| {
+                    for i in 0..aw {
+                        (srow[i], nrow[i]) =
+                            lo.sharpness_noise(lo.field.at(area.x as usize + i, area.y as usize + j));
+                    }
+                },
+            );
+            apply_local(&mut planes[0], aw, ah, &sharp, &noise, scale);
+        }
         Detailed {
             planes,
             width: area.w as usize,
@@ -827,7 +911,7 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
         effects: Effects::default(),
         ..s.clone()
     };
-    let prep = Prepared::new(img, &neutral, Region::whole(img));
+    let prep = Prepared::new(img, &neutral, Region::whole(img), None);
     // Luminance in stops from middle grey, on a sample of pixels.
     let px = img.pixels.as_raw().as_chunks::<3>().0;
     let step = (px.len() / 200_000).max(1);
@@ -868,4 +952,11 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
         blacks: blacks.round(),
         ..s.clone()
     }
+}
+
+/// Does a render need the Detail path (lightness planes with a margin): global Detail, or
+/// a mask's Sharpness or Noise?
+fn uses_detail(s: &DevelopSettings) -> bool {
+    s.detail.is_active()
+        || s.masks.iter().any(|m| m.is_active() && (m.adjust.sharpness != 0.0 || m.adjust.noise > 0.0))
 }

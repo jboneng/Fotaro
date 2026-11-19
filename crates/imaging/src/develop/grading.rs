@@ -159,20 +159,22 @@ pub(super) struct Grading {
     to_work: Mat3f,
 }
 
+/// The Oklab (a, b) shift of a tint: the direction of the colour-wheel colour at `hue`
+/// degrees, scaled by `saturation` (0..100).
+pub(super) fn tint(hue: f32, saturation: f32) -> [f32; 2] {
+    let (h, _) = hue_chroma(srgb_to_oklab(wheel_color(hue)));
+    let k = MAX_TINT * saturation.clamp(0.0, 100.0) / 100.0;
+    let h = h.to_radians();
+    [k * h.cos(), k * h.sin()]
+}
+
 impl Grading {
     pub fn new(g: &ColorGrading) -> Option<Grading> {
         if g.is_neutral() {
             return None;
         }
         let wheels = [g.shadows, g.midtones, g.highlights, g.global];
-        let tints = wheels.map(|w| {
-            // The direction of the wheel's colour in Oklab, scaled by its saturation.
-            let lab = srgb_to_oklab(wheel_color(w.hue));
-            let (h, _) = hue_chroma(lab);
-            let k = MAX_TINT * w.saturation.clamp(0.0, 100.0) / 100.0;
-            let h = h.to_radians();
-            [k * h.cos(), k * h.sin()]
-        });
+        let tints = wheels.map(|w| tint(w.hue, w.saturation));
         Some(Grading {
             tints,
             lums: wheels.map(|w| MAX_LUM * w.luminance / 100.0),

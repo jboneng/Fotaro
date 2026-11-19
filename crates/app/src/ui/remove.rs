@@ -1,7 +1,7 @@
-//! The Remove tool (Q; LrC's spot removal without the AI modes): click for a round spot,
-//! drag to brush one; each takes its pixels from a source found nearby (drag the source
-//! to choose, / for another). Heal matches the source to the spot's surroundings, Clone
-//! copies it.
+//! The Remove tool (Q; LrC's spot removal): click for a round spot, drag to brush one.
+//! Remove fills it with what is around it (LaMa, on this computer); Heal and Clone take
+//! their pixels from a source found nearby (drag the source to choose, / for another):
+//! Heal matches the source to the spot's surroundings, Clone copies it.
 
 use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Stroke};
 use imaging::develop::{DevelopSettings, Slider, Spot, SpotMode};
@@ -67,7 +67,8 @@ fn hit(c: &Canvas, spots: &[Spot], selected: Option<usize>, p: Pos2) -> Option<R
         if d < r {
             return Some(RemoveDrag::Spot { index: i, grab, original: s.clone() });
         }
-        if Some(i) == selected && dist_to_path(&path_px(c, s, s.offset), q) < r {
+        if Some(i) == selected && s.mode != SpotMode::Remove && dist_to_path(&path_px(c, s, s.offset), q) < r
+        {
             return Some(RemoveDrag::Source { index: i, grab, original: s.clone() });
         }
     }
@@ -121,6 +122,19 @@ fn draw_outline(painter: &egui::Painter, lines: &[Vec<Pos2>], stroke: Stroke) {
     }
 }
 
+/// A small turning arc on a dark disc: a spot being filled.
+fn spinner(painter: &egui::Painter, at: Pos2, time: f64) {
+    painter.circle_filled(at, 9.0, Color32::from_black_alpha(140));
+    let start = (time * 4.0) as f32;
+    let pts: Vec<Pos2> = (0..=16)
+        .map(|k| {
+            let t = start + k as f32 / 16.0 * 4.5;
+            at + egui::vec2(t.cos(), t.sin()) * 6.0
+        })
+        .collect();
+    painter.add(egui::Shape::line(pts, Stroke::new(2.0, Color32::WHITE)));
+}
+
 /// The centre of a spot (its pin), 0..1.
 fn centre(spot: &Spot) -> [f32; 2] {
     let n = spot.points.len().max(1) as f32;
@@ -158,6 +172,7 @@ pub(super) fn canvas(
             feather: settings.feather,
             opacity: settings.opacity,
             offset: [2.5 * radius * half / w, 0.0],
+            fill: None,
         }
     };
 
@@ -253,6 +268,7 @@ pub(super) fn canvas(
 
     // Spots: outlines; the selected one with its source and an arrow from it.
     let painter = painter.with_clip_rect(img_rect.intersect(painter.clip_rect()));
+    let filling = d.fill_job.as_ref().map(|(_, key)| *key);
     for (i, s) in st.spots.iter().enumerate() {
         let selected = tool.selected == Some(i);
         let stroke = if selected {
@@ -261,7 +277,15 @@ pub(super) fn canvas(
             Stroke::new(1.0, Color32::from_white_alpha(150))
         };
         draw_outline(&painter, &outline(&c, s, [0.0, 0.0]), stroke);
-        if selected {
+        // Being filled: a spinner in the middle.
+        if filling == Some(s.shape_key())
+            && let Some(at) = c.screen(centre(s))
+        {
+            spinner(&painter, at, ui.input(|i| i.time));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        // Heal and Clone: the source, and an arrow from it.
+        if selected && s.mode != SpotMode::Remove {
             draw_outline(
                 &painter,
                 &outline(&c, s, s.offset),
@@ -314,8 +338,9 @@ pub(super) fn canvas(
     if st != d.settings {
         d.set_live(st);
     }
-    if let Some(i) = find {
-        // The new spot's source; saved when the worker has picked it.
+    if let Some(i) = find.filter(|&i| d.settings.spots[i].mode != SpotMode::Remove) {
+        // The new spot's source; saved when the worker has picked it. (Remove spots are
+        // filled on their own, and saved then.)
         d.find_source(i, false);
     }
     done
@@ -359,10 +384,11 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         let before = values;
         ui.horizontal(|ui| {
             ui.add_space(super::develop::LABEL_W - 40.0);
-            for mode in [SpotMode::Heal, SpotMode::Clone] {
+            for mode in [SpotMode::Remove, SpotMode::Heal, SpotMode::Clone] {
                 let tip = match mode {
                     SpotMode::Heal => "Copy texture from the source, matched to the colour and brightness around the spot",
                     SpotMode::Clone => "Copy the source as it is",
+                    SpotMode::Remove => "Fill with what is around it (an AI model)",
                 };
                 if mode_button(ui, mode.label(), values.mode == mode).on_hover_text(tip).clicked() {
                     values.mode = mode;
@@ -371,6 +397,20 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(4.0);
+        if values.mode == SpotMode::Remove {
+            ui.horizontal(|ui| {
+                ui.add_space(super::develop::LABEL_W - 40.0);
+                let mut best = d.remove_best;
+                let tip = "Fill new Remove spots with the larger model: better on large areas \
+                           and textures, but on the processor (several seconds each)";
+                if ui.checkbox(&mut best, "Best quality (slower)").on_hover_text(tip).changed() {
+                    d.remove_best = best;
+                    // Its model is another download: ask again.
+                    d.fill_allowed = false;
+                    std::thread::spawn(move || segment::warm_remove(best, false));
+                }
+            });
+        }
         let defaults = RemoveSettings::default();
         let rows: [(&str, &mut f32, f32, f32, u8); 3] = [
             ("Size", &mut values.size, defaults.size, 1.0, 240),
@@ -408,7 +448,7 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if let Some(i) = tool.selected {
-                if pill(ui, "New Source", false).on_hover_text("Pick another source for this spot (/)").clicked() {
+                if st.spots[i].mode != SpotMode::Remove && pill(ui, "New Source", false).on_hover_text("Pick another source for this spot (/)").clicked() {
                     new_source = true;
                 }
                 if pill(ui, "Delete", false).on_hover_text("Delete this spot (Delete)").clicked() {
@@ -428,11 +468,15 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 }
             });
         });
+        if let Some((job, _)) = &d.fill_job {
+            ui.add_space(6.0);
+            super::masking::ai_progress(ui, job);
+        }
         ui.add_space(6.0);
         let n = st.spots.len();
         ui.label(RichText::new(format!("{n} spot{}", if n == 1 { "" } else { "s" })).size(12.0).color(theme::TEXT_WEAK));
         ui.label(weak(
-            "Click a blemish to remove it, or paint over it. Drag a spot or its source to move it, a round spot's edge to resize it. The wheel or [ ] sets the size.",
+            "Click a blemish to remove it, or paint over it. Remove fills it with what is around it (an AI model, on this computer); Heal and Clone copy from a source you can drag. Drag a spot to move it, a round spot's edge to resize it. The wheel or [ ] sets the size.",
         ));
     });
     let index = tool.selected;
@@ -455,6 +499,9 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 pub fn set_removing(d: &mut DevelopState, on: bool) {
     d.removing = on.then(RemoveTool::default);
     if on {
+        // The Remove model takes a while to load: start now, before the first stroke.
+        let (best, gpu) = (d.remove_best, d.ai_gpu);
+        std::thread::spawn(move || segment::warm_remove(best, gpu));
         d.masking = None;
         d.cropping = None;
         d.picking_wb = false;
@@ -477,7 +524,13 @@ pub fn delete_spot(d: &mut DevelopState) -> bool {
 
 /// / with the Remove tool open: another source for the selected spot.
 pub fn new_source(d: &mut DevelopState) {
-    if let Some(i) = d.removing.as_ref().and_then(|t| t.selected).filter(|&i| i < d.settings.spots.len()) {
+    if let Some(i) = d
+        .removing
+        .as_ref()
+        .and_then(|t| t.selected)
+        .filter(|&i| i < d.settings.spots.len())
+        .filter(|&i| d.settings.spots[i].mode != SpotMode::Remove)
+    {
         d.find_source(i, true);
     }
 }

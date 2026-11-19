@@ -509,7 +509,7 @@ impl DevelopSettings {
         if self.effects != Effects::default() {
             eat(0xeff_ec75);
             eat(self.effects.vignette_style as u32);
-            for p in EffectParam::VIGNETTE.into_iter().chain(EffectParam::GRAIN) {
+            for p in EffectParam::VIGNETTE.into_iter().chain(EffectParam::GRAIN).chain(EffectParam::GLOW) {
                 eat(p.get(&self.effects).to_bits());
             }
         }
@@ -618,6 +618,7 @@ impl DevelopSettings {
             let changed: Vec<EffectParam> = EffectParam::VIGNETTE
                 .into_iter()
                 .chain(EffectParam::GRAIN)
+                .chain(EffectParam::GLOW)
                 .filter(|p| p.get(e) != p.get(o))
                 .collect();
             return match changed.as_slice() {

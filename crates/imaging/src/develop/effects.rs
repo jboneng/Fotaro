@@ -1,4 +1,4 @@
-//! Effects (LrC's Effects panel): Post-Crop Vignetting and Grain.
+//! Effects (LrC's Effects panel): Post-Crop Vignetting, Grain and Glow.
 //!
 //! The vignette's shape follows the image's frame (there is no crop yet, so the whole
 //! image). Grain is sized in full-size pixels, like Detail: a 1:1 view shows the real
@@ -51,6 +51,12 @@ pub struct Effects {
     /// Grain size and roughness, 0..100.
     pub grain_size: f32,
     pub grain_roughness: f32,
+    /// Glow: Amount 0..100; Range 0..100 (only the brightest highlights .. broader
+    /// tones); Spread 0..100 (how far it reaches); Warmth −100..+100.
+    pub glow_amount: f32,
+    pub glow_range: f32,
+    pub glow_spread: f32,
+    pub glow_warmth: f32,
 }
 
 impl Default for Effects {
@@ -65,6 +71,10 @@ impl Default for Effects {
             grain_amount: 0.0,
             grain_size: 25.0,
             grain_roughness: 50.0,
+            glow_amount: 0.0,
+            glow_range: 50.0,
+            glow_spread: 50.0,
+            glow_warmth: 0.0,
         }
     }
 }
@@ -80,6 +90,10 @@ pub enum EffectParam {
     GrainAmount,
     GrainSize,
     GrainRoughness,
+    GlowAmount,
+    GlowRange,
+    GlowSpread,
+    GlowWarmth,
 }
 
 impl EffectParam {
@@ -91,27 +105,38 @@ impl EffectParam {
         Self::VignetteHighlights,
     ];
     pub const GRAIN: [EffectParam; 3] = [Self::GrainAmount, Self::GrainSize, Self::GrainRoughness];
+    pub const GLOW: [EffectParam; 4] =
+        [Self::GlowAmount, Self::GlowRange, Self::GlowSpread, Self::GlowWarmth];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::VignetteAmount | Self::GrainAmount => "Amount",
+            Self::VignetteAmount | Self::GrainAmount | Self::GlowAmount => "Amount",
             Self::VignetteMidpoint => "Midpoint",
             Self::VignetteRoundness => "Roundness",
             Self::VignetteFeather => "Feather",
             Self::VignetteHighlights => "Highlights",
             Self::GrainSize => "Size",
             Self::GrainRoughness => "Roughness",
+            Self::GlowRange => "Range",
+            Self::GlowSpread => "Spread",
+            Self::GlowWarmth => "Warmth",
         }
     }
 
     /// The History name's group.
     pub fn group(self) -> &'static str {
-        if Self::VIGNETTE.contains(&self) { "Post-Crop Vignette" } else { "Grain" }
+        if Self::VIGNETTE.contains(&self) {
+            "Post-Crop Vignette"
+        } else if Self::GLOW.contains(&self) {
+            "Glow"
+        } else {
+            "Grain"
+        }
     }
 
     /// Amount and Roundness go both ways; the rest are 0..100.
     pub fn signed(self) -> bool {
-        matches!(self, Self::VignetteAmount | Self::VignetteRoundness)
+        matches!(self, Self::VignetteAmount | Self::VignetteRoundness | Self::GlowWarmth)
     }
 
     pub fn range(self) -> (f32, f32) {
@@ -128,6 +153,10 @@ impl EffectParam {
             Self::GrainAmount => &e.grain_amount,
             Self::GrainSize => &e.grain_size,
             Self::GrainRoughness => &e.grain_roughness,
+            Self::GlowAmount => &e.glow_amount,
+            Self::GlowRange => &e.glow_range,
+            Self::GlowSpread => &e.glow_spread,
+            Self::GlowWarmth => &e.glow_warmth,
         }
     }
 
@@ -141,6 +170,10 @@ impl EffectParam {
             Self::GrainAmount => &mut e.grain_amount,
             Self::GrainSize => &mut e.grain_size,
             Self::GrainRoughness => &mut e.grain_roughness,
+            Self::GlowAmount => &mut e.glow_amount,
+            Self::GlowRange => &mut e.glow_range,
+            Self::GlowSpread => &mut e.glow_spread,
+            Self::GlowWarmth => &mut e.glow_warmth,
         }
     }
 }
@@ -363,6 +396,96 @@ fn hash(x: u32, y: u32, seed: u32) -> f32 {
     h = h.wrapping_mul(0x846c_a68b);
     h ^= h >> 16;
     h as f32 * (2.0 / u32::MAX as f32) - 1.0
+}
+
+/// Long side of the glow map, in cells (the glow is soft: a small map is enough, and the
+/// same for a preview and a full-size export).
+const GLOW_MAP: usize = 384;
+
+/// Glow, ready to render: the light the photo's bright areas spread around them, from a
+/// small, blurred map of the whole photo (so a region renders like the whole).
+pub(super) struct Glow {
+    w: usize,
+    h: usize,
+    factor: f32,
+    /// Display-linear light per cell.
+    light: Vec<[f32; 3]>,
+    /// 0..1.5: how strongly it is added.
+    amount: f32,
+}
+
+impl Glow {
+    /// From `pixel(x, y)`, the developed photo (display-linear, before effects) at full
+    /// resolution `width × height`, and the photo's luma weights.
+    pub(super) fn new(
+        e: &Effects,
+        width: usize,
+        height: usize,
+        luma: [f32; 3],
+        pixel: impl Fn(usize, usize) -> [f32; 3] + Sync,
+    ) -> Option<Glow> {
+        use rayon::prelude::*;
+        if e.glow_amount <= 0.0 || width == 0 || height == 0 {
+            return None;
+        }
+        let f = (width.max(height) as f32 / GLOW_MAP as f32).max(1.0).ceil() as usize;
+        let (w, h) = (width.div_ceil(f), height.div_ceil(f));
+        // Range: from only the brightest highlights (0) to most of the light tones (100).
+        let t = 0.85 - 0.6 * e.glow_range.clamp(0.0, 100.0) / 100.0;
+        let k = e.glow_warmth.clamp(-100.0, 100.0) / 100.0;
+        let warmth = [1.0 + 0.35 * k, 1.0 + 0.05 * k, 1.0 - 0.35 * k];
+        // A few samples per cell: what's bright there, by how far past the threshold.
+        let step = (f / 2).max(1);
+        let light: Vec<[f32; 3]> = (0..w * h)
+            .into_par_iter()
+            .map(|i| {
+                let (cx, cy) = (i % w, i / w);
+                let (mut sum, mut n) = ([0f32; 3], 0f32);
+                for y in (cy * f..((cy + 1) * f).min(height)).step_by(step) {
+                    for x in (cx * f..((cx + 1) * f).min(width)).step_by(step) {
+                        let p = pixel(x, y);
+                        let l = luma[0] * p[0] + luma[1] * p[1] + luma[2] * p[2];
+                        let wgt = smoothstep(t, t + 0.25, l.sqrt());
+                        for c in 0..3 {
+                            sum[c] += p[c].min(4.0) * wgt * warmth[c];
+                        }
+                        n += 1.0;
+                    }
+                }
+                sum.map(|s| s / n.max(1.0))
+            })
+            .collect();
+        // Spread: blur radius from 0.5% to 8% of the long side (three box blurs ≈ Gaussian).
+        let reach = 0.005 + 0.075 * e.glow_spread.clamp(0.0, 100.0) / 100.0;
+        let r = ((reach * w.max(h) as f32 / 1.7).round() as usize).max(1);
+        let mut planes: [Vec<f32>; 3] = std::array::from_fn(|c| light.iter().map(|p| p[c]).collect());
+        for p in &mut planes {
+            for _ in 0..3 {
+                *p = super::local::box_blur_par(p, w, h, r);
+            }
+        }
+        let light = (0..w * h).map(|i| [planes[0][i], planes[1][i], planes[2][i]]).collect();
+        Some(Glow { w, h, factor: f as f32, light, amount: 1.5 * e.glow_amount.min(100.0) / 100.0 })
+    }
+
+    /// Pixel `d` (display-linear) at (x, y) with the glow screened over it.
+    #[inline]
+    pub(super) fn apply(&self, d: [f32; 3], x: usize, y: usize) -> [f32; 3] {
+        let fx = ((x as f32 + 0.5) / self.factor - 0.5).clamp(0.0, (self.w - 1) as f32);
+        let fy = ((y as f32 + 0.5) / self.factor - 0.5).clamp(0.0, (self.h - 1) as f32);
+        let (x0, y0) = (fx as usize, fy as usize);
+        let (x1, y1) = ((x0 + 1).min(self.w - 1), (y0 + 1).min(self.h - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let at = |x: usize, y: usize, c: usize| self.light[y * self.w + x][c];
+        std::array::from_fn(|c| {
+            let top = at(x0, y0, c) + tx * (at(x1, y0, c) - at(x0, y0, c));
+            let bottom = at(x0, y1, c) + tx * (at(x1, y1, c) - at(x0, y1, c));
+            let g = ((top + ty * (bottom - top)) * self.amount).clamp(0.0, 1.0);
+            // Screen: lifts darker pixels most, never past white.
+            let v = d[c].clamp(0.0, 1.0);
+            v + g * (1.0 - v)
+        })
+    }
 }
 
 #[cfg(test)]

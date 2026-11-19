@@ -13,21 +13,15 @@ pub(super) struct HazeMap {
     w: usize,
     h: usize,
     factor: f32,
-    /// Transmission: 1 = no haze, near 0 = all haze.
-    t: Vec<f32>,
+    /// The dark channel over the airlight (smoothed): 0 = no haze, 1 = all haze.
+    dark: Vec<f32>,
     /// The haze's colour (linear working space).
     pub airlight: [f32; 3],
 }
 
 impl HazeMap {
     /// Build from `rgb(x, y)`, linear working-space pixels of a `width × height` image.
-    /// `amount` 0..1: how much of the haze to remove.
-    pub fn build(
-        width: usize,
-        height: usize,
-        amount: f32,
-        rgb: impl Fn(usize, usize) -> [f32; 3] + Sync,
-    ) -> HazeMap {
+    pub fn build(width: usize, height: usize, rgb: impl Fn(usize, usize) -> [f32; 3] + Sync) -> HazeMap {
         let f = (width.max(height) as f32 / MAP_PX as f32).max(1.0).ceil() as usize;
         let (w, h) = (width.div_ceil(f), height.div_ceil(f));
         let step = (f / 3).max(1);
@@ -82,28 +76,29 @@ impl HazeMap {
             .collect();
         // Smooth the blocky minimum so it shows no edges of its own.
         let dark = super::local::box_blur_par(&dark, w, h, 3);
-        let t = dark.iter().map(|d| (1.0 - 0.95 * amount * d).clamp(0.1, 1.0)).collect();
-        HazeMap { w, h, factor: f as f32, t, airlight }
+        HazeMap { w, h, factor: f as f32, dark, airlight }
     }
 
-    /// Transmission at full-size pixel (x, y), bilinear.
+    /// Transmission at full-size pixel (x, y) when removing `amount` (0..1) of the haze:
+    /// 1 = clear, near 0 = all haze.
     #[inline]
-    pub fn transmission(&self, x: usize, y: usize) -> f32 {
+    pub fn transmission(&self, x: usize, y: usize, amount: f32) -> f32 {
         let fx = ((x as f32 + 0.5) / self.factor - 0.5).clamp(0.0, (self.w - 1) as f32);
         let fy = ((y as f32 + 0.5) / self.factor - 0.5).clamp(0.0, (self.h - 1) as f32);
         let (x0, y0) = (fx as usize, fy as usize);
         let (x1, y1) = ((x0 + 1).min(self.w - 1), (y0 + 1).min(self.h - 1));
         let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-        let at = |x: usize, y: usize| self.t[y * self.w + x];
+        let at = |x: usize, y: usize| self.dark[y * self.w + x];
         let top = at(x0, y0) + tx * (at(x1, y0) - at(x0, y0));
         let bottom = at(x0, y1) + tx * (at(x1, y1) - at(x0, y1));
-        top + ty * (bottom - top)
+        let dark = top + ty * (bottom - top);
+        (1.0 - 0.95 * amount * dark).clamp(0.1, 1.0)
     }
 
-    /// Remove the haze from pixel `p` at (x, y).
+    /// Remove `amount` (0..1) of the haze from pixel `p` at (x, y).
     #[inline]
-    pub fn clear(&self, p: [f32; 3], x: usize, y: usize) -> [f32; 3] {
-        let t = self.transmission(x, y);
+    pub fn clear(&self, p: [f32; 3], x: usize, y: usize, amount: f32) -> [f32; 3] {
+        let t = self.transmission(x, y, amount);
         let a = self.airlight;
         [0, 1, 2].map(|k| ((p[k] - a[k]) / t + a[k]).max(0.0))
     }

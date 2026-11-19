@@ -25,10 +25,11 @@ pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, T
 pub use detail::{Detail, DetailParam, SharpenView};
 pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
-pub use heal::{Spot, SpotMode, find_source};
+pub use heal::{Fill, FillInput, Spot, SpotMode, fill_decode, fill_encode, fill_input, find_source};
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use masks::{
-    CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke, save_mask_picture, set_mask_store,
+    CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke, save_fill_picture,
+    save_mask_picture, set_mask_store,
 };
 pub use pipeline::{
     Region, auto_tone, render_linear16, render_mask, render_region_srgb8, render_region_srgb8_view,

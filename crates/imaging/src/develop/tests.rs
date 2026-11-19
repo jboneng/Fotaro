@@ -864,6 +864,7 @@ fn ai_masks_follow_the_photos_edges_and_regions_still_match() {
         let d = ((x as f32 + 0.5) * 8.0 - cx).hypot((y as f32 + 0.5) * 8.0 - cy);
         image::Luma([((0.5 - (d - radius) / 32.0).clamp(0.0, 1.0) * 255.0) as u8])
     });
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let store = tempfile::tempdir().unwrap();
     set_mask_store(Some(store.path().to_path_buf()));
     save_mask_picture("test-disc", &picture).unwrap();
@@ -897,3 +898,260 @@ fn ai_masks_follow_the_photos_edges_and_regions_still_match() {
     assert_eq!(render_srgb8(&w, &gone), render_srgb8(&w, &DevelopSettings::default()));
     set_mask_store(None);
 }
+
+/// A mask over the left part of the photo (full left of 45%, none right of 55%).
+fn left_mask(adjust: impl Fn(&mut LocalAdjust)) -> Mask {
+    let mut m = Mask::new("Mask 1", Shape::Linear { start: [0.45, 0.5], end: [0.55, 0.5] });
+    adjust(&mut m.adjust);
+    m
+}
+
+#[test]
+fn masked_clarity_texture_and_dehaze_act_only_inside_and_regions_still_match() {
+    let left = |x0: u32| x0..x0 + 100;
+    let rows = 80..220;
+    for (pattern, set) in [
+        (patterned(16, 0), (|a: &mut LocalAdjust| a.clarity = 80.0) as fn(&mut LocalAdjust)),
+        (patterned(0, 12), |a: &mut LocalAdjust| a.texture = 80.0),
+    ] {
+        let img = rendered(&pattern);
+        let base = render_srgb8(&img, &DevelopSettings::default());
+        let s = DevelopSettings { masks: vec![left_mask(set)], ..Default::default() };
+        let out = render_srgb8(&img, &s);
+        let (inside, before) =
+            (spread_in(&out, left(40), rows.clone()), spread_in(&base, left(40), rows.clone()));
+        assert!(inside > before * 1.15, "{inside} vs {before}");
+        // Right of the gradient: untouched.
+        for (x, y) in [(300, 100), (360, 200), (250, 150)] {
+            assert_eq!(out.get_pixel(x, y), base.get_pixel(x, y));
+        }
+    }
+
+    // Dehaze on a hazy photo: clearer (more contrast) on the left only; negative adds haze.
+    let hazy: RgbImage = ImageBuffer::from_fn(400, 300, |x, y| {
+        let v = if (x / 30 + y / 30) % 2 == 0 { 170 } else { 200 };
+        Rgb([v - 10, v, v + 20])
+    });
+    let img = rendered(&hazy);
+    let base = render_srgb8(&img, &DevelopSettings::default());
+    for (amount, more) in [(70.0, true), (-70.0, false)] {
+        let s = DevelopSettings { masks: vec![left_mask(|a| a.dehaze = amount)], ..Default::default() };
+        let out = render_srgb8(&img, &s);
+        let (inside, before) =
+            (spread_in(&out, left(20), rows.clone()), spread_in(&base, left(20), rows.clone()));
+        if more {
+            assert!(inside > before * 1.2, "{inside} vs {before}");
+        } else {
+            assert!(inside < before * 0.8, "{inside} vs {before}");
+        }
+        assert_eq!(out.get_pixel(320, 150), base.get_pixel(320, 150));
+    }
+
+    // All three with the global ones on too: a region across the gradient matches the whole
+    // render (also through Detail's path).
+    let img = rendered(&patterned(16, 12));
+    let mut s = DevelopSettings {
+        clarity: 20.0,
+        texture: -10.0,
+        dehaze: 10.0,
+        masks: vec![left_mask(|a| (a.clarity, a.texture, a.dehaze) = (60.0, 50.0, 40.0))],
+        ..Default::default()
+    };
+    for sharpen in [0.0, 40.0] {
+        s.detail.sharpen_amount = sharpen;
+        let whole = render_srgb8(&img, &s);
+        let region = Region { x: 120, y: 60, w: 160, h: 120 };
+        let part = render_region_srgb8(&img, &s, region);
+        for y in 0..region.h {
+            for x in 0..region.w {
+                let (p, q) = (part.get_pixel(x, y), whole.get_pixel(x + region.x, y + region.y));
+                assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn masked_sharpness_noise_and_color_act_only_inside_and_regions_still_match() {
+    let rows = 80..220;
+    let img = rendered(&patterned(0, 12));
+    let base = render_srgb8(&img, &DevelopSettings::default());
+    let spread = |i: &RgbImage| spread_in(i, 40..140, rows.clone());
+    let with = |set: fn(&mut LocalAdjust)| {
+        render_srgb8(&img, &DevelopSettings { masks: vec![left_mask(set)], ..Default::default() })
+    };
+    // Sharpness: more fine contrast inside; negative softens. Noise: smooths the fine
+    // pattern (it reads as noise). Outside: untouched.
+    let sharper = with(|a| a.sharpness = 80.0);
+    let softer = with(|a| a.sharpness = -80.0);
+    let smooth = with(|a| a.noise = 100.0);
+    assert!(spread(&sharper) > spread(&base) * 1.1, "{} vs {}", spread(&sharper), spread(&base));
+    assert!(spread(&softer) < spread(&base) * 0.8, "{} vs {}", spread(&softer), spread(&base));
+    assert!(spread(&smooth) < spread(&base) * 0.8, "{} vs {}", spread(&smooth), spread(&base));
+    for out in [&sharper, &softer, &smooth] {
+        for (x, y) in [(300, 100), (360, 200), (250, 150)] {
+            assert_eq!(out.get_pixel(x, y), base.get_pixel(x, y));
+        }
+    }
+
+    // Color: a blue swatch tints the inside blue, not the outside.
+    let blue = with(|a| a.color = Some([240.0, 80.0]));
+    let (p, q) = (blue.get_pixel(60, 150), base.get_pixel(60, 150));
+    assert!(i32::from(p[2]) - i32::from(p[0]) > i32::from(q[2]) - i32::from(q[0]) + 10, "{p:?} vs {q:?}");
+    assert_eq!(blue.get_pixel(330, 150), base.get_pixel(330, 150));
+
+    // With global Detail too: a region across the gradient matches the whole render.
+    let mut s = DevelopSettings {
+        masks: vec![left_mask(|a| (a.sharpness, a.noise, a.color) = (60.0, 40.0, Some([30.0, 50.0])))],
+        ..Default::default()
+    };
+    for amount in [0.0, 40.0] {
+        s.detail.sharpen_amount = amount;
+        let whole = render_srgb8(&img, &s);
+        let region = Region { x: 120, y: 60, w: 160, h: 120 };
+        let part = render_region_srgb8(&img, &s, region);
+        for y in 0..region.h {
+            for x in 0..region.w {
+                let (p, q) = (part.get_pixel(x, y), whole.get_pixel(x + region.x, y + region.y));
+                assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn glow_spreads_light_around_bright_areas_and_regions_still_match() {
+    // A dark room with a bright lamp (a white square) and a mid-grey patch.
+    let scene: RgbImage = ImageBuffer::from_fn(400, 300, |x, y| {
+        if (180..220).contains(&x) && (130..170).contains(&y) {
+            Rgb([255, 255, 255])
+        } else if (40..80).contains(&x) && (40..80).contains(&y) {
+            Rgb([130, 130, 130])
+        } else {
+            Rgb([25, 25, 25])
+        }
+    });
+    let img = rendered(&scene);
+    let base = render_srgb8(&img, &DevelopSettings::default());
+    let glow = |amount: f32, range: f32, warmth: f32| {
+        let mut s = DevelopSettings::default();
+        (s.effects.glow_amount, s.effects.glow_range, s.effects.glow_warmth) = (amount, range, warmth);
+        s
+    };
+    // Off: nothing changes (and Glow's other sliders alone do nothing).
+    assert_eq!(render_srgb8(&img, &glow(0.0, 100.0, 80.0)), base);
+    let s = glow(80.0, 50.0, 0.0);
+    let out = render_srgb8(&img, &s);
+    let g = |i: &RgbImage, x, y| i32::from(i.get_pixel(x, y)[1]);
+    // Next to the lamp: lifted; far from it: about the same.
+    assert!(g(&out, 230, 150) > g(&base, 230, 150) + 15, "{} vs {}", g(&out, 230, 150), g(&base, 230, 150));
+    assert!(g(&out, 380, 20) <= g(&base, 380, 20) + 3, "{} vs {}", g(&out, 380, 20), g(&base, 380, 20));
+    // Range: at 0 only the brightest glow (not the grey patch); at 100 the patch does too.
+    let near_patch = |s: &DevelopSettings| g(&render_srgb8(&img, s), 90, 60) - g(&base, 90, 60);
+    assert!(near_patch(&glow(80.0, 100.0, 0.0)) > near_patch(&glow(80.0, 0.0, 0.0)) + 3);
+    // Warmth: a warmer glow is redder than a cooler one.
+    let rb = |s: &DevelopSettings| {
+        let p = *render_srgb8(&img, s).get_pixel(232, 150);
+        i32::from(p[0]) - i32::from(p[2])
+    };
+    assert!(rb(&glow(80.0, 50.0, 100.0)) > rb(&glow(80.0, 50.0, -100.0)) + 10);
+
+    // A region renders like that part of the whole (also with Detail).
+    let mut s = s;
+    for amount in [0.0, 40.0] {
+        s.detail.sharpen_amount = amount;
+        let whole = render_srgb8(&img, &s);
+        let region = Region { x: 150, y: 100, w: 140, h: 100 };
+        let part = render_region_srgb8(&img, &s, region);
+        for y in 0..region.h {
+            for x in 0..region.w {
+                let (p, q) = (part.get_pixel(x, y), whole.get_pixel(x + region.x, y + region.y));
+                assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn remove_spots_show_their_fill_inside_only_and_follow_their_shape() {
+    // A gradient photo with a dark blob to remove.
+    let photo: RgbImage = ImageBuffer::from_fn(300, 200, |x, y| {
+        let d = (x as f32 - 150.0).hypot(y as f32 - 100.0);
+        if d < 15.0 { Rgb([20, 20, 20]) } else { Rgb([(80 + x / 3) as u8, 120, (200 - y / 2) as u8]) }
+    });
+    let img = rendered(&photo);
+    let spot = Spot {
+        mode: SpotMode::Remove,
+        points: vec![[0.5, 0.5]],
+        size: 0.15, // 22.5 px
+        feather: 0.0,
+        opacity: 100.0,
+        ..Spot::default()
+    };
+    assert!(spot.needs_fill());
+    // Without a fill, nothing changes.
+    let plain = render_srgb8(&img, &DevelopSettings::default());
+    let mut s = DevelopSettings { spots: vec![spot.clone()], ..Default::default() };
+    assert_eq!(render_srgb8(&img, &s), plain);
+
+    // The input the model sees: a square around the spot, the hole marked.
+    let input = fill_input(&img, &s.spots, 0, [1.0; 3]).unwrap();
+    let (iw, ih) = input.image.dimensions();
+    assert_eq!(iw, ih);
+    assert_eq!(input.mask.get_pixel(iw / 2, ih / 2)[0], 255);
+    assert_eq!(input.mask.get_pixel(2, 2)[0], 0);
+    // A "model" that fills the hole with the colour just left of the blob.
+    let left = *input.image.get_pixel(iw / 2 - 30, ih / 2);
+    let mut filled = input.image.clone();
+    for (x, y, p) in filled.enumerate_pixels_mut() {
+        if input.mask.get_pixel(x, y)[0] > 127 {
+            *p = left;
+        }
+    }
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_fill_picture("test-fill", &filled).unwrap();
+    s.spots[0].fill = Some(Fill {
+        id: "test-fill".into(),
+        rect: input.rect,
+        gains: input.gains,
+        made_for: spot.shape_key(),
+        model: "test".into(),
+    });
+    assert!(!s.spots[0].needs_fill());
+    let out = render_srgb8(&img, &s);
+    // The blob is gone (about the colour beside it); away from the spot, nothing changed.
+    let (c, beside) = (out.get_pixel(150, 100), plain.get_pixel(120, 100));
+    assert!((0..3).all(|k| c[k].abs_diff(beside[k]) <= 6), "{c:?} vs {beside:?}");
+    assert_eq!(out.get_pixel(40, 30), plain.get_pixel(40, 30));
+    assert_eq!(out.get_pixel(150, 160), plain.get_pixel(150, 160));
+    // Half opacity: halfway (in linear light, so not the midpoint of the encoded values).
+    let mut half = s.clone();
+    half.spots[0].opacity = 50.0;
+    let h = render_srgb8(&img, &half);
+    assert!(h.get_pixel(150, 100)[1] > plain.get_pixel(150, 100)[1] + 20);
+    assert!(h.get_pixel(150, 100)[1] < out.get_pixel(150, 100)[1]);
+    // A region renders like that part of the whole.
+    let region = Region { x: 110, y: 60, w: 80, h: 80 };
+    let part = render_region_srgb8(&img, &s, region);
+    for y in 0..region.h {
+        for x in 0..region.w {
+            assert_eq!(part.get_pixel(x, y), out.get_pixel(x + region.x, y + region.y), "({x}, {y})");
+        }
+    }
+    // Moved: the fill no longer fits, so it isn't shown (until a new one is made).
+    let mut moved = s.clone();
+    moved.spots[0].points = vec![[0.3, 0.5]];
+    assert!(moved.spots[0].needs_fill());
+    assert_eq!(render_srgb8(&img, &moved), plain);
+    // Saved and read back, with and without the fill (older settings have none).
+    let back = DevelopSettings::from_json(&s.to_json()).unwrap();
+    assert_eq!(back.spots[0].fill, s.spots[0].fill);
+    let old = r#"{"spots":[{"mode":"Heal","points":[[0.5,0.5]],"size":0.02}]}"#;
+    assert!(DevelopSettings::from_json(old).unwrap().spots[0].fill.is_none());
+    set_mask_store(None);
+}
+
+/// Tests that set the (global) mask and fill picture store take turns.
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

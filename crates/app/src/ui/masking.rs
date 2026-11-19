@@ -729,7 +729,7 @@ fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(MenuPick)) {
 }
 
 /// While an AI mask is being made: what is happening, with a bar or a spinner.
-fn ai_progress(ui: &mut egui::Ui, job: &crate::develop::AiJob) {
+pub(super) fn ai_progress(ui: &mut egui::Ui, job: &crate::develop::AiJob) {
     let (share, what) = job.progress();
     egui::Frame::new()
         .fill(Color32::from_rgb(0x24, 0x34, 0x4a))
@@ -759,13 +759,19 @@ pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     let mut answer = None;
     let modal = egui::Modal::new(egui::Id::unique("ai_consent")).show(ctx, |ui| {
         ui.set_width(380.0);
-        ui.heading(format!("Select {}", kind.label()));
+        let (title, what) = match kind {
+            AiKind::Remove => ("Remove".to_owned(), "the model that fills removed areas".to_owned()),
+            k => (
+                format!("Select {}", k.label()),
+                format!("the model that finds the {}", k.label().to_lowercase()),
+            ),
+        };
+        ui.heading(title);
         ui.add_space(6.0);
         ui.label(format!(
-            "AI masks run on this computer. The first time, they need {:.0} MB downloaded: the \
-             model that finds the {}{}. Nothing about your photos is sent anywhere.",
+            "AI tools run on this computer. The first time, they need {:.0} MB downloaded: \
+             {what}{}. Nothing about your photos is sent anywhere.",
             bytes as f64 / 1e6,
-            kind.label().to_lowercase(),
             if cfg!(windows) && !segment::ready(&[]) {
                 ", and ONNX Runtime with DirectML to run it"
             } else {
@@ -789,7 +795,10 @@ pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     }
     match answer {
         Some(true) => d.start_ai(kind, consent.target, consent.prompt),
-        Some(false) => d.ai_consent = None,
+        Some(false) => {
+            d.fill_declined |= kind == AiKind::Remove;
+            d.ai_consent = None;
+        }
         None => {}
     }
 }
@@ -830,6 +839,8 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
     let job = d.ai_job.clone();
     let mut gpu = d.ai_gpu;
     let mut object_rect = d.object_rect;
+    let thumbs = d.mask_thumbs.clone();
+    let rotation = d.rotation();
     selection(&mut m, &st.masks);
     m.hover = None;
     let frame = egui::Frame::new()
@@ -873,7 +884,7 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                 if st.masks.is_empty() {
                     ui.label(weak("No masks yet. Click + or press K, M or Shift+M, then draw on the photo."));
                 }
-                let mut remove: Option<usize> = None;
+                let (mut remove, mut duplicate): (Option<usize>, Option<usize>) = (None, None);
                 for i in 0..st.masks.len() {
                     let current = m.selected == Some(i);
                     // The mask row: tool glyph, name, and the show / hide switch.
@@ -895,14 +906,68 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                     let visible = st.masks[i].visible;
                     let text = if visible { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
                     let kind = st.masks[i].components.first().map_or(ShapeKind::Brush, |c| kind_of(&c.shape));
-                    tool_icon(painter, rect.left_center() + egui::vec2(13.0, 0.0), 5.5, kind, text);
-                    painter.text(
-                        rect.left_center() + egui::vec2(28.0, 0.0),
-                        egui::Align2::LEFT_CENTER,
-                        &st.masks[i].name,
-                        egui::FontId::proportional(13.0),
-                        text,
-                    );
+                    // The thumbnail (the mask white on black), else the tool's glyph.
+                    let name_x = match thumbs.get(i) {
+                        Some(t) => {
+                            let size = super::views::rotated_size(t.size_vec2(), rotation);
+                            let k = (34.0 / size.x).min(22.0 / size.y);
+                            let r =
+                                Rect::from_center_size(rect.left_center() + egui::vec2(21.0, 0.0), size * k);
+                            let tint = if visible { Color32::WHITE } else { Color32::from_gray(110) };
+                            super::views::paint_image(painter, t, r, rotation, tint);
+                            painter.rect_stroke(
+                                r,
+                                0.0,
+                                Stroke::new(1.0, Color32::from_gray(0x60)),
+                                egui::StrokeKind::Outside,
+                            );
+                            44.0
+                        }
+                        None => {
+                            tool_icon(painter, rect.left_center() + egui::vec2(13.0, 0.0), 5.5, kind, text);
+                            28.0
+                        }
+                    };
+                    let name_at = rect.left_center() + egui::vec2(name_x, 0.0);
+                    if m.renaming == Some(i) {
+                        // Renaming: a text field over the name; Enter or clicking away keeps it.
+                        let field = Rect::from_min_max(
+                            egui::pos2(name_at.x, rect.top() + 3.0),
+                            egui::pos2(switch.left() - 6.0, rect.bottom() - 3.0),
+                        );
+                        let edit = ui.put(
+                            field,
+                            egui::TextEdit::singleline(&mut m.rename_text)
+                                .font(egui::FontId::proportional(13.0)),
+                        );
+                        if !edit.has_focus() && !edit.lost_focus() {
+                            edit.request_focus();
+                        }
+                        if edit.lost_focus() {
+                            let name = m.rename_text.trim().to_owned();
+                            let escaped = ui.input(|inp| inp.key_pressed(egui::Key::Escape));
+                            if !name.is_empty() && !escaped && name != st.masks[i].name {
+                                st.masks[i].name = name;
+                                done = true;
+                            }
+                            m.renaming = None;
+                        }
+                    } else {
+                        ui.painter().text(
+                            name_at,
+                            egui::Align2::LEFT_CENTER,
+                            &st.masks[i].name,
+                            egui::FontId::proportional(13.0),
+                            text,
+                        );
+                    }
+                    if resp.double_clicked() {
+                        // The mask the first click selected: that click may have collapsed the
+                        // rows above and moved another mask under the pointer.
+                        let r = m.selected.filter(|&s| s < st.masks.len()).unwrap_or(i);
+                        m.renaming = Some(r);
+                        m.rename_text = st.masks[r].name.clone();
+                    }
                     let toggle = ui
                         .put(switch, |ui: &mut egui::Ui| {
                             super::icons::toggle_switch(ui, visible, switch.size())
@@ -911,7 +976,7 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                     if toggle.clicked() {
                         st.masks[i].visible = !visible;
                         done = true;
-                    } else if resp.clicked() {
+                    } else if resp.clicked() && !resp.double_clicked() {
                         m.selected = Some(i);
                         m.component = 0;
                     }
@@ -919,6 +984,16 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                         m.hover = Some(i);
                     }
                     resp.context_menu(|ui| {
+                        if ui.button("Rename…").clicked() {
+                            m.renaming = Some(i);
+                            m.rename_text = st.masks[i].name.clone();
+                            ui.close();
+                        }
+                        if ui.button("Duplicate Mask").clicked() {
+                            duplicate = Some(i);
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.button("Delete Mask").clicked() {
                             remove = Some(i);
                             ui.close();
@@ -1014,6 +1089,15 @@ pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor
                         }
                     });
                     ui.add_space(4.0);
+                }
+                if let Some(i) = duplicate {
+                    // A copy right below, named like LrC's ("Mask 1 Copy"), selected.
+                    let mut copy = st.masks[i].clone();
+                    copy.name = format!("{} Copy", copy.name);
+                    st.masks.insert(i + 1, copy);
+                    m.selected = Some(i + 1);
+                    m.component = 0;
+                    done = true;
                 }
                 if let Some(i) = remove {
                     st.masks.remove(i);
@@ -1128,12 +1212,7 @@ fn brush_settings(ui: &mut egui::Ui, b: &mut BrushSettings) {
 }
 
 /// One slider of the masking panel; true when the change is finished (to be saved).
-fn mask_row(
-    ui: &mut egui::Ui,
-    st: &mut imaging::develop::DevelopSettings,
-    slider: Slider,
-    enabled: bool,
-) -> bool {
+fn mask_row(ui: &mut egui::Ui, st: &mut imaging::develop::DevelopSettings, slider: Slider) -> bool {
     let default = match slider {
         Slider::MaskAmount(_) => 100.0,
         Slider::MaskFeather(..) => 50.0,
@@ -1150,24 +1229,11 @@ fn mask_row(
     };
     let spec = Spec { slider, range: slider.range(false), default, log: false, gradient, kelvin: false };
     let mut v = slider.get(st);
-    let r = ui.add_enabled_ui(enabled, |ui| slider_row(ui, &spec, &mut v));
-    if r.inner.changed {
+    let r = slider_row(ui, &spec, &mut v);
+    if r.changed {
         slider.set(st, v);
     }
-    r.inner.done
-}
-
-/// The local sliders that act already (the rest come with Texture, Clarity, Dehaze and
-/// Detail support for masks).
-fn implemented(p: LocalParam) -> bool {
-    !matches!(
-        p,
-        LocalParam::Texture
-            | LocalParam::Clarity
-            | LocalParam::Dehaze
-            | LocalParam::Sharpness
-            | LocalParam::Noise
-    )
+    r.done
 }
 
 /// A section header like the other panels' (title on the right), without collapsing.
@@ -1208,7 +1274,7 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             return;
         };
         let idx = i as u8;
-        if mask_row(ui, &mut st, Slider::MaskAmount(idx), true) {
+        if mask_row(ui, &mut st, Slider::MaskAmount(idx)) {
             done = Some(None);
         }
         // The selected component.
@@ -1228,7 +1294,7 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 }
             });
         });
-        if kind == ShapeKind::Radial && mask_row(ui, &mut st, Slider::MaskFeather(idx, j as u8), true) {
+        if kind == ShapeKind::Radial && mask_row(ui, &mut st, Slider::MaskFeather(idx, j as u8)) {
             done = Some(None);
         }
         // The brush's settings with a brush selected, or while the brush tool waits to paint a
@@ -1252,11 +1318,61 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.painter().rect_filled(line, 0.0, Color32::from_gray(0x2a));
             ui.add_space(4.0);
             for p in group.iter().copied() {
-                if mask_row(ui, &mut st, Slider::Local(idx, p), implemented(p)) {
+                if mask_row(ui, &mut st, Slider::Local(idx, p)) {
                     done = Some(None);
                 }
             }
         }
+        // Color: a swatch that opens a colour wheel (none: a crossed-out swatch).
+        ui.add_space(5.0);
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                egui::vec2(super::develop::LABEL_W, 18.0),
+                egui::Label::new(RichText::new("Color").color(theme::TEXT)),
+            );
+            let color = st.masks[i].adjust.color;
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 18.0), egui::Sense::click());
+            let painter = ui.painter();
+            match color {
+                Some([h, s]) if s > 0.0 => {
+                    let c = imaging::develop::wheel_color(h).map(|v| 1.0 + (v - 1.0) * s / 100.0);
+                    painter.rect_filled(rect, 2.0, super::develop::paint_color(c));
+                }
+                _ => {
+                    painter.rect_filled(rect, 2.0, Color32::from_gray(0x7a));
+                    painter.line_segment(
+                        [rect.left_bottom(), rect.right_top()],
+                        Stroke::new(1.5, Color32::from_rgb(200, 40, 40)),
+                    );
+                }
+            }
+            painter.rect_stroke(rect, 2.0, Stroke::new(1.0, Color32::from_gray(0x20)), egui::StrokeKind::Outside);
+            let resp = resp.on_hover_text("A colour to tint the masked area with");
+            egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                ui.set_max_width(160.0);
+                let [mut h, mut s] = color.unwrap_or([0.0, 0.0]);
+                let id = ui.scope_id().with(("mask_color", i));
+                let moved = super::develop::color_wheel(ui, id, 150.0, &mut h, &mut s);
+                if moved.changed {
+                    st.masks[i].adjust.color = (s > 0.0).then_some([h, s]);
+                }
+                if moved.done {
+                    done = Some(Some(format!("{}: Color", st.masks[i].name)));
+                }
+                ui.horizontal(|ui| {
+                    ui.label(weak(match color {
+                        Some([h, s]) if s > 0.0 => format!("Hue {h:.0}°  ·  Saturation {s:.0}"),
+                        _ => "None".to_owned(),
+                    }));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if color.is_some() && pill(ui, "None", false).clicked() {
+                            st.masks[i].adjust.color = None;
+                            done = Some(Some(format!("{}: Color None", st.masks[i].name)));
+                        }
+                    });
+                });
+            });
+        });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if pill(ui, "Reset Sliders", false).on_hover_text("Set this mask's sliders back to 0").clicked() {
@@ -1293,7 +1409,7 @@ pub(super) fn masking_button(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let n = d.settings.masks.len();
     let (strip, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::hover());
     ui.painter().rect_filled(strip, 0.0, theme::SECTION_HEADER);
-    // Right to left: Masking, then Crop & Straighten.
+    // Right to left: Masking, Remove, Crop & Straighten, Edit.
     let slot = |k: f32| {
         Rect::from_center_size(
             strip.right_center() - egui::vec2(26.0 + 42.0 * k, 0.0),
@@ -1310,6 +1426,21 @@ pub(super) fn masking_button(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         let color = if on || resp.hovered() { theme::TEXT_STRONG } else { theme::TEXT };
         (resp, color)
     };
+    // Edit: back to the panels (no tool open).
+    let editing = d.cropping.is_none() && d.removing.is_none() && d.masking.is_none();
+    let (edit, color) = tool(ui, slot(3.0), editing, "edit_tool");
+    super::icons::sliders(ui.painter(), slot(3.0).center(), 7.5, color);
+    if edit.on_hover_text("Edit: the adjustment panels").clicked() && !editing {
+        if d.cropping.is_some() {
+            super::crop::set_cropping(d, false);
+        }
+        if d.removing.is_some() {
+            super::remove::set_removing(d, false);
+        }
+        if d.masking.is_some() {
+            set_masking(d, false);
+        }
+    }
     let cropping = d.cropping.is_some();
     let (crop, color) = tool(ui, slot(2.0), cropping, "crop_tool");
     super::icons::crop(ui.painter(), slot(2.0).center(), 7.5, color);

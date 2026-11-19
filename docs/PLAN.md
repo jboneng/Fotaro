@@ -595,6 +595,11 @@ All nine steps of the Basic panel plan are done.
       match; grains smaller than a rendered pixel average out (weaker, finer grain in a fit
       view, as in LrC). Applied last, after Detail, so noise reduction doesn't remove it and
       sharpening doesn't sharpen it; strongest in the midtones. Auto Tone ignores Effects.
+- [x] Glow (as in Lightroom 2027 / Camera Raw): Amount, Range (only the brightest
+      highlights .. most light tones), Spread (0.5–8% of the long side), Warmth. The
+      developed photo's bright parts on a ~384-cell map of the whole photo (without the
+      region-only local gains and masks, so every region agrees), blurred, tinted, and
+      screened over after Color Grading. About 25 ms on a proxy render.
 
 ## Develop: Detail preview box and sharpening previews
 - [x] The Detail panel's preview box, as in LrC: the photo at 1:1 around a point (the
@@ -671,7 +676,14 @@ later as another component kind.
    a + menu with keys), the right panel is a section with a header, the brush sliders
    use the standard slider rows, outlines stay on the photo, pins are rings, and Esc
    with a menu open only closes the menu.
-4. [ ] Texture, Clarity, Dehaze, Sharpness, Noise, Color; mask thumbnails, duplicate, rename.
+4. [x] Texture, Clarity, Dehaze (per-pixel amounts: the global value plus each mask's
+   times its value, through the same maps; the haze map keeps the raw dark channel so
+   any strength applies per pixel). Sharpness (unsharp mask, negative blurs) and Noise
+   (edge-preserving smoothing) on the lightness after Detail, per pixel; masks using
+   them take the Detail path. Color: a swatch with Color Grading's wheel, an Oklab tint
+   (eased off in deep shadows). Thumbnails (each mask white on black, from a 96 px copy
+   of the photo in the worker), Rename (double-click or the menu) and Duplicate
+   ("Mask 1 Copy"). An Edit button left of the tools goes back to the panels.
 5. [ ] Auto Mask (edge-aware brush).
 
 ## Develop: Crop & Straighten (R)
@@ -769,3 +781,58 @@ Findings:
    the CPU); "Use GPU for AI" lets the user choose.
 5. [ ] Later: Landscape classes (SegFormer), BiRefNet as a high-quality option on capable
    GPUs, Content-Aware Remove (LaMa inpainting), People.
+
+## Design: Remove (content-aware and generative)
+LrC's Remove tool also has **Remove** (content-aware fill) with a "Use Generative AI"
+option (3 variations). Local models, downloaded on first use like the AI masks.
+
+### Benchmark (2026-11-19, `cargo run -p segment --example inpaintbench --release`)
+ThinkPad P16s Gen 1 (i7-1260P, Intel UHD + **NVIDIA T550 4 GB**). DirectML adapter 0 is
+the Intel GPU, 1 the T550 (`PL_DML_DEVICE`; until now every DirectML run, the masks'
+included, used the Intel GPU). Five removals (a person, a sticker, flags against the sky,
+a cat's eye, a whole ball), cut as the app will: a square around the area, at 512².
+
+| Model | Size | CPU | DirectML (Intel / T550) | Quality |
+|---|---|---|---|---|
+| LaMa fp32 / int8 (Carve export) | 208 / 37 MB | 11–15 s | fails (a 5-D MatMul) | best |
+| LaMa int8 "r4" (4-D rewrite) | 37 MB | 6–14 s | runs (0.7 s) but returns broken pixels | best (on the CPU) |
+| **LaMa-Dilated** (Qualcomm export) | 183 MB | 4 s | **0.37 s** (load 4 s) | good on small areas; smudges on large ones |
+| MI-GAN 512 | 28 MB | 1.3–1.8 s | 0.16 s | weaker: ghosts on large areas, specks |
+| SD 1.5 inpainting fp16 (UNet + VAE) | 1.9 GB | 30 s/step (cfg 5) | 15–22 / 6.6 s a step (cfg 5); 3.5 s (cfg 1) | at 12 steps without guidance: paints new figures, a grey disc on the dark cat; flags fine |
+
+- Content-aware: first LaMa r4, but on DirectML it returns broken pixels (found in the
+  app); now LaMa-Dilated on the GPU, big-LaMa on the CPU as "Best quality" (see below).
+- Generative: SD 1.5 needs ~20 guided steps for usable fills: ~2–2.5 min per variation
+  on the T550, using 3.6 of its 4 GB (one device-removed error after four runs). Not
+  practical as is; see the decision below.
+- Prompts: CLIP embeddings made once ("background, seamless, empty, natural, photo" /
+  "object, person, text, logo, blurry"), in `sd_prompts.bin`.
+- **Decision (2026-11-19):** content-aware Remove with LaMa, one result; no
+  generative and no variations for now (MAT, which gives variations per seed, has no
+  ONNX release). The SD pipeline (`segment::sd`) and the benchmark stay for later.
+
+### Plan
+1. [x] Benchmark (above).
+2. [x] GPU choice: DirectML on the adapter with the most dedicated memory (DXGI; the
+   T550 here), for the masks too (`segment::gpu`; `PL_DML_DEVICE` overrides). The mask
+   models are no faster on the T550 than on the Intel GPU (overhead-bound); heavy models
+   are.
+3. [x] Engine: `SpotMode::Remove` with `Spot::fill` (`Fill`: picture id, area, colour
+   gains, the spot shape it was made for, model). The picture (PNG in the catalog's
+   `masks` folder) is in the colours the model saw, `T(p) = sRGB(p · gains)` (white
+   balance, the crop's 99th percentile to 0.9), and goes back through T⁻¹ onto the
+   photo's own pixels, feathered, at the spot's opacity. A moved or resized spot's fill
+   is ignored until it is made again.
+4. [x] In the app: Remove first among Remove / Heal / Clone (and the default). A new or
+   changed Remove spot is filled on its own, one at a time: the full-size photo (loaded as
+   for 1:1) around the spot → 512² → the model → back (at most 1024 px) → saved, a
+   History step "Remove". Spinner on the spot, progress in the panel, consent before the
+   first download, the model loaded when the tool opens.
+   - Found in testing: the int8 big-LaMa "runs" on DirectML but returns broken (black)
+     pixels on both GPUs. So the default is **LaMa-Dilated** (183 MB, BSD-3, Qualcomm AI
+     Hub's export: dilated convolutions instead of Fourier units): 0.37 s on DirectML,
+     loads in 2–4 s. "Best quality (slower)" uses **big-LaMa on the CPU** (37 MB): ~5 s
+     a fill, ~13 s to load the first time.
+   - On a grainy film scan (a child in the sea), LaMa-Dilated left a pale blur; big-LaMa
+     continued the water cleanly. LaMa-Dilated is fine on small spots; consider making
+     best quality the default.

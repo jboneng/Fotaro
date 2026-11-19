@@ -168,3 +168,14 @@ pub fn remove(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
     ];
     painter.add(Shape::convex_polygon(pad.to_vec(), color, Stroke::NONE));
 }
+
+/// Edit (the panels' sliders): three lines with a knob each, at different places.
+pub fn sliders(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let s = Stroke::new(1.5, color);
+    for (k, knob) in [(-1.0f32, 0.35f32), (0.0, -0.45), (1.0, 0.15)] {
+        let y = k * r * 0.7;
+        painter.line_segment([center + vec2(-r, y), center + vec2(r, y)], s);
+        let at = center + vec2(knob * r, y);
+        painter.circle_filled(at, r * 0.3, color);
+    }
+}

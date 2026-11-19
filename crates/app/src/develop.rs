@@ -38,7 +38,7 @@ pub struct RemoveSettings {
 
 impl Default for RemoveSettings {
     fn default() -> Self {
-        RemoveSettings { mode: imaging::develop::SpotMode::Heal, size: 12.0, feather: 50.0, opacity: 100.0 }
+        RemoveSettings { mode: imaging::develop::SpotMode::Remove, size: 12.0, feather: 50.0, opacity: 100.0 }
     }
 }
 
@@ -245,6 +245,9 @@ pub struct Masking {
     /// A mask hovered in the Masks panel (its overlay shows meanwhile).
     pub hover: Option<usize>,
     pub drag: Option<MaskDrag>,
+    /// The mask whose name is being edited in the Masks panel, and the text so far.
+    pub renaming: Option<usize>,
+    pub rename_text: String,
 }
 
 impl Masking {
@@ -270,6 +273,8 @@ pub enum AiKind {
     Background,
     /// The thing brushed over, boxed or clicked (Segment Anything).
     Object,
+    /// The Remove tool's content-aware fill (LaMa).
+    Remove,
 }
 
 impl AiKind {
@@ -279,6 +284,7 @@ impl AiKind {
             AiKind::Sky => "Sky",
             AiKind::Background => "Background",
             AiKind::Object => "Object",
+            AiKind::Remove => "Remove",
         }
     }
 
@@ -287,6 +293,7 @@ impl AiKind {
             AiKind::Subject | AiKind::Background => segment::AiModel::Subject,
             AiKind::Sky => segment::AiModel::Sky,
             AiKind::Object => segment::AiModel::Object,
+            AiKind::Remove => segment::AiModel::Remove,
         }
     }
 
@@ -295,6 +302,8 @@ impl AiKind {
             segment::AiModel::Subject => "RMBG-1.4",
             segment::AiModel::Sky => "SegFormer-B2",
             segment::AiModel::Object => "SAM 2.1 tiny",
+            segment::AiModel::Remove => "LaMa-Dilated",
+            segment::AiModel::RemoveBest => "big-LaMa",
         }
     }
 }
@@ -477,6 +486,18 @@ enum Request {
     Adjust { photo_id: i64, op: Adjust, settings: DevelopSettings },
     /// A mask's values over the proxy, for the red overlay.
     Overlay { photo_id: i64, settings: DevelopSettings, index: usize, seq: u64 },
+    /// Remove: fill spot `index` (its shape `key`) from the full-size photo.
+    Fill {
+        photo_id: i64,
+        job: AiJob,
+        index: usize,
+        key: u64,
+        settings: DevelopSettings,
+        gpu: bool,
+        best: bool,
+    },
+    /// Small pictures of every mask (the Masks panel's thumbnails).
+    Thumbs { photo_id: i64, settings: DevelopSettings, seq: u64 },
     /// Make an AI mask of the photo developed with `settings`.
     Select { photo_id: i64, job: AiJob, settings: DevelopSettings, rotation: u8, gpu: bool },
 }
@@ -561,6 +582,18 @@ enum Reply {
         photo_id: i64,
         error: String,
     },
+    /// A Remove spot's fill (for the spot shape `key`), or why it failed.
+    Filled {
+        photo_id: i64,
+        key: u64,
+        result: std::result::Result<imaging::develop::Fill, String>,
+    },
+    /// The masks' thumbnails, in order.
+    Thumbs {
+        photo_id: i64,
+        seq: u64,
+        images: Vec<egui::ColorImage>,
+    },
     /// An AI mask's picture (its id, and the device that made it), or why it failed.
     Selected {
         photo_id: i64,
@@ -624,6 +657,9 @@ fn color_image(rgb: &image::RgbImage) -> egui::ColorImage {
 /// the proxy carry on meanwhile.
 type FullLoaded = (i64, Result<WorkingImage, String>);
 
+/// Long side of the masks' thumbnails, in pixels.
+const THUMB_PX: u32 = 96;
+
 fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut current: Option<(i64, WorkingImage)> = None;
     // The current photo's file, the full-size image once loaded, and whether it's loading.
@@ -638,6 +674,10 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut adjusts: Vec<(i64, Adjust, DevelopSettings)> = Vec::new();
     let mut overlay: Option<(i64, DevelopSettings, usize, u64)> = None;
     let mut selects: Vec<(i64, AiJob, DevelopSettings, u8, bool)> = Vec::new();
+    let mut thumbs: Option<(i64, DevelopSettings, u64)> = None;
+    let mut fills: Vec<(i64, AiJob, usize, u64, DevelopSettings, bool, bool)> = Vec::new();
+    // The photo small, for thumbnails.
+    let mut small: Option<(i64, WorkingImage)> = None;
     loop {
         let first = crossbeam_channel::select! {
             recv(rx) -> req => match req {
@@ -674,6 +714,10 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 Request::Adjust { photo_id, op, settings } => adjusts.push((photo_id, op, settings)),
                 Request::Overlay { photo_id, settings, index, seq } => {
                     overlay = Some((photo_id, settings, index, seq))
+                }
+                Request::Thumbs { photo_id, settings, seq } => thumbs = Some((photo_id, settings, seq)),
+                Request::Fill { photo_id, job, index, key, settings, gpu, best } => {
+                    fills.push((photo_id, job, index, key, settings, gpu, best))
                 }
                 Request::Select { photo_id, job, settings, rotation, gpu } => {
                     selects.push((photo_id, job, settings, rotation, gpu))
@@ -717,6 +761,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         adjusts.retain(|a| Some(a.0) == wanted);
         overlay = overlay.filter(|o| Some(o.0) == wanted);
         selects.retain(|s| Some(s.0) == wanted);
+        thumbs = thumbs.filter(|t| Some(t.0) == wanted);
+        fills.retain(|f| Some(f.0) == wanted);
         let Some((id, img)) = &current else {
             ctx.request_repaint();
             continue;
@@ -815,6 +861,55 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
             let _ = tx.send(Reply::Overlay { photo_id, seq, image });
         }
+        // Remove fills: from the full-size photo (loading it first), then the model on a
+        // thread of its own.
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut fills)
+            .into_iter()
+            .partition(|f| full.as_ref().is_some_and(|(fid, _)| *fid == f.0));
+        fills = waiting;
+        if let Some(f) = fills.first() {
+            load_full(&mut full_loading, &source, f.0, &full_tx, &ctx);
+        }
+        for (photo_id, job, index, key, settings, gpu, best) in ready {
+            let Some((_, full_img)) = &full else { continue };
+            let wb = full_img.resolve_wb(&settings).multipliers;
+            let input = imaging::develop::fill_input(full_img, &settings.spots, index, wb);
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            std::thread::Builder::new()
+                .name("ai-remove".into())
+                .spawn(move || {
+                    let result = match input {
+                        Some(input) => run_fill(photo_id, &job, input, key, best, gpu, &ctx),
+                        None => Err(anyhow::anyhow!("the spot is outside the photo")),
+                    };
+                    let _ = tx.send(Reply::Filled {
+                        photo_id,
+                        key,
+                        result: result.map_err(|e| format!("{e:#}")),
+                    });
+                    ctx.request_repaint();
+                })
+                .expect("start a Remove thread");
+        }
+        // The Masks panel's thumbnails: each mask white on black, from the photo made small
+        // (its brush and AI rasters are cached with it).
+        if let Some((photo_id, settings, seq)) = thumbs.take_if(|t| t.0 == *id) {
+            if small.as_ref().is_none_or(|(sid, _)| *sid != photo_id) {
+                small = Some((photo_id, img.downscaled(THUMB_PX)));
+            }
+            if let Some((_, little)) = &small {
+                let images = (0..settings.masks.len())
+                    .map(|i| {
+                        let m = render_mask(little, &settings, i)
+                            .unwrap_or_else(|| image::GrayImage::new(little.width(), little.height()));
+                        let (w, h) = (m.width() as usize, m.height() as usize);
+                        let rgb: Vec<u8> = m.as_raw().iter().flat_map(|v| [*v, *v, *v]).collect();
+                        egui::ColorImage::from_rgb([w, h], &rgb)
+                    })
+                    .collect();
+                let _ = tx.send(Reply::Thumbs { photo_id, seq, images });
+            }
+        }
         // 1:1: render the regions from the full-size image, loading that first.
         for target in [RegionTarget::DetailBox, RegionTarget::Zoom] {
             let Some((photo_id, view, seq)) = pending_regions
@@ -835,24 +930,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                     let _ = tx.send(Reply::Region { photo_id, target, seq, view, image });
                 }
                 _ => {
-                    if full_loading != Some(photo_id)
-                        && let Some((_, path, kind)) = source.clone().filter(|s| s.0 == photo_id)
-                    {
-                        full_loading = Some(photo_id);
-                        let full_tx = full_tx.clone();
-                        let ctx = ctx.clone();
-                        std::thread::spawn(move || {
-                            let started = std::time::Instant::now();
-                            let result = WorkingImage::load(&path, kind, None).map(|(img, _)| img);
-                            log::debug!(
-                                "develop: full size of {} in {:.1?}",
-                                path.display(),
-                                started.elapsed()
-                            );
-                            let _ = full_tx.send((photo_id, result.map_err(|e| format!("{e:#}"))));
-                            ctx.request_repaint();
-                        });
-                    }
+                    load_full(&mut full_loading, &source, photo_id, &full_tx, &ctx);
                     pending_regions.insert(target, (photo_id, view, seq));
                 }
             }
@@ -928,6 +1006,11 @@ pub struct DevelopState {
     overlay_seq: u64,
     overlay_shown: u64,
     pub overlay: Option<egui::TextureHandle>,
+    /// The masks' thumbnails (in order), and what they were last asked for.
+    pub mask_thumbs: Vec<egui::TextureHandle>,
+    thumbs_sent: Option<Vec<imaging::develop::Mask>>,
+    thumbs_seq: u64,
+    thumbs_shown: u64,
     /// Upright Guided: the guide being drawn or moved on the photo.
     pub guide_drag: Option<GuideDrag>,
     /// AI masks: run on the GPU (DirectML) when possible; the mask being made; and one
@@ -935,6 +1018,14 @@ pub struct DevelopState {
     pub ai_gpu: bool,
     pub ai_job: Option<AiJob>,
     pub ai_consent: Option<AiConsent>,
+    /// Remove: the fill being made (and the spot shape it is for), shapes that failed
+    /// (not tried again), and whether the user agreed to (or declined) the download.
+    pub fill_job: Option<(AiJob, u64)>,
+    fill_failed: Vec<u64>,
+    pub fill_allowed: bool,
+    pub fill_declined: bool,
+    /// Remove at best quality (big-LaMa on the CPU) instead of fast (LaMa-Dilated).
+    pub remove_best: bool,
     /// Select Object draws a rectangle (else it brushes over the object).
     pub object_rect: bool,
     /// The photo's catalog rotation (clockwise quarter turns): AI models see it upright.
@@ -1020,10 +1111,19 @@ impl DevelopState {
             overlay_seq: 0,
             overlay_shown: 0,
             overlay: None,
+            mask_thumbs: Vec::new(),
+            thumbs_sent: None,
+            thumbs_seq: 0,
+            thumbs_shown: 0,
             guide_drag: None,
             ai_gpu: true,
             ai_job: None,
             ai_consent: None,
+            fill_job: None,
+            fill_failed: Vec::new(),
+            fill_allowed: false,
+            fill_declined: false,
+            remove_best: false,
             object_rect: false,
             rotation: 0,
             changed_at: std::time::Instant::now(),
@@ -1036,6 +1136,11 @@ impl DevelopState {
             history: Vec::new(),
             redo: Vec::new(),
         }
+    }
+
+    /// The photo's catalog rotation (clockwise quarter turns).
+    pub fn rotation(&self) -> u8 {
+        self.rotation
     }
 
     pub fn kelvin(&self) -> bool {
@@ -1054,6 +1159,8 @@ impl DevelopState {
         self.rotation = photo.rotation;
         self.ai_job = None;
         self.ai_consent = None;
+        self.fill_job = None;
+        self.fill_failed.clear();
         self.info = None;
         self.textures.clear();
         self.regions.clear();
@@ -1065,6 +1172,8 @@ impl DevelopState {
         self.removing = None;
         self.overlay_sent = None;
         self.overlay = None;
+        self.mask_thumbs.clear();
+        self.thumbs_sent = None;
         self.histogram = None;
         self.wb = None;
         self.error = None;
@@ -1146,6 +1255,14 @@ impl DevelopState {
             self.seq += 1;
             self.sent.insert(slot, (settings.clone(), clipping, view, self.seq));
             let _ = self.tx.send(Request::Render { photo_id, slot, settings, clipping, view, seq: self.seq });
+        }
+        self.request_fills();
+        // The Masks panel's thumbnails, while it is open and the masks changed.
+        if self.masking.is_some() && self.thumbs_sent.as_ref() != Some(&self.settings.masks) {
+            self.thumbs_seq += 1;
+            self.thumbs_sent = Some(self.settings.masks.clone());
+            let settings = self.settings.clone();
+            let _ = self.tx.send(Request::Thumbs { photo_id, settings, seq: self.thumbs_seq });
         }
         // The mask overlay (masking with O on, or a mask hovered in the Masks panel).
         match self.masking.as_ref().and_then(Masking::overlay_mask).filter(|_| !self.before) {
@@ -1245,6 +1362,39 @@ impl DevelopState {
                         _ => self.overlay = Some(ctx.load_texture("develop_mask_overlay", image, opts)),
                     }
                 }
+                Reply::Filled { photo_id, key, result } if Some(photo_id) == self.photo => {
+                    if self.fill_job.as_ref().is_some_and(|(_, k)| *k == key) {
+                        self.fill_job = None;
+                    }
+                    match result {
+                        Ok(fill) => changed = changed.or(self.add_fill(catalog, key, fill)?),
+                        Err(e) => {
+                            log::warn!("Remove: {e}");
+                            self.fill_failed.push(key);
+                            self.error = Some(format!("Couldn't remove: {e}"));
+                        }
+                    }
+                    self.request_renders();
+                }
+                Reply::Thumbs { photo_id, seq, images } if Some(photo_id) == self.photo => {
+                    if seq < self.thumbs_shown {
+                        continue;
+                    }
+                    self.thumbs_shown = seq;
+                    let opts = egui::TextureOptions::LINEAR;
+                    self.mask_thumbs.truncate(images.len());
+                    for (k, image) in images.into_iter().enumerate() {
+                        match self.mask_thumbs.get_mut(k) {
+                            Some(t) if t.size() == image.size => t.set(image, opts),
+                            Some(t) => *t = ctx.load_texture(format!("mask_thumb_{k}"), image, opts),
+                            None => self.mask_thumbs.push(ctx.load_texture(
+                                format!("mask_thumb_{k}"),
+                                image,
+                                opts,
+                            )),
+                        }
+                    }
+                }
                 Reply::Failed { photo_id, error } if Some(photo_id) == self.photo => {
                     log::warn!("develop: {error}");
                     self.error = Some(error);
@@ -1266,6 +1416,59 @@ impl DevelopState {
             }
         }
         Ok(changed)
+    }
+
+    /// Remove: start filling the first Remove spot that needs a fill (one at a time),
+    /// asking before the model's first download.
+    fn request_fills(&mut self) {
+        let Some(photo_id) = self.photo else { return };
+        if self.fill_job.is_some() || self.ai_consent.is_some() || self.fill_declined {
+            return;
+        }
+        let Some((index, key)) = self
+            .settings
+            .spots
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.needs_fill() && !self.fill_failed.contains(&s.shape_key()))
+            .map(|(i, s)| (i, s.shape_key()))
+        else {
+            return;
+        };
+        let model = if self.remove_best { segment::AiModel::RemoveBest } else { segment::AiModel::Remove };
+        if !self.fill_allowed && !segment::ready(&[model]) {
+            let bytes = segment::download_size(&[model]);
+            self.ai_consent =
+                Some(AiConsent { kind: AiKind::Remove, target: ToolTarget::NewMask, prompt: None, bytes });
+            return;
+        }
+        let job = AiJob {
+            kind: AiKind::Remove,
+            target: ToolTarget::NewMask,
+            prompt: None,
+            progress: Default::default(),
+        };
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Removing…".into());
+        let settings = self.settings.clone();
+        let (gpu, best) = (self.ai_gpu, self.remove_best);
+        let _ = self.tx.send(Request::Fill { photo_id, job: job.clone(), index, key, settings, gpu, best });
+        self.fill_job = Some((job, key));
+    }
+
+    /// A fill arrived: put it on the spot it was made for (if it is still that shape) and
+    /// save.
+    fn add_fill(&mut self, catalog: &mut Catalog, key: u64, fill: imaging::develop::Fill) -> Result<Changed> {
+        let mut st = self.settings.clone();
+        let Some(spot) = st
+            .spots
+            .iter_mut()
+            .find(|s| s.mode == imaging::develop::SpotMode::Remove && s.shape_key() == key)
+        else {
+            return Ok(None);
+        };
+        spot.fill = Some(fill);
+        self.set_live(st);
+        self.commit(catalog, Some("Remove".into()))
     }
 
     /// Select Subject / Sky / Background (as a new mask, or a component of the selected
@@ -1293,6 +1496,12 @@ impl DevelopState {
 
     /// Make an AI mask (downloading first whatever it still needs).
     pub fn start_ai(&mut self, kind: AiKind, target: ToolTarget, prompt: Option<ObjectPrompt>) {
+        if kind == AiKind::Remove {
+            // Remove's fills start on their own once the download is allowed.
+            (self.fill_allowed, self.ai_consent) = (true, None);
+            self.request_renders();
+            return;
+        }
         let Some(photo_id) = self.photo else { return };
         self.ai_consent = None;
         let job = AiJob { kind, target, prompt, progress: Default::default() };
@@ -1597,6 +1806,77 @@ impl DevelopState {
         self.before = before;
         self.request_renders();
     }
+}
+
+/// Remove: fill a spot with the model (downloading it first if needed), save the picture,
+/// and describe the fill for spot shape `key`.
+fn run_fill(
+    photo_id: i64,
+    job: &AiJob,
+    input: imaging::develop::FillInput,
+    key: u64,
+    best: bool,
+    gpu: bool,
+    ctx: &egui::Context,
+) -> Result<imaging::develop::Fill> {
+    use image::imageops::{FilterType, resize};
+    let set = |share: f32, what: String| {
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
+        ctx.request_repaint();
+    };
+    let model = if best { segment::AiModel::RemoveBest } else { segment::AiModel::Remove };
+    if !segment::ready(&[model]) {
+        let mut last = std::time::Instant::now();
+        segment::ensure(&[model], &mut |share, what| {
+            if last.elapsed().as_millis() > 100 {
+                last = std::time::Instant::now();
+                set(share, format!("Downloading {what}"));
+            }
+        })?;
+    }
+    set(-1.0, if best { "Removing (best quality, a few seconds)…".into() } else { "Removing…".into() });
+    let started = std::time::Instant::now();
+    let s = segment::inpaint::SIZE;
+    let img = resize(&input.image, s, s, FilterType::Lanczos3);
+    // The hole a pixel larger after scaling: what the spot touches at all.
+    let mask = resize(&input.mask, s, s, FilterType::Triangle);
+    let mask = image::GrayImage::from_fn(s, s, |x, y| {
+        image::Luma([if mask.get_pixel(x, y)[0] > 0 { 255 } else { 0 }])
+    });
+    let (out, device) = segment::remove(&img, &mask, best, gpu)?;
+    log::info!("Remove: filled on {} in {:.0?}", device.label(), started.elapsed());
+    // Back to the crop's size (at most 1024 px: larger areas come out softer).
+    let side = input.image.width().min(1024);
+    let out = resize(&out, side, side, FilterType::Lanczos3);
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let id = format!("{photo_id}-fill-{:x}", stamp.as_nanos());
+    imaging::develop::save_fill_picture(&id, &out)?;
+    let model = if best { "big-LaMa" } else { "LaMa-Dilated" }.to_owned();
+    Ok(imaging::develop::Fill { id, rect: input.rect, gains: input.gains, made_for: key, model })
+}
+
+/// Start loading the full-size image of `photo_id` on a thread of its own (unless it is
+/// loading already); it arrives through `full_tx`.
+fn load_full(
+    full_loading: &mut Option<i64>,
+    source: &Option<(i64, PathBuf, SourceKind)>,
+    photo_id: i64,
+    full_tx: &Sender<FullLoaded>,
+    ctx: &egui::Context,
+) {
+    if *full_loading == Some(photo_id) {
+        return;
+    }
+    let Some((_, path, kind)) = source.clone().filter(|s| s.0 == photo_id) else { return };
+    *full_loading = Some(photo_id);
+    let (full_tx, ctx) = (full_tx.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = WorkingImage::load(&path, kind, None).map(|(img, _)| img);
+        log::debug!("develop: full size of {} in {:.1?}", path.display(), started.elapsed());
+        let _ = full_tx.send((photo_id, result.map_err(|e| format!("{e:#}"))));
+        ctx.request_repaint();
+    });
 }
 
 #[cfg(test)]

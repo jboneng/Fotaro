@@ -18,6 +18,11 @@ pub enum AiModel {
     Sky,
     /// Select Object: Segment Anything 2.1 (tiny), an image encoder and a prompt decoder.
     Object,
+    /// Remove: LaMa-Dilated (dilated convolutions instead of Fourier units: runs on GPUs).
+    Remove,
+    /// Remove at best quality: big-LaMa (int4/int8 weights). CPU only: DirectML returns
+    /// broken pixels for it.
+    RemoveBest,
 }
 
 impl AiModel {
@@ -26,6 +31,8 @@ impl AiModel {
             AiModel::Subject => "Subject (RMBG-1.4)",
             AiModel::Sky => "Sky (SegFormer-B2, ADE20K)",
             AiModel::Object => "Objects (SAM 2.1 tiny)",
+            AiModel::Remove => "Remove (LaMa-Dilated)",
+            AiModel::RemoveBest => "Remove, best quality (big-LaMa)",
         }
     }
 
@@ -34,6 +41,8 @@ impl AiModel {
             AiModel::Subject => &SUBJECT,
             AiModel::Sky => &SKY,
             AiModel::Object => &OBJECT,
+            AiModel::Remove => &REMOVE,
+            AiModel::RemoveBest => &REMOVE_BEST,
         }
     }
 
@@ -73,6 +82,24 @@ const SKY: [Asset; 1] = [Asset {
     sha256: "819c15e6af8c4de3359c1de7ab0a17d0dde495df1d16f8908a7163f8038e0fa0",
     size: 110_445_327,
     file: "segformer-b2-ade.onnx",
+}];
+
+/// LaMa-Dilated for Remove (BSD-3-Clause): Qualcomm AI Hub's export of the LaMa variant with
+/// dilated convolutions.
+const REMOVE: [Asset; 1] = [Asset {
+    url: "https://huggingface.co/pxGeniusAI/lama-dilated/resolve/main/lama_dilated.onnx",
+    sha256: "591973938bfdd6102c82404d02d3d9473b4935cd2a8f4cf6748112d78ddc5800",
+    size: 182_789_617,
+    file: "lama-dilated.onnx",
+}];
+
+/// Big-LaMa for Remove's best quality (Apache-2.0): Carve's ONNX export, quantized and
+/// rewritten so no tensor has more than 4 dimensions.
+const REMOVE_BEST: [Asset; 1] = [Asset {
+    url: "https://huggingface.co/othytenk/lama-int4-int8/resolve/main/lama_int4_int8_r4.onnx",
+    sha256: "4e3b78a253eb4abf21896811c928ffa91214b916e5d6ced24cecdd7999b4aaa1",
+    size: 36_931_151,
+    file: "lama-r4.onnx",
 }];
 
 /// SAM 2.1 tiny: the graphs keep their weights in `.onnx_data` files, found by name next

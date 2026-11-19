@@ -22,6 +22,8 @@ pub enum SpotMode {
     #[default]
     Heal,
     Clone,
+    /// Content-aware: filled by a model (its picture in `Spot::fill`).
+    Remove,
 }
 
 impl SpotMode {
@@ -29,6 +31,7 @@ impl SpotMode {
         match self {
             Self::Heal => "Heal",
             Self::Clone => "Clone",
+            Self::Remove => "Remove",
         }
     }
 }
@@ -48,6 +51,8 @@ pub struct Spot {
     pub opacity: f32,
     /// Where the pixels come from, relative to the spot (0..1 of the photo).
     pub offset: [f32; 2],
+    /// Remove: the model's fill (made for the spot's current shape, else ignored).
+    pub fill: Option<Fill>,
 }
 
 impl Default for Spot {
@@ -59,8 +64,123 @@ impl Default for Spot {
             feather: 50.0,
             opacity: 100.0,
             offset: [0.05, 0.0],
+            fill: None,
         }
     }
+}
+
+/// A Remove spot's fill: a picture (`<id>.png` in the mask store, see
+/// [`super::masks::save_fill_picture`]) covering `rect` (left, top, right, bottom; 0..1 of the
+/// photo), in the colours the model saw: `T(p) = sRGB(p · gains)`. `made_for` is the spot
+/// shape it was made for ([`Spot::shape_key`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Fill {
+    pub id: String,
+    pub rect: [f32; 4],
+    pub gains: [f32; 3],
+    pub made_for: u64,
+    /// What made it (for information).
+    #[serde(default)]
+    pub model: String,
+}
+
+impl Spot {
+    /// What a fill depends on: the spot's path and size.
+    pub fn shape_key(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in self.points.iter().flatten().chain([&self.size]) {
+            h = (h ^ u64::from(v.to_bits())).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    /// A Remove spot's fill, if it was made for the spot as it is now.
+    pub fn current_fill(&self) -> Option<&Fill> {
+        self.fill.as_ref().filter(|f| self.mode == SpotMode::Remove && f.made_for == self.shape_key())
+    }
+
+    /// A Remove spot still waiting for its fill.
+    pub fn needs_fill(&self) -> bool {
+        self.mode == SpotMode::Remove && !self.points.is_empty() && self.current_fill().is_none()
+    }
+}
+
+#[inline]
+fn srgb_encode(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+}
+
+#[inline]
+fn srgb_decode(v: f32) -> f32 {
+    if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+}
+
+/// A photo pixel as the model sees it (8-bit sRGB after `gains`).
+pub fn fill_encode(p: [f32; 3], gains: [f32; 3]) -> [u8; 3] {
+    std::array::from_fn(|c| (srgb_encode(p[c] * gains[c]) * 255.0).round() as u8)
+}
+
+/// The inverse: a model pixel (0..255, fractional after resampling) back to the photo.
+pub fn fill_decode(v: [f32; 3], gains: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|c| srgb_decode(v[c] / 255.0) / gains[c].max(1e-6))
+}
+
+/// What a Remove spot's model sees: the photo (with the spots before it applied) around
+/// the spot, the area to fill, where that is (`rect`, 0..1) and the colour gains.
+pub struct FillInput {
+    pub image: image::RgbImage,
+    /// 255 where to fill.
+    pub mask: image::GrayImage,
+    pub rect: [f32; 4],
+    pub gains: [f32; 3],
+}
+
+/// The input for spot `index` of `spots` on `img`: a square around the spot grown by 1.5
+/// radii (at least 64 px), white balanced by `wb` and scaled so the bright end sits near
+/// 0.9 before sRGB encoding.
+pub fn fill_input(img: &WorkingImage, spots: &[Spot], index: usize, wb: [f32; 3]) -> Option<FillInput> {
+    let spot = spots.get(index)?;
+    let before = healed(img, &spots[..index]);
+    let img: &WorkingImage = &before;
+    let f = Frame::of(img);
+    let s = SpotPx::new(spot, f);
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let (bx, by, bw, bh) = s.bbox(0.0, w, h);
+    if bw == 0 || bh == 0 {
+        return None;
+    }
+    let grow = (1.5 * s.r).max(64.0);
+    let side = ((bw.max(bh) as f32 + 2.0 * grow).ceil() as usize).min(w.min(h));
+    let (cx, cy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
+    let x0 = ((cx - side as f32 / 2.0).round().max(0.0) as usize).min(w - side);
+    let y0 = ((cy - side as f32 / 2.0).round().max(0.0) as usize).min(h - side);
+    let px = img.pixels.as_raw();
+    let at = |x: usize, y: usize| {
+        let i = 3 * (y * w + x);
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    // Exposure: the 99th percentile of the crop's brightest channel (after white balance)
+    // to 0.9.
+    let mut bright: Vec<f32> = (0..side * side)
+        .step_by(((side * side) / 20_000).max(1))
+        .map(|k| {
+            let p = at(x0 + k % side, y0 + k / side);
+            (p[0] * wb[0]).max(p[1] * wb[1]).max(p[2] * wb[2])
+        })
+        .collect();
+    bright.sort_by(f32::total_cmp);
+    let top = bright[((bright.len() - 1) as f32 * 0.99) as usize].max(1e-4);
+    let k = (0.9 / top).clamp(0.05, 64.0);
+    let gains = wb.map(|g| g * k);
+    let image = image::RgbImage::from_fn(side as u32, side as u32, |x, y| {
+        image::Rgb(fill_encode(at(x0 + x as usize, y0 + y as usize), gains))
+    });
+    let mask = image::GrayImage::from_fn(side as u32, side as u32, |x, y| {
+        image::Luma([if s.coverage(x0 + x as usize, y0 + y as usize) > 0.0 { 255 } else { 0 }])
+    });
+    let rect = [x0 as f32 / f.w, y0 as f32 / f.h, (x0 + side) as f32 / f.w, (y0 + side) as f32 / f.h];
+    Some(FillInput { image, mask, rect, gains })
 }
 
 /// The photo's pixel frame: 0..1 coordinates and sizes to pixels.
@@ -152,6 +272,10 @@ fn apply_spot(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
     if spot.points.is_empty() || spot.opacity <= 0.0 {
         return;
     }
+    if spot.mode == SpotMode::Remove {
+        apply_fill(px, w, h, spot, f);
+        return;
+    }
     let s = SpotPx::new(spot, f);
     let opacity = spot.opacity.clamp(0.0, 100.0) / 100.0;
     // The ring around the spot that Heal measures colour on reaches about a radius out.
@@ -182,7 +306,7 @@ fn apply_spot(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
     for (c, dst) in out.iter_mut().enumerate() {
         let src = plane(c, s.off);
         let target: Vec<f32> = match spot.mode {
-            SpotMode::Clone => src,
+            SpotMode::Clone | SpotMode::Remove => src,
             SpotMode::Heal => {
                 let dst_w: Vec<f32> = dst.iter().zip(&weight).map(|(v, k)| v * k).collect();
                 let src_w: Vec<f32> = src.iter().zip(&weight).map(|(v, k)| v * k).collect();
@@ -210,6 +334,49 @@ fn apply_spot(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
         if cover[k] > 0.0 {
             let i = 3 * ((y0 + k / bw) * w + x0 + k % bw);
             px[i..i + 3].copy_from_slice(&[out[0][k], out[1][k], out[2][k]]);
+        }
+    }
+}
+
+/// A Remove spot: its fill picture, back in the photo's colours, blended in over the spot
+/// (feathered, at its opacity). Without a current fill (still being made, or missing) the
+/// photo shows through.
+fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
+    let Some(fill) = spot.current_fill() else { return };
+    let Some(pic) = super::masks::fill_picture(&fill.id) else { return };
+    let s = SpotPx::new(spot, f);
+    let opacity = spot.opacity.clamp(0.0, 100.0) / 100.0;
+    let (x0, y0, bw, bh) = s.bbox(1.0, w, h);
+    let (pw, ph) = (pic.width() as usize, pic.height() as usize);
+    if pw == 0 || ph == 0 {
+        return;
+    }
+    let [l, t, r, b] = fill.rect;
+    let (sx, sy) = (pw as f32 / ((r - l) * f.w).max(1e-3), ph as f32 / ((b - t) * f.h).max(1e-3));
+    let raw = pic.as_raw();
+    for y in y0..y0 + bh {
+        for x in x0..x0 + bw {
+            let a = s.coverage(x, y) * opacity;
+            if a <= 0.0 {
+                continue;
+            }
+            // The picture's pixel here, bilinear.
+            let fx = ((x as f32 + 0.5 - l * f.w) * sx - 0.5).clamp(0.0, (pw - 1) as f32);
+            let fy = ((y as f32 + 0.5 - t * f.h) * sy - 0.5).clamp(0.0, (ph - 1) as f32);
+            let (ix, iy) = (fx as usize, fy as usize);
+            let (jx, jy) = ((ix + 1).min(pw - 1), (iy + 1).min(ph - 1));
+            let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+            let v: [f32; 3] = std::array::from_fn(|c| {
+                let at = |x: usize, y: usize| f32::from(raw[3 * (y * pw + x) + c]);
+                let top = at(ix, iy) + tx * (at(jx, iy) - at(ix, iy));
+                let bottom = at(ix, jy) + tx * (at(jx, jy) - at(ix, jy));
+                top + ty * (bottom - top)
+            });
+            let target = fill_decode(v, fill.gains);
+            let i = 3 * (y * w + x);
+            for c in 0..3 {
+                px[i + c] += a * (target[c] - px[i + c]);
+            }
         }
     }
 }
@@ -343,6 +510,7 @@ mod tests {
             feather: 20.0,
             opacity: 100.0,
             offset: [0.25, 0.0], // 50 px to the right: brighter there
+            fill: None,
         };
         // Clone: the source's value (from x = 110).
         let cloned = healed(&img, &[spot(SpotMode::Clone)]);
@@ -369,6 +537,7 @@ mod tests {
             feather: 30.0,
             opacity: 100.0,
             offset: [0.0, 0.25],
+            fill: None,
         };
         let out = healed(&img, &[spot]);
         let at = |x, y| out.pixels.get_pixel(x, y)[0];

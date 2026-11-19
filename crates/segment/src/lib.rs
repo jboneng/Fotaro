@@ -7,6 +7,9 @@
 
 use std::path::Path;
 
+pub mod gpu;
+pub mod inpaint;
+pub mod sd;
 mod store;
 use std::sync::OnceLock;
 pub use store::{AiModel, data_dir, download_size, ensure, ready, runtime_lib};
@@ -60,7 +63,10 @@ impl Model {
                 .map_err(err)?
                 .with_memory_pattern(false)
                 .map_err(err)?
-                .with_execution_providers([ort::ep::DirectML::default().build().error_on_failure()])
+                .with_execution_providers([ort::ep::DirectML::default()
+                    .with_device_id(gpu::chosen().index)
+                    .build()
+                    .error_on_failure()])
                 .map_err(err)?,
         };
         let session =
@@ -334,7 +340,9 @@ pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, D
         let result = match model {
             AiModel::Subject => subject_rmbg(session, img),
             AiModel::Sky => sky(session, img),
-            AiModel::Object => bail!("objects are selected with select_object"),
+            AiModel::Object | AiModel::Remove | AiModel::RemoveBest => {
+                bail!("{} isn't a selection", model.label())
+            }
         };
         match result {
             Ok(mask) => return Ok((mask, device)),
@@ -417,4 +425,68 @@ pub fn select_object(
         }
     }
     Err(last.unwrap_or_else(|| anyhow!("no device to run {} on", model.label())))
+}
+
+/// The Remove models, each kept loaded on its own (big-LaMa takes many seconds to load, and
+/// the masks' models come and go).
+static REMOVE: std::sync::Mutex<Option<(Device, Model)>> = std::sync::Mutex::new(None);
+static REMOVE_BEST: std::sync::Mutex<Option<(Device, Model)>> = std::sync::Mutex::new(None);
+
+fn with_remove<T>(
+    best: bool,
+    gpu: bool,
+    run: &mut dyn FnMut(&mut Model) -> Result<T>,
+) -> Result<(T, Device)> {
+    // Big-LaMa only on the CPU: DirectML returns broken pixels for it.
+    let devices: &[Device] =
+        if gpu && !best && cfg!(windows) { &[Device::DirectMl, Device::Cpu] } else { &[Device::Cpu] };
+    let (model, slot) = if best { (AiModel::RemoveBest, &REMOVE_BEST) } else { (AiModel::Remove, &REMOVE) };
+    let mut last = None;
+    for &device in devices {
+        let mut loaded = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(&*loaded, Some((d, _)) if *d == device) {
+            *loaded = None;
+            let started = std::time::Instant::now();
+            match Model::load(&model.path(), device) {
+                Ok(m) => {
+                    log::info!(
+                        "AI: {} loaded on {} in {:.1?}",
+                        model.label(),
+                        device.label(),
+                        started.elapsed()
+                    );
+                    *loaded = Some((device, m));
+                }
+                Err(e) => {
+                    log::warn!("AI: {} on {}: {e:#}", model.label(), device.label());
+                    last = Some(e);
+                    continue;
+                }
+            }
+        }
+        let Some((_, session)) = loaded.as_mut() else { continue };
+        match run(session) {
+            Ok(v) => return Ok((v, device)),
+            Err(e) => {
+                log::warn!("AI: {} failed on {}: {e:#}", model.label(), device.label());
+                *loaded = None;
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("no device to run {} on", model.label())))
+}
+
+/// Load a Remove model ahead of use (when the Remove tool opens), if it is downloaded.
+pub fn warm_remove(best: bool, gpu: bool) {
+    let model = if best { AiModel::RemoveBest } else { AiModel::Remove };
+    if ready(&[model]) {
+        let _ = with_remove(best, gpu, &mut |_| Ok(()));
+    }
+}
+
+/// Remove: fill `mask` (255: fill) of `img`, both [`inpaint::SIZE`] square, with LaMa-Dilated
+/// (or big-LaMa when `best`).
+pub fn remove(img: &RgbImage, mask: &GrayImage, best: bool, gpu: bool) -> Result<(RgbImage, Device)> {
+    with_remove(best, gpu, &mut |m| inpaint::lama(m, img, mask))
 }

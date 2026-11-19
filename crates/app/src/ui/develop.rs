@@ -728,6 +728,7 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         if super::remove::canvas(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter) {
             app.run(Command::DevelopCommit(None));
         }
+        super::masking::ai_consent(app, ui.ctx());
         return;
     }
     if cropping {
@@ -1357,7 +1358,7 @@ fn hsl_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 /// A linear sRGB colour for painting.
-fn paint_color(c: [f32; 3]) -> Color32 {
+pub(super) fn paint_color(c: [f32; 3]) -> Color32 {
     let enc = |v: f32| {
         let v = v.clamp(0.0, 1.0);
         let e = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
@@ -1368,7 +1369,7 @@ fn paint_color(c: [f32; 3]) -> Color32 {
 
 /// A colour wheel: hue round the edge, saturation outwards from the neutral centre. Drag
 /// the handle (or anywhere) to set both; double-click resets the saturation.
-fn color_wheel(ui: &mut egui::Ui, id: egui::Id, size: f32, hue: &mut f32, sat: &mut f32) -> Moved {
+pub(super) fn color_wheel(ui: &mut egui::Ui, id: egui::Id, size: f32, hue: &mut f32, sat: &mut f32) -> Moved {
     let mut out = Moved::default();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
     let resp = ui.interact(rect, id, Sense::click_and_drag());
@@ -1806,10 +1807,12 @@ fn effects_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             }
         });
     });
-    let groups: [&[EffectParam]; 2] = [&EffectParam::VIGNETTE, &EffectParam::GRAIN];
+    let groups: [&[EffectParam]; 3] = [&EffectParam::VIGNETTE, &EffectParam::GRAIN, &EffectParam::GLOW];
     for (n, params) in groups.into_iter().enumerate() {
-        if n == 1 {
-            sub_header(ui, "Grain", |_| {});
+        match n {
+            1 => sub_header(ui, "Grain", |_| {}),
+            2 => sub_header(ui, "Glow", |_| {}),
+            _ => {}
         }
         for p in params {
             // As in LrC, the shape sliders only matter once there is an amount; Highlights
@@ -1821,6 +1824,10 @@ fn effects_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                     e.vignette_amount < 0.0 && e.vignette_style != VignetteStyle::PaintOverlay
                 }
                 EffectParam::GrainSize | EffectParam::GrainRoughness => e.grain_amount > 0.0,
+                EffectParam::GlowAmount => true,
+                EffectParam::GlowRange | EffectParam::GlowSpread | EffectParam::GlowWarmth => {
+                    e.glow_amount > 0.0
+                }
                 _ => e.vignette_amount != 0.0,
             };
             let slider = Slider::Effect(*p);
@@ -1829,8 +1836,13 @@ fn effects_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 range: slider.range(false),
                 default: p.get(&defaults.effects),
                 log: false,
-                gradient: (*p == EffectParam::VignetteAmount)
-                    .then_some([Color32::from_gray(20), Color32::from_gray(235)]),
+                gradient: match p {
+                    EffectParam::VignetteAmount => Some([Color32::from_gray(20), Color32::from_gray(235)]),
+                    EffectParam::GlowWarmth => {
+                        Some([Color32::from_rgb(70, 110, 220), Color32::from_rgb(230, 170, 60)])
+                    }
+                    _ => None,
+                },
                 kelvin: false,
             };
             let mut v = slider.get(&st);
