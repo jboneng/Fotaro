@@ -437,9 +437,8 @@ fn with_remove<T>(
     gpu: bool,
     run: &mut dyn FnMut(&mut Model) -> Result<T>,
 ) -> Result<(T, Device)> {
-    // Big-LaMa only on the CPU: DirectML returns broken pixels for it.
     let devices: &[Device] =
-        if gpu && !best && cfg!(windows) { &[Device::DirectMl, Device::Cpu] } else { &[Device::Cpu] };
+        if gpu && cfg!(windows) { &[Device::DirectMl, Device::Cpu] } else { &[Device::Cpu] };
     let (model, slot) = if best { (AiModel::RemoveBest, &REMOVE_BEST) } else { (AiModel::Remove, &REMOVE) };
     let mut last = None;
     for &device in devices {
@@ -447,7 +446,20 @@ fn with_remove<T>(
         if !matches!(&*loaded, Some((d, _)) if *d == device) {
             *loaded = None;
             let started = std::time::Instant::now();
-            match Model::load(&model.path(), device) {
+            // Big-LaMa's int4/int8 weights decode wrongly on DirectML: it runs a copy with
+            // them decoded beforehand (made once, on the CPU).
+            let path = match (best, device) {
+                (true, Device::DirectMl) => match folded(&model.path()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("AI: preparing {} for the GPU: {e:#}", model.label());
+                        last = Some(e);
+                        continue;
+                    }
+                },
+                _ => model.path(),
+            };
+            match Model::load(&path, device) {
                 Ok(m) => {
                     log::info!(
                         "AI: {} loaded on {} in {:.1?}",
@@ -489,4 +501,34 @@ pub fn warm_remove(best: bool, gpu: bool) {
 /// (or big-LaMa when `best`).
 pub fn remove(img: &RgbImage, mask: &GrayImage, best: bool, gpu: bool) -> Result<(RgbImage, Device)> {
     with_remove(best, gpu, &mut |m| inpaint::lama(m, img, mask))
+}
+
+/// A copy of a model with its quantized (int4/int8) weights decoded to floats, next to
+/// it as `<name>.folded.onnx`, made once on the CPU. DirectML decodes such weights wrongly
+/// (big-LaMa's come out as nonsense and its fills black); with them already floats it
+/// gives the CPU's results.
+fn folded(src: &Path) -> Result<std::path::PathBuf> {
+    let dst = src.with_extension("folded.onnx");
+    if dst.exists() {
+        return Ok(dst);
+    }
+    let part = src.with_extension("folded.part");
+    let started = std::time::Instant::now();
+    let err = |e: ort::Error<ort::session::builder::SessionBuilder>| anyhow!("{e}");
+    // Basic optimisation is constant folding (no device-specific fusions), which decodes
+    // the weights once quantized-graph handling is off.
+    Session::builder(environment()?)?
+        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level1)
+        .map_err(err)?
+        .with_config_entry("session.disable_quant_qdq", "1")
+        .map_err(err)?
+        .with_optimized_model_path(&part)
+        .map_err(err)?
+        .with_execution_providers([ort::ep::CPU::default().build()])
+        .map_err(err)?
+        .commit_from_file(src)
+        .with_context(|| format!("decoding {}", src.display()))?;
+    std::fs::rename(&part, &dst)?;
+    log::info!("AI: decoded {} for the GPU in {:.1?}", src.display(), started.elapsed());
+    Ok(dst)
 }

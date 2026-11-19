@@ -185,6 +185,32 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The app's Remove (the installed models, as the app runs them): fast, and best quality
+    // (big-LaMa, decoded for the GPU on first use).
+    for (name, best) in [("app_fast", false), ("app_best", true)] {
+        if !want(name) {
+            continue;
+        }
+        let mut times = Vec::new();
+        for (k, (task, crop, mask)) in cuts.iter().enumerate() {
+            let t = Instant::now();
+            match segment::remove(crop, mask, best, true) {
+                Ok((filled, device)) => {
+                    times.push(t.elapsed());
+                    let black = filled.pixels().filter(|p| p.0 == [0, 0, 0]).count();
+                    println!(
+                        "{name} {} {}: {} ({black} black pixels)",
+                        device.label(),
+                        task.name,
+                        ms(t.elapsed())
+                    );
+                    panels[k].push((name.to_owned(), filled));
+                }
+                Err(e) => println!("{name} {}: {e:#}", task.name),
+            }
+        }
+    }
+
     // Generative: SD 1.5 inpainting.
     if want("sd") {
         let sd_dir = models.join("sd");

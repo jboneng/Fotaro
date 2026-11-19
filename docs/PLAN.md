@@ -836,3 +836,14 @@ a cat's eye, a whole ball), cut as the app will: a square around the area, at 51
    - On a grainy film scan (a child in the sea), LaMa-Dilated left a pale blur; big-LaMa
      continued the water cleanly. LaMa-Dilated is fine on small spots; consider making
      best quality the default.
+5. [x] Big-LaMa on the GPU (2026-11-19). Comparing every intermediate tensor between
+   DirectML and the CPU (Python `onnx` + `onnxruntime-directml` 1.24.4, the app's version)
+   showed the network itself is fine on DirectML: only its int4/int8 weights
+   (`DequantizeLinear` → `Cast`, node 1 onwards) decode wrongly, so the hole came out ~0.
+   Fix: decode them once on the CPU (ONNX Runtime constant folding at the basic level with
+   `session.disable_quant_qdq`, saved as `lama-r4.folded.onnx`, 206 MB; the download stays
+   37 MB) and run that on DirectML. Identical to the CPU's output; on the T550 **0.58 s a
+   fill** (CPU 5–12 s). First use ~30 s (decoding ~15 s once, then loading 15–25 s each
+   session, started when the Remove tool opens).
+   - With this, big-LaMa is as fast per fill as LaMa-Dilated and clearly better: worth
+     making "Best quality" the default.

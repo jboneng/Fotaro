@@ -401,13 +401,15 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.add_space(super::develop::LABEL_W - 40.0);
                 let mut best = d.remove_best;
-                let tip = "Fill new Remove spots with the larger model: better on large areas \
-                           and textures, but on the processor (several seconds each)";
-                if ui.checkbox(&mut best, "Best quality (slower)").on_hover_text(tip).changed() {
+                let tip = "Fill new Remove spots with the larger model (big-LaMa): better on \
+                           large areas and textures. The first time it takes about half a \
+                           minute to prepare, then under a second a spot on the GPU";
+                if ui.checkbox(&mut best, "Best quality").on_hover_text(tip).changed() {
                     d.remove_best = best;
                     // Its model is another download: ask again.
                     d.fill_allowed = false;
-                    std::thread::spawn(move || segment::warm_remove(best, false));
+                    let gpu = d.ai_gpu;
+                    std::thread::spawn(move || segment::warm_remove(best, gpu));
                 }
             });
         }

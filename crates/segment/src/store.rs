@@ -20,8 +20,8 @@ pub enum AiModel {
     Object,
     /// Remove: LaMa-Dilated (dilated convolutions instead of Fourier units: runs on GPUs).
     Remove,
-    /// Remove at best quality: big-LaMa (int4/int8 weights). CPU only: DirectML returns
-    /// broken pixels for it.
+    /// Remove at best quality: big-LaMa (int4/int8 weights; DirectML runs a copy with them
+    /// decoded, see `folded`).
     RemoveBest,
 }
 

@@ -1024,7 +1024,7 @@ pub struct DevelopState {
     fill_failed: Vec<u64>,
     pub fill_allowed: bool,
     pub fill_declined: bool,
-    /// Remove at best quality (big-LaMa on the CPU) instead of fast (LaMa-Dilated).
+    /// Remove at best quality (big-LaMa) instead of fast (LaMa-Dilated).
     pub remove_best: bool,
     /// Select Object draws a rectangle (else it brushes over the object).
     pub object_rect: bool,
@@ -1834,7 +1834,7 @@ fn run_fill(
             }
         })?;
     }
-    set(-1.0, if best { "Removing (best quality, a few seconds)…".into() } else { "Removing…".into() });
+    set(-1.0, if best { "Removing (best quality)…".into() } else { "Removing…".into() });
     let started = std::time::Instant::now();
     let s = segment::inpaint::SIZE;
     let img = resize(&input.image, s, s, FilterType::Lanczos3);
