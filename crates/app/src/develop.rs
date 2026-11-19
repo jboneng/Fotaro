@@ -1123,7 +1123,7 @@ impl DevelopState {
             fill_failed: Vec::new(),
             fill_allowed: false,
             fill_declined: false,
-            remove_best: false,
+            remove_best: true,
             object_rect: false,
             rotation: 0,
             changed_at: std::time::Instant::now(),

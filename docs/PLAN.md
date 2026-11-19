@@ -846,4 +846,5 @@ a cat's eye, a whole ball), cut as the app will: a square around the area, at 51
    fill** (CPU 5–12 s). First use ~30 s (decoding ~15 s once, then loading 15–25 s each
    session, started when the Remove tool opens).
    - With this, big-LaMa is as fast per fill as LaMa-Dilated and clearly better: worth
-     making "Best quality" the default.
+     making "Best quality" the default. Done: "Best quality" (big-LaMa) is on by default;
+     unticked uses LaMa-Dilated (smaller to load, for machines without a good GPU).
