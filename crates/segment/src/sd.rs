@@ -36,6 +36,9 @@ pub struct Sampling {
     pub steps: usize,
     pub guidance: f32,
     pub seed: u64,
+    /// With a starting image: how much of the schedule to run (1: from noise, as without
+    /// one; 0.5: its second half, so the start shows through).
+    pub strength: f32,
 }
 
 /// A float tensor in the model input's own type (fp16 exports want f16).
@@ -143,6 +146,7 @@ impl Sd {
         &mut self,
         img: &RgbImage,
         mask: &GrayImage,
+        init: Option<&RgbImage>,
         prompts: &Prompts,
         sampling: Sampling,
         progress: &mut dyn FnMut(usize, usize),
@@ -166,6 +170,21 @@ impl Sd {
         let timesteps: Vec<usize> = (0..steps).rev().map(|i| i * ratio + 1).collect();
         let mut noise = Noise(sampling.seed);
         let mut latents: Vec<f32> = (0..4 * n).map(|_| noise.normal()).collect();
+        // From a starting image (e.g. LaMa's fill): its latents noised to where the schedule
+        // picks up.
+        let start = match init {
+            Some(init) if sampling.strength < 1.0 => {
+                let skip =
+                    steps - ((steps as f32 * sampling.strength.max(0.0)).round() as usize).clamp(1, steps);
+                let x0 = self.encode(image_input(init, mask, false))?;
+                let a = ac[timesteps[skip]];
+                for (x, z) in latents.iter_mut().zip(&x0) {
+                    *x = a.sqrt() * z + (1.0 - a).sqrt() * *x;
+                }
+                skip
+            }
+            _ => 0,
+        };
         let cfg = sampling.guidance > 1.0;
         let batch = if cfg { 2 } else { 1 };
         let hidden: Vec<f32> = if cfg {
@@ -174,7 +193,7 @@ impl Sd {
             prompts.positive.clone()
         };
         let names = self.unet.io().0;
-        for (k, &t) in timesteps.iter().enumerate() {
+        for (k, &t) in timesteps.iter().enumerate().skip(start) {
             // UNet input: [latents, mask, masked latents] per batch entry.
             let mut sample = Vec::with_capacity(batch * 9 * n);
             for _ in 0..batch {
@@ -223,7 +242,7 @@ impl Sd {
                 let x0 = (*x - (1.0 - a_t).sqrt() * e) / a_t.sqrt();
                 *x = a_prev.sqrt() * x0 + (1.0 - a_prev).sqrt() * e;
             }
-            progress(k + 1, steps);
+            progress(k + 1 - start, steps - start);
         }
         let out = self.decode(&latents)?;
         let n_px = (SIZE * SIZE) as usize;

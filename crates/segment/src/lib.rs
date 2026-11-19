@@ -532,3 +532,9 @@ fn folded(src: &Path) -> Result<std::path::PathBuf> {
     log::info!("AI: decoded {} for the GPU in {:.1?}", src.display(), started.elapsed());
     Ok(dst)
 }
+
+/// Unload the Remove models (they hold GPU memory another model may need).
+pub fn unload_remove() {
+    *REMOVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *REMOVE_BEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}

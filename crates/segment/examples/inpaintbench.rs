@@ -226,7 +226,30 @@ fn main() -> anyhow::Result<()> {
         let prompts = Prompts { positive, negative };
         let steps: usize = std::env::var("PL_SD_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
         let guidance: f32 = std::env::var("PL_SD_CFG").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
-        for device in [Device::DirectMl, Device::Cpu] {
+        // PL_SD_STRENGTH below 1: refine big-LaMa's fill instead of starting from noise.
+        let strength: f32 = std::env::var("PL_SD_STRENGTH").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let seeds: u64 = std::env::var("PL_SD_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let inits: Vec<Option<RgbImage>> = cuts
+            .iter()
+            .map(|(_, crop, mask)| {
+                (strength < 1.0)
+                    .then(|| segment::remove(crop, mask, true, true).ok().map(|(f, _)| f))
+                    .flatten()
+            })
+            .collect();
+        // Free the GPU for SD (with both loaded, a 4 GB GPU swaps and slows down 3–5×).
+        segment::unload_remove();
+        for (k, init) in inits.iter().enumerate() {
+            if let Some(f) = init {
+                panels[k].push(("lama".to_owned(), f.clone()));
+            }
+        }
+        let devices: Vec<Device> = if std::env::var("PL_SD_CPU").is_ok() {
+            vec![Device::DirectMl, Device::Cpu]
+        } else {
+            vec![Device::DirectMl]
+        };
+        for device in devices {
             let t = Instant::now();
             let loaded = (|| {
                 Ok::<_, anyhow::Error>(Sd {
@@ -251,9 +274,7 @@ fn main() -> anyhow::Result<()> {
             let runs: Vec<(usize, u64, usize)> = match device {
                 Device::Cpu => vec![(0, 0, 2)],
                 Device::DirectMl => {
-                    let mut r: Vec<(usize, u64, usize)> = (0..cuts.len()).map(|k| (k, 0, steps)).collect();
-                    r.extend([(0, 1, steps), (0, 2, steps)]);
-                    r
+                    (0..cuts.len()).flat_map(|k| (0..seeds).map(move |s| (k, s, steps))).collect()
                 }
             };
             for (k, seed, n) in runs {
@@ -261,15 +282,15 @@ fn main() -> anyhow::Result<()> {
                 let t = Instant::now();
                 let mut step_times = Vec::new();
                 let mut last = Instant::now();
-                let sampling = Sampling { steps: n, guidance, seed };
-                match sd.inpaint(crop, mask, &prompts, sampling, &mut |_, _| {
+                let sampling = Sampling { steps: n, guidance, seed, strength };
+                match sd.inpaint(crop, mask, inits[k].as_ref(), &prompts, sampling, &mut |_, _| {
                     step_times.push(last.elapsed());
                     last = Instant::now();
                 }) {
                     Ok(filled) => {
                         let step = step_times.iter().skip(1).min().copied().unwrap_or_default();
                         println!(
-                            "sd         {:<9} {:<14} seed {seed} load {} total {} ({n} steps, {} a step, cfg {guidance})",
+                            "sd         {:<9} {:<14} seed {seed} load {} total {} ({n} steps x{strength}, {} a step, cfg {guidance})",
                             device.label(),
                             task.name,
                             ms(load),
