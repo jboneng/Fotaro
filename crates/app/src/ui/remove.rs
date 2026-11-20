@@ -198,6 +198,12 @@ fn spinner(painter: &egui::Painter, at: Pos2, time: f64) {
     painter.add(egui::Shape::line(pts, Stroke::new(2.0, Color32::WHITE)));
 }
 
+/// A found person as a spot (for outlining and hit testing).
+fn person_spot(f: &crate::develop::FoundPerson) -> Spot {
+    let [l, t, r, b] = f.area.rect;
+    Spot { points: vec![[(l + r) / 2.0, (t + b) / 2.0]], area: Some(f.area.clone()), feather: 0.0, ..Spot::default() }
+}
+
 /// The centre of a spot (its pin), 0..1.
 fn centre(spot: &Spot) -> [f32; 2] {
     let n = spot.points.len().max(1) as f32;
@@ -238,6 +244,7 @@ pub(super) fn canvas(
             fill: None,
             strokes: Vec::new(),
             found: false,
+            area: None,
         }
     };
 
@@ -305,6 +312,9 @@ pub(super) fn canvas(
                 for (t, o) in s.strokes.iter_mut().zip(&original.strokes) {
                     t.points = o.points.iter().map(|p| [p[0] + dx, p[1] + dy]).collect();
                 }
+                if let (Some(a), Some(o)) = (s.area.as_mut(), original.area.as_ref()) {
+                    a.rect = [o.rect[0] + dx, o.rect[1] + dy, o.rect[2] + dx, o.rect[3] + dy];
+                }
                 s.offset = [original.offset[0] - dx, original.offset[1] - dy];
             }
             Some(RemoveDrag::Source { index, grab, original }) => {
@@ -353,8 +363,22 @@ pub(super) fn canvas(
             }
         }
     }
+    // Found people (Distractions → People): a click on one picks it or leaves it.
+    let person_at = |p: Pos2| -> Option<usize> {
+        let at = c.px(c.photo(p));
+        d.people.iter().position(|f| SpotArea::new(&person_spot(f), size.0, size.1).at(at.x, at.y) > 0.0)
+    };
+    let mut toggled = None;
+    if resp.clicked()
+        && !subtracting
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(i) = person_at(p)
+    {
+        toggled = Some(i);
+    }
     // A click: select the spot under it, or make a round one.
     if resp.clicked()
+        && toggled.is_none()
         && let Some(p) = resp.interact_pointer_pos()
     {
         let other = match hit(&c, &st.spots, None, p) {
@@ -398,6 +422,21 @@ pub(super) fn canvas(
         }
     }
 
+    // Found people: picked ones outlined in orange (to be removed), the rest faintly; the
+    // one under the pointer bolder.
+    let hovered = resp.hover_pos().filter(|p| img_rect.contains(*p)).and_then(person_at);
+    for (i, f) in d.people.iter().enumerate() {
+        let segs = outline(&c, &person_spot(f), [0.0, 0.0]);
+        let width = if hovered == Some(i) { 2.6 } else { 1.6 };
+        let color = if f.picked { Color32::from_rgb(255, 150, 40) } else { Color32::from_white_alpha(110) };
+        draw_outline(&painter.with_clip_rect(img_rect.intersect(painter.clip_rect())), &segs, Stroke::new(width, color));
+    }
+    if hovered.is_some() && tool.drag.is_none() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if let Some(i) = toggled {
+        d.people[i].picked = !d.people[i].picked;
+    }
     // Dust & Scratches' found defects (Show found), under the spots.
     let painter = painter.with_clip_rect(img_rect.intersect(painter.clip_rect()));
     if (d.show_dust || subtracting)
@@ -692,6 +731,15 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     if asks.recalculate {
         d.recalculate_dust();
     }
+    if asks.find_people {
+        d.find_people();
+    }
+    if asks.remove_people {
+        let n = d.remove_people();
+        if n > 0 {
+            done = Some(Some(format!("Remove People ({n})")));
+        }
+    }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
     }
@@ -708,6 +756,9 @@ struct DistractionAsks {
     show_changed: bool,
     /// Dust & Scratches' Recalculate.
     recalculate: bool,
+    /// People: Find, and Remove the picked.
+    find_people: bool,
+    remove_people: bool,
 }
 
 /// The Remove panel's Distractions: Sensor Dust (Find makes spots) and Dust & Scratches
@@ -774,6 +825,60 @@ fn distractions(
                     *done = Some(Some("Clear Sensor Dust".into()));
                 }
             });
+        });
+    }
+
+    // People: find them, pick on the photo, remove.
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        row_label(ui, "People");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let tip = "Find the people in the photo (AI models, on this computer). They are \
+                       outlined on the photo: click one to leave it in, then Remove";
+            let busy = d.people_job.is_some();
+            if ui.add_enabled_ui(!busy, |ui| pill(ui, "Find", false)).inner.on_hover_text(tip).clicked() {
+                asks.find_people = true;
+            }
+        });
+    });
+    if let Some(job) = &d.people_job {
+        ui.add_space(4.0);
+        super::masking::ai_progress(ui, job);
+    } else if !d.people.is_empty() {
+        let n = d.people.len();
+        let picked = d.people.iter().filter(|p| p.picked).count();
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            ui.label(weak(format!("{n} found, {picked} to remove")).size(12.0));
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            if pill(ui, "All", false).on_hover_text("Remove everyone found").clicked() {
+                d.people.iter_mut().for_each(|p| p.picked = true);
+            }
+            if pill(ui, "None", false).on_hover_text("Leave everyone in").clicked() {
+                d.people.iter_mut().for_each(|p| p.picked = false);
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let tip = "Remove the people outlined in orange: each becomes a Remove spot";
+                if ui
+                    .add_enabled_ui(picked > 0, |ui| pill(ui, &format!("Remove ({picked})"), false))
+                    .inner
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    asks.remove_people = true;
+                }
+            });
+        });
+        ui.label(
+            weak("Orange: to be removed. Click a person on the photo to leave them in (or add them back). The faint ones the finder was less sure of.")
+                .size(11.5),
+        );
+    } else if d.people_searched {
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            ui.label(weak("No people found").size(12.0));
         });
     }
 

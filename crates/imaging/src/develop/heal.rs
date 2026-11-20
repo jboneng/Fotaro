@@ -57,6 +57,17 @@ pub struct Spot {
     pub strokes: Vec<SpotStroke>,
     /// Made by Find (sensor dust), not painted: Find again replaces it, Clear found removes it.
     pub found: bool,
+    /// An area given as a picture (People: a person's outline) instead of the spot's own
+    /// path; strokes still add to it or take from it.
+    pub area: Option<SpotMask>,
+}
+
+/// A spot's area as a picture in the mask store (`<id>.png`, 255 inside) over `rect`
+/// (left, top, right, bottom; 0..1 of the photo, file orientation).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpotMask {
+    pub id: String,
+    pub rect: [f32; 4],
 }
 
 /// A stroke added to a spot: a path (0..1 of the photo) and its radius (half long sides);
@@ -81,6 +92,7 @@ impl Default for Spot {
             fill: None,
             strokes: Vec::new(),
             found: false,
+            area: None,
         }
     }
 }
@@ -113,6 +125,14 @@ impl Spot {
                 eat(v.to_bits());
             }
             eat(u32::from(s.erase) + 7);
+        }
+        if let Some(a) = &self.area {
+            for b in a.id.bytes() {
+                eat(u32::from(b));
+            }
+            for v in a.rect {
+                eat(v.to_bits());
+            }
         }
         h
     }
@@ -179,7 +199,9 @@ pub fn fill_input(
     if bw == 0 || bh == 0 {
         return None;
     }
-    let grow = (1.5 * s.r).max(64.0);
+    // Room around the spot for the model to take from. An area picture (a person) is big:
+    // less room keeps more of its detail at the model's size.
+    let grow = (if s.raster.is_some() { 0.75 } else { 1.5 } * s.r).max(64.0);
     let side = ((bw.max(bh) as f32 + 2.0 * grow).ceil() as usize).min(w.min(h));
     let (cx, cy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
     let x0 = ((cx - side as f32 / 2.0).round().max(0.0) as usize).min(w - side);
@@ -265,10 +287,150 @@ struct StrokePx {
     erase: bool,
 }
 
-/// A spot in pixels: its strokes (the first is the spot's own path), the largest radius of
-/// those adding area, and the source offset.
+/// A spot's area picture in pixels: the picture's signed distance (its pixels: positive
+/// inside), where it sits on the photo, its scale (picture pixels a photo pixel) and the
+/// feather (photo pixels).
+struct RasterPx {
+    sdf: Arc<Vec<f32>>,
+    pw: usize,
+    ph: usize,
+    x0: f32,
+    y0: f32,
+    scale: f32,
+    feather: f32,
+    /// Photo pixels: left, top, right, bottom.
+    bounds: [f32; 4],
+}
+
+impl RasterPx {
+    fn new(area: &SpotMask, f: Frame, feather: f32) -> Option<RasterPx> {
+        let (sdf, pw, ph) = area_distance(&area.id)?;
+        let [l, t, r, b] = area.rect;
+        let (x0, y0, x1, y1) = (l * f.w, t * f.h, r * f.w, b * f.h);
+        let scale = pw as f32 / (x1 - x0).max(1e-3);
+        let span = (x1 - x0).min(y1 - y0).max(1.0);
+        Some(RasterPx {
+            sdf,
+            pw,
+            ph,
+            x0,
+            y0,
+            scale,
+            feather: 1.0 + feather * 0.04 * span,
+            bounds: [x0, y0, x1, y1],
+        })
+    }
+
+    /// Signed distance (photo pixels) to the picture's outline at (x, y): positive inside.
+    fn edge(&self, x: f32, y: f32) -> f32 {
+        let fx = (x - self.x0) * self.scale - 0.5;
+        let fy = (y - self.y0) * self.scale - 0.5;
+        let (mx, my) = ((self.pw - 1) as f32, (self.ph - 1) as f32);
+        // Outside the picture: how far beyond it, and beyond the picture's own border value.
+        let (cx, cy) = (fx.clamp(0.0, mx), fy.clamp(0.0, my));
+        let out = (fx - cx).hypot(fy - cy);
+        let (ix, iy) = (cx as usize, cy as usize);
+        let (jx, jy) = ((ix + 1).min(self.pw - 1), (iy + 1).min(self.ph - 1));
+        let (tx, ty) = (cx - ix as f32, cy - iy as f32);
+        let at = |x: usize, y: usize| self.sdf[y * self.pw + x];
+        let top = at(ix, iy) + tx * (at(jx, iy) - at(ix, iy));
+        let bottom = at(ix, jy) + tx * (at(jx, jy) - at(ix, jy));
+        let v = top + ty * (bottom - top);
+        (if out > 0.0 { v.min(0.0) - out } else { v }) / self.scale
+    }
+
+    /// Coverage (0..1) at (x, y): 1 inside, fading out over the feather at the outline.
+    fn at(&self, x: f32, y: f32) -> f32 {
+        smoothstep(-0.5, self.feather, self.edge(x, y))
+    }
+}
+
+/// An area picture's signed distance: its id, the distances, its width and height.
+type AreaDistance = (String, Arc<Vec<f32>>, usize, usize);
+
+/// Area pictures' signed distances (picture pixels, positive inside), made once each.
+static AREA_DISTANCES: std::sync::LazyLock<Mutex<Vec<AreaDistance>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// The signed distance of area picture `id` (and its size), from the mask store.
+fn area_distance(id: &str) -> Option<(Arc<Vec<f32>>, usize, usize)> {
+    {
+        let cache = AREA_DISTANCES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, d, w, h)) = cache.iter().find(|(k, ..)| k == id) {
+            return Some((d.clone(), *w, *h));
+        }
+    }
+    let pic = super::masks::mask_picture(id)?;
+    let (w, h) = (pic.width() as usize, pic.height() as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let inside: Vec<bool> = pic.as_raw().iter().map(|v| *v >= 128).collect();
+    let sdf = Arc::new(signed_distance(&inside, w, h));
+    let mut cache = AREA_DISTANCES.lock().unwrap_or_else(|e| e.into_inner());
+    cache.push((id.to_owned(), sdf.clone(), w, h));
+    if cache.len() > 64 {
+        cache.remove(0);
+    }
+    Some((sdf, w, h))
+}
+
+/// Signed distance (pixels; positive inside, negative outside, ±0.5 at the boundary) of a
+/// `w × h` mask, by two chamfer passes each way (3-4 weights: within a few % of Euclidean).
+fn signed_distance(inside: &[bool], w: usize, h: usize) -> Vec<f32> {
+    let dist_to = |target: bool| -> Vec<f32> {
+        let big = 1e9f32;
+        let mut d: Vec<f32> = inside.iter().map(|v| if *v == target { 0.0 } else { big }).collect();
+        let (a, b) = (1.0f32, std::f32::consts::SQRT_2);
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let mut v = d[i];
+                if x > 0 {
+                    v = v.min(d[i - 1] + a);
+                }
+                if y > 0 {
+                    v = v.min(d[i - w] + a);
+                    if x > 0 {
+                        v = v.min(d[i - w - 1] + b);
+                    }
+                    if x + 1 < w {
+                        v = v.min(d[i - w + 1] + b);
+                    }
+                }
+                d[i] = v;
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let i = y * w + x;
+                let mut v = d[i];
+                if x + 1 < w {
+                    v = v.min(d[i + 1] + a);
+                }
+                if y + 1 < h {
+                    v = v.min(d[i + w] + a);
+                    if x + 1 < w {
+                        v = v.min(d[i + w + 1] + b);
+                    }
+                    if x > 0 {
+                        v = v.min(d[i + w - 1] + b);
+                    }
+                }
+                d[i] = v;
+            }
+        }
+        d
+    };
+    let (to_out, to_in) = (dist_to(false), dist_to(true));
+    (0..w * h).map(|i| if inside[i] { to_out[i] - 0.5 } else { 0.5 - to_in[i] }).collect()
+}
+
+/// A spot in pixels: its strokes (the first is the spot's own path, unless it has an area
+/// picture), the area picture, the largest radius of what adds area, and the source offset.
 struct SpotPx {
     strokes: Vec<StrokePx>,
+    raster: Option<RasterPx>,
     r: f32,
     off: (isize, isize),
 }
@@ -285,14 +447,19 @@ impl SpotPx {
                 erase,
             }
         };
-        let strokes: Vec<StrokePx> = std::iter::once(stroke(&s.points, s.size, false))
+        let raster = s.area.as_ref().and_then(|a| RasterPx::new(a, f, feather));
+        let own = if raster.is_some() { None } else { Some(stroke(&s.points, s.size, false)) };
+        let strokes: Vec<StrokePx> = own
+            .into_iter()
             .chain(
                 s.strokes.iter().filter(|t| !t.points.is_empty()).map(|t| stroke(&t.points, t.size, t.erase)),
             )
             .collect();
-        let r = strokes.iter().filter(|t| !t.erase).map(|t| t.r).fold(1.0, f32::max);
+        let raster_r = raster.as_ref().map_or(1.0, |p| (p.bounds[2] - p.bounds[0]).max(p.bounds[3] - p.bounds[1]) / 2.0);
+        let r = strokes.iter().filter(|t| !t.erase).map(|t| t.r).fold(raster_r, f32::max);
         SpotPx {
             strokes,
+            raster,
             r,
             off: ((s.offset[0] * f.w).round() as isize, (s.offset[1] * f.h).round() as isize),
         }
@@ -315,6 +482,9 @@ impl SpotPx {
                 add = add.max(v);
             }
         }
+        if let Some(p) = &self.raster {
+            add = add.max(p.at(x, y));
+        }
         add * (1.0 - sub)
     }
 
@@ -329,6 +499,9 @@ impl SpotPx {
             } else {
                 add = add.max(v);
             }
+        }
+        if let Some(p) = &self.raster {
+            add = add.max(p.edge(x, y));
         }
         if sub == f32::MIN { add } else { add.min(-sub) }
     }
@@ -346,6 +519,10 @@ impl SpotPx {
             for p in &t.path {
                 b = [b[0].min(p[0] - t.r), b[1].min(p[1] - t.r), b[2].max(p[0] + t.r), b[3].max(p[1] + t.r)];
             }
+        }
+        if let Some(p) = &self.raster {
+            let q = p.bounds;
+            b = [b[0].min(q[0]), b[1].min(q[1]), b[2].max(q[2]), b[3].max(q[3])];
         }
         b
     }
@@ -385,7 +562,11 @@ impl SpotArea {
 
     /// The smallest radius of the strokes (pixels): how fine the outline must be traced.
     pub fn finest(&self) -> f32 {
-        self.0.strokes.iter().map(|t| t.r).fold(f32::MAX, f32::min)
+        // An area picture: its outline is traced at about a hundredth of its size.
+        let raster = self.0.raster.as_ref().map_or(f32::MAX, |p| {
+            ((p.bounds[2] - p.bounds[0]).max(p.bounds[3] - p.bounds[1]) / 100.0).max(1.0)
+        });
+        self.0.strokes.iter().map(|t| t.r).fold(raster, f32::min)
     }
 
     /// Left, top, right, bottom of the area, in photo pixels.
@@ -480,6 +661,14 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
     }
     let [l, t, r, b] = fill.rect;
     let (sx, sy) = (pw as f32 / ((r - l) * f.w).max(1e-3), ph as f32 / ((b - t) * f.h).max(1e-3));
+    // A fill made smaller than it is shown (a large spot) is smooth: the grain it lacks,
+    // measured around the spot, goes back in.
+    let grain = if sx.min(sy) < 0.8 {
+        let lost = (1.0 - sx.min(sy).powi(2)).max(0.0).sqrt();
+        surrounding_grain(px, w, h, &s).map(|g| g * lost)
+    } else {
+        [0.0; 3]
+    };
     let raw = pic.as_raw();
     for y in y0..y0 + bh {
         for x in x0..x0 + bw {
@@ -499,13 +688,56 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
                 let bottom = at(ix, jy) + tx * (at(jx, jy) - at(ix, jy));
                 top + ty * (bottom - top)
             });
-            let target = fill_decode(v, fill.gains);
+            let mut target = fill_decode(v, fill.gains);
+            if grain != [0.0; 3] {
+                // The same noise every render (by position), about normal.
+                let n = |k: u32| {
+                    let mut z = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77) ^ k;
+                    z ^= z >> 15;
+                    z = z.wrapping_mul(0x2C1B_3C6D);
+                    z ^= z >> 12;
+                    z = z.wrapping_mul(0x297A_2D39);
+                    z ^= z >> 15;
+                    (z as f32 / u32::MAX as f32) - 0.5
+                };
+                // Luminance grain with a little colour, as film's.
+                let g = (n(1) + n(2) + n(3)) * 2.0;
+                for (c, t) in target.iter_mut().enumerate() {
+                    *t += grain[c] * (0.8 * g + 0.6 * (n(10 + c as u32) * 3.46));
+                }
+            }
             let i = 3 * (y * w + x);
             for c in 0..3 {
                 px[i + c] += a * (target[c] - px[i + c]);
             }
         }
     }
+}
+
+/// How grainy the photo is just around a spot, per channel: the spread of each pixel
+/// from its four neighbours' mean, in a ring outside the spot (as a standard deviation of
+/// the pixels themselves).
+fn surrounding_grain(px: &[f32], w: usize, h: usize, s: &SpotPx) -> [f32; 3] {
+    let (x0, y0, bw, bh) = s.bbox((0.5 * s.r).max(8.0), w, h);
+    let step = ((bw * bh) / 40_000).max(1);
+    let (mut sum, mut n) = ([0.0f64; 3], 0usize);
+    for k in (0..bw * bh).step_by(step) {
+        let (x, y) = (x0 + k % bw, y0 + k / bw);
+        if x == 0 || y == 0 || x + 1 >= w || y + 1 >= h || s.coverage(x, y) > 0.0 {
+            continue;
+        }
+        let i = 3 * (y * w + x);
+        for (c, total) in sum.iter_mut().enumerate() {
+            let around = 0.25 * (px[i - 3 + c] + px[i + 3 + c] + px[i - 3 * w + c] + px[i + 3 * w + c]);
+            *total += f64::from(px[i + c] - around).powi(2);
+        }
+        n += 1;
+    }
+    if n < 50 {
+        return [0.0; 3];
+    }
+    // A pixel less its neighbours' mean has 1.25 times the noise's variance.
+    sum.map(|v| ((v / n as f64) / 1.25).sqrt() as f32)
 }
 
 /// The healed copy cached with the image.
@@ -659,6 +891,7 @@ mod tests {
             fill: None,
             strokes: vec![],
             found: false,
+            area: None,
         };
         // Clone: the source's value (from x = 110).
         let cloned = healed(&img, &[spot(SpotMode::Clone)], None);
@@ -688,6 +921,7 @@ mod tests {
             fill: None,
             strokes: vec![],
             found: false,
+            area: None,
         };
         let out = healed(&img, &[spot], None);
         let at = |x, y| out.pixels.get_pixel(x, y)[0];

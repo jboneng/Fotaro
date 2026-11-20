@@ -290,6 +290,8 @@ pub enum AiKind {
     Remove,
     /// Dust & Scratches found by the AI model.
     Dust,
+    /// Distractions → People: the people in the photo found and outlined.
+    People,
 }
 
 impl AiKind {
@@ -301,6 +303,7 @@ impl AiKind {
             AiKind::Object => "Object",
             AiKind::Remove => "Remove",
             AiKind::Dust => "Dust & Scratches",
+            AiKind::People => "People",
         }
     }
 
@@ -311,6 +314,7 @@ impl AiKind {
             AiKind::Object => segment::AiModel::Object,
             AiKind::Remove => segment::AiModel::Remove,
             AiKind::Dust => segment::AiModel::Scratches,
+            AiKind::People => segment::AiModel::People,
         }
     }
 
@@ -322,6 +326,7 @@ impl AiKind {
             segment::AiModel::Remove => "LaMa-Dilated",
             segment::AiModel::RemoveBest => "big-LaMa",
             segment::AiModel::Scratches => "scratch detector",
+            segment::AiModel::People => "RT-DETR",
         }
     }
 }
@@ -585,6 +590,59 @@ fn run_dust(
     Ok((id, None))
 }
 
+/// Distractions → People: find the people in `rgb` (the photo developed, turned upright
+/// by `rotation`; `size` is its size in file orientation), keep each outline as a picture,
+/// and return them in file orientation.
+fn run_people(
+    photo_id: i64,
+    job: &AiJob,
+    rgb: &image::RgbImage,
+    size: (u32, u32),
+    rotation: u8,
+    gpu: bool,
+    ctx: &egui::Context,
+) -> Result<Vec<FoundPerson>> {
+    use image::imageops::{rotate90, rotate180, rotate270};
+    let set = |share: f32, what: String| {
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
+        ctx.request_repaint();
+    };
+    let models = [segment::AiModel::People, segment::AiModel::Object];
+    if !segment::ready(&models) {
+        let mut last = std::time::Instant::now();
+        segment::ensure(&models, &mut |share, what| {
+            if last.elapsed().as_millis() > 100 {
+                last = std::time::Instant::now();
+                set(share, format!("Downloading {what}"));
+            }
+        })?;
+    }
+    let started = std::time::Instant::now();
+    let people = segment::find_people(rgb, 0.3, gpu, &|share, what| set(share, what.to_owned()))?;
+    log::info!("People: {} found in {:.1?}", people.len(), started.elapsed());
+    let (fw, fh) = (size.0 as f32, size.1 as f32);
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let mut out = Vec::new();
+    for (k, p) in people.into_iter().enumerate() {
+        // Back to the file's orientation (as AI masks are kept).
+        let [l, t, r, b] = p.rect.map(|v| v as f32);
+        let (rect, mask) = match rotation % 4 {
+            1 => ([t, fh - r, b, fh - l], rotate270(&p.mask)),
+            2 => ([fw - r, fh - b, fw - l, fh - t], rotate180(&p.mask)),
+            3 => ([fw - b, l, fw - t, r], rotate90(&p.mask)),
+            _ => ([l, t, r, b], p.mask),
+        };
+        let id = format!("{photo_id}-person-{stamp:x}-{k}");
+        imaging::develop::save_mask_picture(&id, &mask)?;
+        out.push(FoundPerson {
+            area: imaging::develop::SpotMask { id, rect: [rect[0] / fw, rect[1] / fh, rect[2] / fw, rect[3] / fh] },
+            score: p.score,
+            picked: p.score >= PEOPLE_SURE,
+        });
+    }
+    Ok(out)
+}
+
 /// How much smaller the AI model sees the photo (film specks must stay a few pixels; a
 /// third is twice as fast but finds less, measured on annotated film scans).
 const AI_DUST_SCALE: f32 = 0.5;
@@ -650,7 +708,22 @@ enum Request {
     Dust { photo_id: i64, key: u64, layer: imaging::develop::DustLayer, ir: Option<IrFiles>, job: AiJob, gpu: bool },
     /// Dust & Scratches' found defects over the proxy, for the red overlay.
     DustOverlay { photo_id: i64, settings: DevelopSettings, seq: u64 },
+    /// Distractions → People: find the people in the full-size photo developed with
+    /// `settings` (turned `rotation` quarter turns to stand upright).
+    FindPeople { photo_id: i64, job: AiJob, settings: DevelopSettings, rotation: u8, gpu: bool },
 }
+
+/// A person found by Distractions → People: their outline (in the mask store), how sure
+/// the detector is, and whether they are to be removed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundPerson {
+    pub area: imaging::develop::SpotMask,
+    pub score: f32,
+    pub picked: bool,
+}
+
+/// Found people the detector is less sure of start not picked (the user ticks them).
+const PEOPLE_SURE: f32 = 0.5;
 
 /// A scan's infrared pass and, if there is one, its valid mask (NegPy's `_IR`, `_IR_valid`).
 #[derive(Debug, Clone, PartialEq)]
@@ -761,6 +834,11 @@ enum Reply {
         photo_id: i64,
         result: std::result::Result<(String, &'static str), String>,
     },
+    /// The people found, or why finding failed.
+    People {
+        photo_id: i64,
+        result: std::result::Result<Vec<FoundPerson>, String>,
+    },
     /// Dust & Scratches' mask picture for the layer key `key` (and the AI model's map, if
     /// it made one), or why it failed.
     Dusted {
@@ -847,6 +925,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     let mut fills: Vec<(i64, AiJob, usize, u64, DevelopSettings, bool, bool)> = Vec::new();
     let mut dusts: Vec<(i64, u64, imaging::develop::DustLayer, Option<IrFiles>, AiJob, bool)> = Vec::new();
     let mut dust_overlay: Option<(i64, DevelopSettings, u64)> = None;
+    let mut finds: Vec<(i64, AiJob, DevelopSettings, u8, bool)> = Vec::new();
     // The photo small, for thumbnails.
     let mut small: Option<(i64, WorkingImage)> = None;
     loop {
@@ -895,6 +974,9 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 }
                 Request::Dust { photo_id, key, layer, ir, job, gpu } => dusts.push((photo_id, key, layer, ir, job, gpu)),
                 Request::DustOverlay { photo_id, settings, seq } => dust_overlay = Some((photo_id, settings, seq)),
+                Request::FindPeople { photo_id, job, settings, rotation, gpu } => {
+                    finds.push((photo_id, job, settings, rotation, gpu))
+                }
             }
         }
         if let Some((photo_id, path, kind, max_px)) = load {
@@ -938,6 +1020,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         fills.retain(|f| Some(f.0) == wanted);
         dusts.retain(|d| Some(d.0) == wanted);
         dust_overlay = dust_overlay.filter(|o| Some(o.0) == wanted);
+        finds.retain(|f| Some(f.0) == wanted);
         let Some((id, img)) = &current else {
             ctx.request_repaint();
             continue;
@@ -1077,6 +1160,38 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                     ctx.request_repaint();
                 })
                 .expect("start a dust thread");
+        }
+        // People: the full-size photo developed as AI masks see it (no geometry, effects or
+        // masks; upright), then the models on a thread of their own.
+        let (ready, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut finds).into_iter().partition(|f| full.as_ref().is_some_and(|(fid, _)| *fid == f.0));
+        finds = waiting;
+        if let Some(f) = finds.first() {
+            load_full(&mut full_loading, &source, f.0, &full_tx, &ctx);
+        }
+        for (photo_id, job, mut settings, rotation, gpu) in ready {
+            let Some((_, full_img)) = &full else { continue };
+            settings.transform = Default::default();
+            settings.effects = Default::default();
+            settings.masks.clear();
+            let size = (full_img.width(), full_img.height());
+            let rgb = render_region_srgb8_view(full_img, &settings, Region::whole(full_img), None);
+            let rgb = match rotation % 4 {
+                1 => image::imageops::rotate90(&rgb),
+                2 => image::imageops::rotate180(&rgb),
+                3 => image::imageops::rotate270(&rgb),
+                _ => rgb,
+            };
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            std::thread::Builder::new()
+                .name("ai-people".into())
+                .spawn(move || {
+                    let result =
+                        run_people(photo_id, &job, &rgb, size, rotation, gpu, &ctx).map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Reply::People { photo_id, result });
+                    ctx.request_repaint();
+                })
+                .expect("start a People thread");
         }
         // Remove fills: from the full-size photo (loading it first), then the model on a
         // thread of its own.
@@ -1252,10 +1367,17 @@ pub struct DevelopState {
     dust_failed: Vec<u64>,
     /// The user agreed to (or declined) the AI model's download for Dust & Scratches.
     dust_ai_allowed: bool,
+    /// The user agreed to the People models' download.
+    people_allowed: bool,
     /// Show Dust & Scratches' found defects in red.
     pub show_dust: bool,
     /// Sensor dust: Find's sensitivity (0..100).
     pub sensor_sensitivity: f32,
+    /// Distractions → People: the search running, and the people it found (until removed
+    /// or searched again); `people_searched` once a search has answered.
+    pub people_job: Option<AiJob>,
+    pub people: Vec<FoundPerson>,
+    pub people_searched: bool,
     /// Sensor dust: Find is running; what it last found (shown in the panel).
     pub sensor_finding: bool,
     pub sensor_result: Option<String>,
@@ -1361,8 +1483,12 @@ impl DevelopState {
             dust_job: None,
             dust_failed: Vec::new(),
             dust_ai_allowed: false,
+            people_allowed: false,
             show_dust: false,
             sensor_sensitivity: 50.0,
+            people_job: None,
+            people: Vec::new(),
+            people_searched: false,
             sensor_finding: false,
             sensor_result: None,
             object_rect: false,
@@ -1406,6 +1532,9 @@ impl DevelopState {
         self.dust_failed.clear();
         self.sensor_finding = false;
         self.sensor_result = None;
+        self.people_job = None;
+        self.people.clear();
+        self.people_searched = false;
         self.ir_pass = find_ir_pass(catalog, photo);
         self.info = None;
         self.textures.clear();
@@ -1674,6 +1803,17 @@ impl DevelopState {
                     log::warn!("develop: {error}");
                     self.error = Some(error);
                 }
+                Reply::People { photo_id, result } if Some(photo_id) == self.photo => {
+                    self.people_job = None;
+                    self.people_searched = true;
+                    match result {
+                        Ok(people) => self.people = people,
+                        Err(e) => {
+                            log::warn!("People: {e}");
+                            self.error = Some(format!("Couldn't find people: {e}"));
+                        }
+                    }
+                }
                 Reply::Dusted { photo_id, key, result } if Some(photo_id) == self.photo => {
                     self.dust_job = None;
                     match result {
@@ -1788,6 +1928,59 @@ impl DevelopState {
         self.dust_job = Some((key, job));
     }
 
+    /// Distractions → People: find the people (asking before the models' first download).
+    pub fn find_people(&mut self) {
+        let Some(photo_id) = self.photo else { return };
+        if self.people_job.is_some() {
+            return;
+        }
+        let models = [segment::AiModel::People, segment::AiModel::Object];
+        if !self.people_allowed && !segment::ready(&models) {
+            let bytes = segment::download_size(&models);
+            self.ai_consent =
+                Some(AiConsent { kind: AiKind::People, target: ToolTarget::NewMask, prompt: None, bytes });
+            return;
+        }
+        let job = AiJob { kind: AiKind::People, target: ToolTarget::NewMask, prompt: None, progress: Default::default() };
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Finding people…".into());
+        let (settings, rotation, gpu) = (self.settings.clone(), self.rotation, self.ai_gpu);
+        let _ = self.tx.send(Request::FindPeople { photo_id, job: job.clone(), settings, rotation, gpu });
+        self.people_job = Some(job);
+        self.people.clear();
+        self.people_searched = false;
+    }
+
+    /// Remove the picked people: a Remove spot each (filled one by one, as other Remove
+    /// spots). Returns how many.
+    pub fn remove_people(&mut self) -> usize {
+        let picked: Vec<FoundPerson> = self.people.iter().filter(|p| p.picked).cloned().collect();
+        if picked.is_empty() {
+            return 0;
+        }
+        let (w, h) = self.info.as_ref().map_or((1, 1), |i| i.full_size);
+        let half = w.max(h) as f32 / 2.0;
+        let mut st = self.settings.clone();
+        for p in &picked {
+            let [l, t, r, b] = p.area.rect;
+            let radius = ((r - l) * w as f32).max((b - t) * h as f32) / 2.0 / half;
+            st.spots.push(imaging::develop::Spot {
+                mode: imaging::develop::SpotMode::Remove,
+                points: vec![[(l + r) / 2.0, (t + b) / 2.0]],
+                size: radius,
+                feather: 10.0,
+                opacity: 100.0,
+                offset: [0.0, 0.0],
+                fill: None,
+                strokes: Vec::new(),
+                found: false,
+                area: Some(p.area.clone()),
+            });
+        }
+        self.people.clear();
+        self.set_live(st);
+        picked.len()
+    }
+
     /// Dust & Scratches' Recalculate: find the defects again with the current settings
     /// (also after a failure). The AI model's map of the photo is kept: it would come out
     /// the same.
@@ -1864,6 +2057,11 @@ impl DevelopState {
 
     /// Make an AI mask (downloading first whatever it still needs).
     pub fn start_ai(&mut self, kind: AiKind, target: ToolTarget, prompt: Option<ObjectPrompt>) {
+        if kind == AiKind::People {
+            (self.people_allowed, self.ai_consent) = (true, None);
+            self.find_people();
+            return;
+        }
         if kind == AiKind::Dust {
             (self.dust_ai_allowed, self.ai_consent) = (true, None);
             self.request_dust();

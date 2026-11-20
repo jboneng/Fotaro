@@ -340,7 +340,7 @@ pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, D
         let result = match model {
             AiModel::Subject => subject_rmbg(session, img),
             AiModel::Sky => sky(session, img),
-            AiModel::Object | AiModel::Remove | AiModel::RemoveBest | AiModel::Scratches => {
+            AiModel::Object | AiModel::Remove | AiModel::RemoveBest | AiModel::Scratches | AiModel::People => {
                 bail!("{} isn't a selection", model.label())
             }
         };
@@ -531,6 +531,247 @@ fn folded(src: &Path) -> Result<std::path::PathBuf> {
     std::fs::rename(&part, &dst)?;
     log::info!("AI: decoded {} for the GPU in {:.1?}", src.display(), started.elapsed());
     Ok(dst)
+}
+
+/// COCO classes (of the detector's 80) that go with the person carrying or riding them.
+const BELONGINGS: [usize; 8] = [
+    24, // backpack
+    25, // umbrella
+    26, // handbag
+    28, // suitcase
+    32, // sports ball
+    33, // kite
+    36, // skateboard
+    37, // surfboard
+];
+
+/// A person found in a photo: where (photo pixels: left, top, right, bottom), how sure the
+/// detector is (0..1), and their outline over `rect` (with what they carry), 255 inside.
+pub struct Person {
+    pub rect: [u32; 4],
+    pub score: f32,
+    pub mask: GrayImage,
+}
+
+/// Distractions → People: the people in `img` (the photo at full size, upright), down to
+/// a detector score of `threshold`, with their outlines.
+///
+/// The detector (RT-DETR, on the GPU when `gpu`) looks at the whole photo and at
+/// overlapping 1280 px tiles of it, so small, distant people are found too; boxes cut by a
+/// tile's inner edge are left to the tile holding them, the rest merged. Bags, umbrellas,
+/// boards and the like overlapping a person go with them. The outlines come from Segment
+/// Anything on crops around each person (several close people share one), on the CPU
+/// (faster there than DirectML for its image encoder). `progress` hears the share done and
+/// what is happening.
+pub fn find_people(img: &RgbImage, threshold: f32, gpu: bool, progress: &dyn Fn(f32, &str)) -> Result<Vec<Person>> {
+    const TILE: u32 = 1280;
+    const SIDE: u32 = 640;
+    let (w, h) = img.dimensions();
+    let mut views = vec![(0, 0, w, h)];
+    let step = TILE * 3 / 4;
+    if w > TILE || h > TILE {
+        let starts = |n: u32| -> Vec<u32> {
+            let mut v: Vec<u32> = (0..n.saturating_sub(TILE)).step_by(step as usize).collect();
+            v.push(n.saturating_sub(TILE));
+            v.dedup();
+            v
+        };
+        for y in starts(h) {
+            for x in starts(w) {
+                views.push((x, y, TILE.min(w), TILE.min(h)));
+            }
+        }
+    }
+    // (left, top, right, bottom, score, class)
+    let mut found: Vec<([f32; 4], f32, usize)> = Vec::new();
+    let mut detect = |model: &mut Model| -> Result<()> {
+        found.clear();
+        for (k, &(vx, vy, vw, vh)) in views.iter().enumerate() {
+            progress(0.6 * k as f32 / views.len() as f32, "Finding people…");
+            let crop = imageops::crop_imm(img, vx, vy, vw, vh).to_image();
+            let small = imageops::resize(&crop, SIDE, SIDE, imageops::FilterType::Triangle);
+            let n = (SIDE * SIDE) as usize;
+            let mut pixels = vec![0.0f32; 3 * n];
+            for (i, p) in small.pixels().enumerate() {
+                for c in 0..3 {
+                    pixels[c * n + i] = f32::from(p[c]) / 255.0;
+                }
+            }
+            let input = Tensor::from_array(([1usize, 3, SIDE as usize, SIDE as usize], pixels))?;
+            let outputs = model.session.run(ort::inputs!["pixel_values" => input])?;
+            let (shape, logits) = outputs["logits"].try_extract_tensor::<f32>()?;
+            let (_, boxes) = outputs["pred_boxes"].try_extract_tensor::<f32>()?;
+            let classes = shape[shape.len() - 1] as usize;
+            for q in 0..logits.len() / classes {
+                let row = &logits[q * classes..(q + 1) * classes];
+                let (c, best) = row.iter().enumerate().fold((0, f32::MIN), |m, (i, v)| if *v > m.1 { (i, *v) } else { m });
+                let score = sigmoid(best);
+                if score < threshold || (c != 0 && !BELONGINGS.contains(&c)) {
+                    continue;
+                }
+                let b = &boxes[q * 4..q * 4 + 4];
+                let (vx, vy, vw, vh) = (vx as f32, vy as f32, vw as f32, vh as f32);
+                let r = [
+                    vx + (b[0] - b[2] / 2.0) * vw,
+                    vy + (b[1] - b[3] / 2.0) * vh,
+                    vx + (b[0] + b[2] / 2.0) * vw,
+                    vy + (b[1] + b[3] / 2.0) * vh,
+                ];
+                // Cut by a tile's inner edge: another tile holds it whole.
+                const EDGE: f32 = 4.0;
+                let cut = (r[0] < vx + EDGE && vx > 0.0)
+                    || (r[1] < vy + EDGE && vy > 0.0)
+                    || (r[2] > vx + vw - EDGE && vx + vw < w as f32)
+                    || (r[3] > vy + vh - EDGE && vy + vh < h as f32);
+                if !cut {
+                    found.push((r, score, c));
+                }
+            }
+        }
+        Ok(())
+    };
+    let devices: &[Device] =
+        if gpu && cfg!(windows) { &[Device::DirectMl, Device::Cpu] } else { &[Device::Cpu] };
+    let mut done = false;
+    let mut last = None;
+    for &device in devices {
+        let mut model = match Model::load(&AiModel::People.path(), device) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("AI: {} on {}: {e:#}", AiModel::People.label(), device.label());
+                last = Some(e);
+                continue;
+            }
+        };
+        match detect(&mut model) {
+            Ok(()) => {
+                done = true;
+                break;
+            }
+            Err(e) => {
+                log::warn!("AI: {} failed on {}: {e:#}", AiModel::People.label(), device.label());
+                last = Some(e);
+            }
+        }
+    }
+    if !done {
+        return Err(last.unwrap_or_else(|| anyhow!("no device to find people on")));
+    }
+    // One box per thing: the surest of those overlapping much (by the smaller's area).
+    let overlap = |a: &[f32; 4], b: &[f32; 4]| {
+        let ix = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+        let iy = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+        let area = |r: &[f32; 4]| ((r[2] - r[0]) * (r[3] - r[1])).max(1e-6);
+        ix * iy / area(a).min(area(b))
+    };
+    found.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut kept: Vec<([f32; 4], f32, usize)> = Vec::new();
+    for f in found {
+        if kept.iter().all(|k| k.2 != f.2 || overlap(&k.0, &f.0) <= 0.6) {
+            kept.push(f);
+        }
+    }
+    let (people, things): (Vec<_>, Vec<_>) = kept.into_iter().partition(|k| k.2 == 0);
+    // Each belonging goes with the person its box overlaps most (at least 30% of it, with
+    // the person's box grown by a tenth).
+    let mut groups: Vec<(Vec<[f32; 4]>, f32)> = people.iter().map(|p| (vec![p.0], p.1)).collect();
+    for t in &things {
+        let grown = |r: &[f32; 4]| {
+            let (gx, gy) = ((r[2] - r[0]) * 0.1, (r[3] - r[1]) * 0.1);
+            [r[0] - gx, r[1] - gy, r[2] + gx, r[3] + gy]
+        };
+        let share = |p: &[f32; 4]| {
+            let g = grown(p);
+            let ix = (g[2].min(t.0[2]) - g[0].max(t.0[0])).max(0.0);
+            let iy = (g[3].min(t.0[3]) - g[1].max(t.0[1])).max(0.0);
+            ix * iy / ((t.0[2] - t.0[0]) * (t.0[3] - t.0[1])).max(1e-6)
+        };
+        if let Some((i, s)) =
+            people.iter().enumerate().map(|(i, p)| (i, share(&p.0))).max_by(|a, b| a.1.total_cmp(&b.1))
+            && s >= 0.3
+        {
+            groups[i].0.push(t.0);
+        }
+    }
+    // Outlines: Segment Anything with each box on a crop around it (the box three times
+    // over, at least 256 px, square), crops of nearby people merged while they stay small
+    // enough to keep their detail (1024 px: the encoder's size).
+    let crop_of = |r: &[f32; 4]| {
+        let (cx, cy) = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
+        let s = ((r[2] - r[0]).max(r[3] - r[1]) * 3.0).max(256.0);
+        [cx - s / 2.0, cy - s / 2.0, cx + s / 2.0, cy + s / 2.0]
+    };
+    let union = |a: &[f32; 4], b: &[f32; 4]| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])];
+    let mut crops: Vec<([f32; 4], Vec<usize>)> = Vec::new();
+    for (i, g) in groups.iter().enumerate() {
+        let c = g.0.iter().map(crop_of).reduce(|a, b| union(&a, &b)).unwrap_or([0.0; 4]);
+        let joined = crops.iter_mut().find(|(k, _)| {
+            let u = union(k, &c);
+            overlap(k, &c) > 0.0 && (u[2] - u[0]).max(u[3] - u[1]) <= 1024.0
+        });
+        match joined {
+            Some((k, members)) => {
+                *k = union(k, &c);
+                members.push(i);
+            }
+            None => crops.push((c, vec![i])),
+        }
+    }
+    let mut out = Vec::new();
+    let photo_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hsh = std::collections::hash_map::DefaultHasher::new();
+        (w, h, img.as_raw().len(), &img.as_raw()[..img.as_raw().len().min(4096)]).hash(&mut hsh);
+        hsh.finish()
+    };
+    for (n, (c, members)) in crops.iter().enumerate() {
+        progress(0.6 + 0.4 * n as f32 / crops.len() as f32, "Outlining people…");
+        let x0 = c[0].max(0.0) as u32;
+        let y0 = c[1].max(0.0) as u32;
+        let x1 = (c[2].ceil() as u32).min(w);
+        let y1 = (c[3].ceil() as u32).min(h);
+        if x1 <= x0 + 1 || y1 <= y0 + 1 {
+            continue;
+        }
+        let crop = imageops::crop_imm(img, x0, y0, x1 - x0, y1 - y0).to_image();
+        let key = photo_key ^ (u64::from(x0) << 40) ^ (u64::from(y0) << 20) ^ u64::from(x1 * 31 + y1);
+        for &i in members {
+            let (boxes, score) = &groups[i];
+            // The person and what they carry, each outlined, together.
+            let mut mask = GrayImage::new(x1 - x0, y1 - y0);
+            for b in boxes {
+                let rect = [b[0] - x0 as f32, b[1] - y0 as f32, b[2] - x0 as f32, b[3] - y0 as f32];
+                let (m, _) = select_object(key, &crop, &[], Some(rect), false)?;
+                for (o, v) in mask.pixels_mut().zip(m.pixels()) {
+                    if v[0] >= 128 {
+                        o[0] = 255;
+                    }
+                }
+            }
+            // A little larger (edges, hair, soft shadows close by), and cut to its box.
+            let mask = imageops::filter3x3(&mask, &[1.0; 9]);
+            let grown = GrayImage::from_fn(mask.width(), mask.height(), |x, y| {
+                image::Luma([if mask.get_pixel(x, y)[0] > 0 { 255 } else { 0 }])
+            });
+            let all = boxes.iter().copied().reduce(|a, b| union(&a, &b)).unwrap_or([0.0; 4]);
+            let (gx, gy) = ((all[2] - all[0]) * 0.15 + 4.0, (all[3] - all[1]) * 0.15 + 4.0);
+            let bx0 = ((all[0] - gx).max(x0 as f32) as u32).max(x0);
+            let by0 = ((all[1] - gy).max(y0 as f32) as u32).max(y0);
+            let bx1 = ((all[2] + gx).ceil() as u32).min(x1);
+            let by1 = ((all[3] + gy).ceil() as u32).min(y1);
+            if bx1 <= bx0 || by1 <= by0 {
+                continue;
+            }
+            let cut = imageops::crop_imm(&grown, bx0 - x0, by0 - y0, bx1 - bx0, by1 - by0).to_image();
+            if cut.pixels().all(|p| p[0] == 0) {
+                continue;
+            }
+            out.push(Person { rect: [bx0, by0, bx1, by1], score: *score, mask: cut });
+        }
+    }
+    progress(1.0, "Done");
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(out)
 }
 
 /// The scratch detector, kept loaded while it is used.

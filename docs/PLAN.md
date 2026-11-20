@@ -932,3 +932,43 @@ Kodak Gold scans. The colour scan's IR pass served as a reference for real dust.
     "Sensor Dust: n spots".
 - **Speed.** Masks are saved with fast PNG compression. Each stage of the dust job is
   logged (read, found, saved; and the full-size load).
+
+## Design: Remove → Distractions → People (2026-11-20)
+
+LrC finds the people in a photo and removes them. Ours: **Find**, then pick on the photo,
+then **Remove (n)**.
+- Found people are outlined. Orange ones will be removed; finds below 0.5 confidence start
+  faint and unpicked. A click switches one. All / None.
+- Remove makes each picked person a **Remove spot whose area is their outline** (a picture
+  in the mask store). Area Add/Subtract, moving and deleting work as for other spots.
+  Big-LaMa fills them one by one.
+
+How it finds them:
+- **Detector:** RT-DETR R18 (PekingU, Apache-2.0, COCO), onnx-community's int8 export
+  (22 MB). It runs on the whole photo and on overlapping 1280 px tiles, so small, distant
+  people (20–40 px on a 4600 px scan) are found too.
+  - Boxes cut by a tile's inner edge are dropped (another tile holds them whole), the rest
+    merged.
+  - Belongings (bag, backpack, umbrella, suitcase, ball, kite, skateboard, surfboard) go
+    with the person their box overlaps most (≥30%).
+  - About 13–20 s for 16–21 views on the T550 (fp32 about the same; int8 is the smaller
+    download).
+- **Outlines:** SAM 2.1 tiny with the box, on a crop three times its size (at least
+  256 px), nearby people sharing a crop up to 1024 px.
+  - On the **CPU**: its image encoder takes 2.4 s there against 12 s on DirectML on the
+    T550.
+  - Lifeguard photo: 12 found and outlined in under a minute.
+- **Fills:** a person's crop gets less room around it (0.75 radius, not 1.5), keeping
+  detail at the model's 512 px.
+  - Fills enlarged more than 1.25× get **grain** matched to the spot's surroundings (the
+    ring's fine-detail spread, per channel, by how much detail the enlargement lost).
+  - Without it, a large person's fill (2055 px crop at 512) looked smooth on grainy film.
+
+Seen in testing:
+- floats and buoys in the water can come up as low-confidence "people" (unpicked by
+  default);
+- a tower base came up as a "bench" (benches are not kept).
+
+Findings the app may want:
+- SAM's encoder is 5× faster on the CPU than on the T550, so Select Object's GPU default
+  may be the slower choice there.

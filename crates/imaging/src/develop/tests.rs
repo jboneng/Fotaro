@@ -1242,3 +1242,55 @@ fn dust_and_scratches_fill_the_found_defects_only() {
     assert!(DevelopSettings::from_json(r#"{"exposure":0.5}"#).unwrap().dust.is_none());
     set_mask_store(None);
 }
+
+#[test]
+fn a_spot_with_an_area_picture_covers_that_shape() {
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    // A 40 × 80 px "person" (an ellipse) in a picture over (100..160, 50..150) of a
+    // 300 × 200 photo.
+    let pic = image::GrayImage::from_fn(60, 100, |x, y| {
+        let (dx, dy) = ((x as f32 - 30.0) / 20.0, (y as f32 - 50.0) / 40.0);
+        image::Luma([if dx * dx + dy * dy <= 1.0 { 255 } else { 0 }])
+    });
+    save_mask_picture("test-person", &pic).unwrap();
+    let rect = [100.0 / 300.0, 50.0 / 200.0, 160.0 / 300.0, 150.0 / 200.0];
+    let spot = Spot {
+        mode: SpotMode::Clone,
+        points: vec![[130.0 / 300.0, 100.0 / 200.0]],
+        size: 0.01,
+        feather: 0.0,
+        area: Some(SpotMask { id: "test-person".into(), rect }),
+        ..Spot::default()
+    };
+    let area = SpotArea::new(&spot, 300, 200);
+    // Inside the ellipse, outside it (but inside its picture), and far away.
+    assert!(area.at(130.0, 100.0) > 0.99);
+    assert!(area.edge(130.0, 100.0) > 15.0, "{}", area.edge(130.0, 100.0));
+    assert_eq!(area.at(103.0, 55.0), 0.0);
+    assert!(area.edge(20.0, 20.0) < -50.0);
+    // The edge sits on the ellipse: about 20 px either side of the centre across.
+    assert!(area.edge(130.0 + 19.0, 100.0) > 0.0 && area.edge(130.0 + 21.5, 100.0) < 0.0);
+    let b = area.bounds();
+    assert!((b[0] - 100.0).abs() < 1.0 && (b[3] - 150.0).abs() < 1.0, "{b:?}");
+    // A stroke taking area away cuts into it.
+    let mut cut = spot.clone();
+    cut.strokes.push(SpotStroke { points: vec![[130.0 / 300.0, 100.0 / 200.0]], size: 0.02, erase: true });
+    assert_eq!(SpotArea::new(&cut, 300, 200).at(130.0, 100.0), 0.0);
+    // The area is part of the shape a fill is made for.
+    let mut moved = spot.clone();
+    moved.area.as_mut().unwrap().rect[0] += 0.01;
+    assert_ne!(moved.shape_key(), spot.shape_key());
+    // Cloned from 60 px to the right: inside the ellipse only.
+    let photo: RgbImage = ImageBuffer::from_fn(300, 200, |x, _| if x < 150 { Rgb([200, 40, 40]) } else { Rgb([40, 40, 200]) });
+    let img = rendered(&photo);
+    let s = DevelopSettings { spots: vec![Spot { offset: [60.0 / 300.0, 0.0], ..spot.clone() }], ..Default::default() };
+    let out = render_srgb8(&img, &s);
+    let plain = render_srgb8(&img, &DevelopSettings::default());
+    assert!(out.get_pixel(130, 100)[2] > out.get_pixel(130, 100)[0], "the inside is cloned (blue)");
+    assert_eq!(out.get_pixel(103, 55), plain.get_pixel(103, 55), "the picture's corner is not");
+    // Saved and read back; older spots have no area.
+    assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap().spots, s.spots);
+    set_mask_store(None);
+}

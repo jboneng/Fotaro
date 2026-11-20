@@ -762,6 +762,7 @@ pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
         let (title, what) = match kind {
             AiKind::Remove => ("Remove".to_owned(), "the model that fills removed areas".to_owned()),
             AiKind::Dust => ("Dust & Scratches".to_owned(), "the model that finds dust and scratches".to_owned()),
+            AiKind::People => ("People".to_owned(), "the models that find people and outline them".to_owned()),
             k => (
                 format!("Select {}", k.label()),
                 format!("the model that finds the {}", k.label().to_lowercase()),

@@ -25,6 +25,9 @@ pub enum AiModel {
     RemoveBest,
     /// Dust & Scratches: the scratch detector of "Bringing Old Photos Back to Life".
     Scratches,
+    /// Distractions → People: RT-DETR (R18) trained on COCO, finding people and what
+    /// they carry.
+    People,
 }
 
 impl AiModel {
@@ -36,6 +39,7 @@ impl AiModel {
             AiModel::Remove => "Remove (LaMa-Dilated)",
             AiModel::RemoveBest => "Remove, best quality (big-LaMa)",
             AiModel::Scratches => "Dust & Scratches (old-photo scratch detector)",
+            AiModel::People => "People (RT-DETR)",
         }
     }
 
@@ -47,6 +51,7 @@ impl AiModel {
             AiModel::Remove => &REMOVE,
             AiModel::RemoveBest => &REMOVE_BEST,
             AiModel::Scratches => &SCRATCHES,
+            AiModel::People => &PEOPLE,
         }
     }
 
@@ -114,6 +119,15 @@ const SCRATCHES: [Asset; 1] = [Asset {
     sha256: "7fde08b6af282f5b577ae1ef296a0614d7f3541637051df1a552da12bf78ec6f",
     size: 150_605_103,
     file: "scratches.onnx",
+}];
+
+/// People's detector (Apache-2.0): RT-DETR R18 by PekingU (trained on COCO), as
+/// onnx-community export it, int8. Any input size; 640 × 640 as trained.
+const PEOPLE: [Asset; 1] = [Asset {
+    url: "https://huggingface.co/onnx-community/rtdetr_r18vd/resolve/main/onnx/model_int8.onnx",
+    sha256: "328dfaa2505a376b2316a8fec5dcbc52125c477d8cd744977db5922c1b4d4486",
+    size: 21_713_196,
+    file: "rtdetr-r18vd-int8.onnx",
 }];
 
 /// SAM 2.1 tiny: the graphs keep their weights in `.onnx_data` files, found by name next
