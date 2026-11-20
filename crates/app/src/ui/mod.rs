@@ -16,6 +16,7 @@ mod import;
 mod keywords;
 pub mod layout;
 pub mod panels;
+pub mod presets;
 pub mod shortcuts;
 pub mod sidebars;
 pub mod theme;

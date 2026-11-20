@@ -1148,6 +1148,9 @@ pub struct PhotoLibraryApp {
     pub show_shortcuts: bool,
     pub toast: Option<Toast>,
     pub error: Option<String>,
+    /// Develop presets (app-wide, files in the app's data folder) and their panel's state.
+    pub presets: crate::presets::PresetStore,
+    pub presets_ui: crate::ui::presets::PresetsUi,
     /// The open modal dialog, if any.
     pub dialog: Option<Dialog>,
     pub commands: Vec<Command>,
@@ -1199,7 +1202,17 @@ impl PhotoLibraryApp {
             grid_rows_visible: 1,
             grid_scroll: (0.0, 0.0),
             perf: crate::perf::FrameStats::from_env(),
+            presets: Default::default(),
+            presets_ui: Default::default(),
         };
+        // Presets and imported LUTs live in the app's data folder (PL_DATA_DIR overrides).
+        let data = std::env::var_os("PL_DATA_DIR").map(PathBuf::from).or_else(|| {
+            directories::ProjectDirs::from("", "", "PhotoLibrary").map(|d| d.data_dir().to_path_buf())
+        });
+        if let Some(data) = &data {
+            imaging::develop::set_lut_store(data.join("LUTs"));
+        }
+        app.presets = crate::presets::PresetStore::load(data.map(|d| d.join("Develop Presets")));
         if let Some(dir) = args.catalog {
             let create = !dir.join("catalog.db").is_file();
             app.open_catalog(&cc.egui_ctx, &dir, create);
@@ -1699,6 +1712,7 @@ impl PhotoLibraryApp {
             | Action::ResetSettings
             | Action::CopySettings
             | Action::PasteSettings
+            | Action::NewSnapshot
             | Action::Undo
             | Action::Redo => {
                 if self.module == Module::Develop {
@@ -1944,6 +1958,14 @@ impl PhotoLibraryApp {
     /// badge), refresh cached panel contents, and write sidecars if auto-write is on.
     /// Run a Develop operation that may save settings; a saved photo's previews are then
     /// rebuilt, and its sidecar needs writing, as for any metadata change.
+    /// [`Self::develop_op`] for the panels.
+    pub fn develop_with(
+        &mut self,
+        f: impl FnOnce(&mut crate::develop::DevelopState, &mut Catalog) -> Result<crate::develop::Changed>,
+    ) {
+        self.develop_op(f);
+    }
+
     fn develop_op(
         &mut self,
         f: impl FnOnce(&mut crate::develop::DevelopState, &mut Catalog) -> Result<crate::develop::Changed>,
@@ -2038,9 +2060,14 @@ impl PhotoLibraryApp {
                 d.request_renders();
             }
             Action::CopySettings => {
-                d.clipboard = Some(d.settings.clone());
-                self.notify("Copied settings");
+                // LrC's Copy Settings dialog, ticked for what differs from a new photo
+                // (the per-photo groups only if they were copied last time).
+                let last = d.clipboard.as_ref().map(|(_, g)| g.clone());
+                let mut groups = imaging::develop::changed_groups(&d.settings, d.is_raw());
+                groups.retain(|g| !g.per_photo() || last.as_ref().is_some_and(|l| l.contains(g)));
+                self.presets_ui.copy = Some(groups);
             }
+            Action::NewSnapshot => crate::ui::presets::take_snapshot(self),
             Action::AutoWhiteBalance => self.develop_op(|d, c| {
                 let s = DevelopSettings { wb: WbPreset::Auto, ..d.settings.clone() };
                 d.apply(c, s, "White Balance: Auto")
@@ -2050,7 +2077,11 @@ impl PhotoLibraryApp {
                 d.apply(c, defaults, "Reset")
             }),
             Action::PasteSettings => match d.clipboard.clone() {
-                Some(clip) => self.develop_op(|d, c| d.apply(c, clip, "Paste Settings")),
+                Some((clip, groups)) => self.develop_op(|d, c| {
+                    let mut s = d.settings.clone();
+                    imaging::develop::copy_groups(&clip, &mut s, &groups);
+                    d.apply(c, s, "Paste Settings")
+                }),
                 None => self.notify("Copy settings from a photo first"),
             },
             Action::Undo => self.develop_op(|d, c| d.undo(c)),

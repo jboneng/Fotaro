@@ -24,6 +24,8 @@ use crate::jobs::Histogram;
 pub enum Slot {
     Current,
     Before,
+    /// A preset or snapshot under the pointer, for the Navigator.
+    Preview,
 }
 
 /// The Remove tool's settings for new spots (kept while the app runs).
@@ -1033,7 +1035,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             ctx.request_repaint();
             continue;
         };
-        for slot in [Slot::Current, Slot::Before] {
+        for slot in [Slot::Current, Slot::Before, Slot::Preview] {
             let Some((photo_id, settings, paint, view, seq)) =
                 renders.get(&slot).is_some_and(|r| r.0 == *id).then(|| renders.remove(&slot)).flatten()
             else {
@@ -1403,7 +1405,12 @@ pub struct DevelopState {
     /// When the shown settings last changed (regions wait until they settle).
     changed_at: std::time::Instant,
     /// Copy Settings / Paste Settings.
-    pub clipboard: Option<DevelopSettings>,
+    /// Copied settings and the groups Paste sets (LrC's Copy Settings dialog).
+    pub clipboard: Option<(DevelopSettings, Vec<imaging::develop::SettingsGroup>)>,
+    /// The photo's Snapshots (named settings), by name.
+    pub snapshots: Vec<catalog::Snapshot>,
+    /// The settings of the preset or snapshot under the pointer: the Navigator shows them.
+    pub preview: Option<DevelopSettings>,
     /// Tone Curve panel: point curve (else parametric), the channel edited, and the
     /// point being dragged.
     pub curve_point_mode: bool,
@@ -1430,6 +1437,14 @@ struct RegionRender {
 
 /// Which photos' catalog settings a call changed (for sidecars and filters).
 pub type Changed = Option<i64>;
+
+/// A change to a Snapshot from its menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SnapshotEdit {
+    Rename(String),
+    Update,
+    Delete,
+}
 
 impl DevelopState {
     pub fn new(ctx: &egui::Context) -> Self {
@@ -1513,6 +1528,8 @@ impl DevelopState {
             rotation: 0,
             changed_at: std::time::Instant::now(),
             clipboard: None,
+            snapshots: Vec::new(),
+            preview: None,
             curve_point_mode: false,
             curve_channel: imaging::develop::CurveChannel::Rgb,
             curve_drag: None,
@@ -1576,6 +1593,7 @@ impl DevelopState {
         self.shown.clear();
         self.picking_wb = false;
         self.redo.clear();
+        self.preview = None;
         // Load first: the renders asked for next need the photo.
         if photo.missing {
             self.error = Some("The file could not be found.".into());
@@ -1588,6 +1606,7 @@ impl DevelopState {
         }
         self.adopt(catalog.develop_settings(photo.id)?.as_deref());
         self.history = catalog.develop_history(photo.id)?;
+        self.snapshots = catalog.snapshots(photo.id)?;
         Ok(changed)
     }
 
@@ -1622,6 +1641,45 @@ impl DevelopState {
 
     /// A new photo's settings: LrC's defaults for its file type (RAWs get some sharpening
     /// and colour noise reduction).
+    /// Is the photo a RAW file (its new settings have some sharpening)?
+    pub fn is_raw(&self) -> bool {
+        self.raw
+    }
+
+    /// Keep the current settings as a Snapshot named `name`.
+    pub fn take_snapshot(&mut self, catalog: &mut Catalog, name: &str) -> Result<Changed> {
+        let Some(id) = self.photo else { return Ok(None) };
+        let changed = self.commit(catalog, None)?;
+        let json = (!self.settings.is_default_for(self.raw)).then(|| self.settings.to_json());
+        catalog.add_snapshot(id, name, json.as_deref())?;
+        self.snapshots = catalog.snapshots(id)?;
+        Ok(changed)
+    }
+
+    /// A Snapshot's settings become the photo's (a History step).
+    pub fn apply_snapshot(&mut self, catalog: &mut Catalog, snapshot: i64) -> Result<Changed> {
+        let Some(s) = self.snapshots.iter().find(|s| s.id == snapshot).cloned() else { return Ok(None) };
+        let settings = s.settings.as_deref().and_then(DevelopSettings::from_json).unwrap_or_else(|| self.defaults());
+        self.apply(catalog, settings, &format!("Snapshot: {}", s.name))
+    }
+
+    /// Rename, update with the current settings, or delete a Snapshot.
+    pub fn edit_snapshot(&mut self, catalog: &mut Catalog, snapshot: i64, edit: SnapshotEdit) -> Result<Changed> {
+        let Some(id) = self.photo else { return Ok(None) };
+        let mut changed = None;
+        match edit {
+            SnapshotEdit::Rename(name) => catalog.rename_snapshot(snapshot, &name)?,
+            SnapshotEdit::Update => {
+                changed = self.commit(catalog, None)?;
+                let json = (!self.settings.is_default_for(self.raw)).then(|| self.settings.to_json());
+                catalog.update_snapshot(snapshot, json.as_deref())?;
+            }
+            SnapshotEdit::Delete => catalog.delete_snapshot(snapshot)?,
+        }
+        self.snapshots = catalog.snapshots(id)?;
+        Ok(changed)
+    }
+
     pub fn defaults(&self) -> DevelopSettings {
         DevelopSettings::default_for(self.raw)
     }
@@ -1643,7 +1701,12 @@ impl DevelopState {
         if self.before {
             wanted.push((Slot::Before, self.defaults(), None));
         }
+        if let Some(p) = &self.preview {
+            wanted.push((Slot::Preview, p.clone(), None));
+        }
         for (slot, settings, view) in wanted {
+            // The Navigator's preview without clipping colours.
+            let clipping = clipping && slot != Slot::Preview;
             if self.sent.get(&slot).is_some_and(|(s, c, v, _)| *s == settings && *c == clipping && *v == view)
             {
                 continue;
@@ -1691,6 +1754,21 @@ impl DevelopState {
                 self.overlay = None;
             }
         }
+    }
+
+    /// Preview settings in the Navigator (a hovered preset or snapshot), or stop.
+    pub fn set_preview(&mut self, settings: Option<DevelopSettings>) {
+        if settings != self.preview {
+            self.preview = settings;
+            self.request_renders();
+        }
+    }
+
+    /// The Navigator's preview, once it has been rendered for the settings hovered now.
+    pub fn preview_texture(&self) -> Option<&egui::TextureHandle> {
+        self.preview.as_ref()?;
+        let sent = self.sent.get(&Slot::Preview)?.3;
+        (self.shown.get(&Slot::Preview).copied().unwrap_or(0) >= sent).then(|| self.textures.get(&Slot::Preview))?
     }
 
     /// Is a render of newer settings still on its way?

@@ -28,6 +28,13 @@ fn main() {
         json[k] = serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into()));
     }
     let mut settings: DevelopSettings = serde_json::from_value(json).expect("valid settings");
+    // `PL_LUT=<file.cube>` (and `PL_LUT_AMOUNT`, default 100): the LUT as the Profile.
+    if let Some(cube) = std::env::var_os("PL_LUT") {
+        imaging::develop::set_lut_store(std::env::temp_dir().join("pl-develop-luts"));
+        let l = imaging::develop::import_lut(std::path::Path::new(&cube)).expect("a .cube LUT");
+        let amount = std::env::var("PL_LUT_AMOUNT").ok().and_then(|a| a.parse().ok()).unwrap_or(100.0);
+        settings.profile = Some(imaging::develop::LutProfile { name: l.name, hash: l.hash, amount });
+    }
     // `upright=Full` (or Level, Vertical, Auto): analyse the photo, as the panel's buttons do.
     let upright: Option<Upright> = rest
         .iter()

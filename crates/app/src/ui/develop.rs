@@ -81,13 +81,10 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 let mut stack = std::mem::take(&mut app.ui.dev_left);
+                app.presets_ui.hover = None;
                 stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| navigator(app, ui));
-                stack.section(ui, Side::Left, "Presets", LEFT, false, |ui| {
-                    ui.label(weak("Develop presets come in a later version."));
-                });
-                stack.section(ui, Side::Left, "Snapshots", LEFT, false, |ui| {
-                    ui.label(weak("Snapshots come in a later version."));
-                });
+                stack.section(ui, Side::Left, "Presets", LEFT, true, |ui| super::presets::presets_panel(app, ui));
+                stack.section(ui, Side::Left, "Snapshots", LEFT, false, |ui| super::presets::snapshots_panel(app, ui));
                 stack.section(ui, Side::Left, "History", LEFT, true, |ui| history(app, ui));
                 stack.section(ui, Side::Left, "Collections", LEFT, false, |ui| {
                     super::collections::panel(app, ui)
@@ -96,11 +93,20 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             });
         });
     });
+    // The Navigator previews what is under the pointer (nothing: the photo as it is).
+    let hover = app.presets_ui.hover.take();
+    if let Some(s) = &mut app.session {
+        s.develop.set_preview(hover);
+    }
+    super::presets::dialogs(app, ui.ctx());
 }
 
 /// The Library's Navigator (zoom levels, visible area), showing the photo as developed.
 fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
-    let shown = app.session.as_ref().and_then(|s| s.develop.textures.get(&Slot::Current).cloned());
+    // A hovered preset or snapshot, once rendered; else the photo as it is.
+    let shown = app.session.as_ref().and_then(|s| {
+        s.develop.preview_texture().or_else(|| s.develop.textures.get(&Slot::Current)).cloned()
+    });
     super::sidebars::navigator(app, ui, shown);
 }
 
@@ -354,6 +360,75 @@ pub(super) fn sub_header(ui: &mut egui::Ui, title: &str, add_right: impl FnOnce(
     });
 }
 
+/// Basic's Profile: a 3D LUT (a creative look, after the base tone) and its Amount, as
+/// LrC's creative profiles. LUTs are imported (copied to the app's LUT folder) from here.
+fn profile_row(
+    ui: &mut egui::Ui,
+    st: &mut imaging::develop::DevelopSettings,
+    done: &mut Option<Option<String>>,
+    error: &mut Option<String>,
+) {
+    use imaging::develop::{LutProfile, import_lut, list_luts, lut_available};
+    let mut importing = false;
+    ui.horizontal(|ui| {
+        ui.add_sized([LABEL_W, 20.0], egui::Label::new(weak("Profile:")));
+        ui.add_space(4.0);
+        let shown = st.profile.as_ref().map_or_else(|| "None".to_string(), |p| p.name.clone());
+        egui::ComboBox::from_id_salt("dev_profile").selected_text(shown).width(150.0).show_ui(ui, |ui| {
+            if ui.selectable_label(st.profile.is_none(), "None").clicked() && st.profile.is_some() {
+                st.profile = None;
+                *done = Some(None);
+            }
+            for l in list_luts() {
+                let on = st.profile.as_ref().is_some_and(|p| p.hash == l.hash);
+                if ui.selectable_label(on, &l.name).clicked() && !on {
+                    let amount = st.profile.as_ref().map_or(100.0, |p| p.amount);
+                    st.profile = Some(LutProfile { name: l.name, hash: l.hash, amount });
+                    *done = Some(None);
+                }
+            }
+            ui.separator();
+            if ui.button("Import LUT…").on_hover_text("3D LUTs (.cube files)").clicked() {
+                importing = true;
+            }
+        })
+        .response
+        .on_hover_text("A look from a 3D LUT, applied after the basic tone; the other panels adjust on top");
+        if st.profile.as_ref().is_some_and(|p| !lut_available(&p.hash)) {
+            ui.label(RichText::new("⚠").color(Color32::from_rgb(230, 160, 40)))
+                .on_hover_text("This LUT isn't in the LUT folder: import its .cube file again");
+        }
+    });
+    if importing
+        && let Some(files) = rfd::FileDialog::new().set_title("Import LUT").add_filter("3D LUT", &["cube"]).pick_files()
+    {
+        let mut first = None;
+        for f in files {
+            match import_lut(&f) {
+                Ok(l) => first = first.or(Some(l)),
+                Err(e) => *error = Some(format!("{}: {e}", f.display())),
+            }
+        }
+        if let Some(l) = first {
+            st.profile = Some(LutProfile { name: l.name, hash: l.hash, amount: 100.0 });
+            *done = Some(None);
+        }
+    }
+    if let Some(p) = &mut st.profile {
+        let spec = Spec {
+            slider: Slider::MaskAmount(250),
+            range: (0.0, 200.0),
+            default: 100.0,
+            log: false,
+            gradient: None,
+            kelvin: false,
+        };
+        if slider_row_as(ui, &spec, "Amount", &mut p.amount).done {
+            *done = Some(None);
+        }
+    }
+}
+
 /// LrC's Basic panel.
 fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
@@ -381,6 +456,7 @@ fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             }
         }
     });
+    profile_row(ui, &mut st, &mut done, &mut d.error);
     ui.add_space(4.0);
 
     // White balance: selector, preset menu, Temp, Tint.

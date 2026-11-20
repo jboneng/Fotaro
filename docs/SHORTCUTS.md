@@ -102,7 +102,7 @@ Shortcuts work in both modules unless marked (Library) or listed under Develop.
 | `Ctrl+B` | Show Quick Collection | ✅ |
 | `Ctrl+Shift+B` | Clear Quick Collection | ✅ |
 | `Ctrl+Quote` | Create virtual copy | ✅ |
-| `Ctrl+N` | New collection (with the selected photos) | ✅ |
+| `Ctrl+N` | New collection (with the selected photos) (Library) | ✅ |
 | `Ctrl+G` | Group the selected pictures | ✅ |
 | `Ctrl+Shift+G` | Ungroup | ✅ |
 | `S` | Show / hide the version strip | ✅ |
@@ -161,8 +161,9 @@ Shortcuts work in both modules unless marked (Library) or listed under Develop.
 | `{` | Brush: less feather (Shift+[) | ✅ |
 | `}` | Brush: more feather (Shift+]) | ✅ |
 | `Ctrl+Shift+R` | Reset all settings | ✅ |
-| `Ctrl+Shift+C` | Copy settings | ✅ |
-| `Ctrl+Shift+V` | Paste settings | ✅ |
+| `Ctrl+Shift+C` | Copy settings (choose which) | ✅ |
+| `Ctrl+Shift+V` | Paste settings (the groups chosen in Copy) | ✅ |
+| `Ctrl+N` | New snapshot (the current settings, named) | ✅ |
 | `Ctrl+Z` | Undo | ✅ |
 | `Ctrl+Y` | Redo | ✅ |
 | `Ctrl+Shift+Z` | Redo | ✅ |

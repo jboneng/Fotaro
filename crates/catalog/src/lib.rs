@@ -20,7 +20,7 @@ pub use catalog::{
     SortOrder, Source,
 };
 pub use collections::{Collection, CollectionKind};
-pub use develop::HistoryStep;
+pub use develop::{HistoryStep, Snapshot};
 pub use export::{ExistingFiles, MetadataLevel, export_path, write_sidecar, xmp_packet};
 pub use folders::{Relocated, validate_folder_name};
 pub use import::{

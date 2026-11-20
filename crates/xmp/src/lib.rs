@@ -19,6 +19,8 @@ pub mod ns {
     pub const DC: &str = "http://purl.org/dc/elements/1.1/";
     pub const LR: &str = "http://ns.adobe.com/lightroom/1.0/";
     pub const TIFF: &str = "http://ns.adobe.com/tiff/1.0/";
+    /// Camera Raw / Lightroom develop settings (read from Lightroom presets).
+    pub const CRS: &str = "http://ns.adobe.com/camera-raw-settings/1.0/";
     /// This app's own properties (pick/reject flags have no standard XMP property;
     /// LrC keeps them in its catalog only).
     pub const PHOTOLIBRARY: &str = "https://github.com/jboneng/ImageLibrary/ns/xmp/1.0/";
@@ -193,6 +195,24 @@ impl XmpDoc {
                     let s = with_declarations(&scope, c);
                     ["Alt", "Seq", "Bag"].iter().any(|k| is_element(&s, &c.name, ns::RDF, k))
                 });
+                // A structure (a nested Description): its simple fields as `Name=value`.
+                let structure = child.elements().find(|c| {
+                    is_element(&with_declarations(&scope, c), &c.name, ns::RDF, "Description")
+                });
+                if container.is_none()
+                    && let Some(st) = structure
+                {
+                    let s = with_declarations(&scope, st);
+                    let fields = st
+                        .attrs
+                        .iter()
+                        .filter(|(n, _)| !n.starts_with("xmlns") && !is_attr(&s, n, ns::RDF, split(n).1))
+                        .map(|(n, v)| format!("{}={v}", split(n).1));
+                    let elems = st.elements().filter(|c| c.elements().next().is_none()).map(|c| {
+                        format!("{}={}", split(&c.name).1, c.text())
+                    });
+                    return Some(fields.chain(elems).collect());
+                }
                 return Some(match container {
                     Some(c) => {
                         let s = with_declarations(&scope, c);
@@ -209,6 +229,37 @@ impl XmpDoc {
             }
         }
         None
+    }
+
+    /// Every top-level property in namespace `uri` (by local name, first one wins), each
+    /// as [`Self::get`] gives it. Structured values (nested Descriptions) come out as their
+    /// text, so callers can tell they are there.
+    pub fn properties(&self, uri: &str) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for d in self.descriptions() {
+            let e = element_at(&self.nodes, &d.path);
+            for (n, _) in &e.attrs {
+                if is_attr(&d.scope, n, uri, split(n).1) {
+                    names.push(split(n).1.to_owned());
+                }
+            }
+            for child in e.elements() {
+                let scope = with_declarations(&d.scope, child);
+                let (prefix, local) = split(&child.name);
+                if resolve(&scope, prefix) == Some(uri) {
+                    names.push(local.to_owned());
+                }
+            }
+        }
+        for name in names {
+            if !out.iter().any(|(n, _)| *n == name)
+                && let Some(v) = self.get(uri, &name)
+            {
+                out.push((name, v));
+            }
+        }
+        out
     }
 
     fn get_one(&self, uri: &str, local: &str) -> Option<String> {

@@ -8,6 +8,7 @@ use super::dust::DustLayer;
 use super::effects::{EffectParam, Effects};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::heal::Spot;
+use super::lut::LutProfile;
 use super::hsl::{COLORS, Hsl, HslGroup};
 use super::masks::{Component, LocalParam, Mask, Shape};
 use super::transform::{Transform, TransformParam};
@@ -102,6 +103,8 @@ pub struct DevelopSettings {
     pub dehaze: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// Profile: a 3D LUT (creative look) after the base tone, with its amount.
+    pub profile: Option<LutProfile>,
     /// The Tone Curve panel.
     pub curve: ToneCurve,
     /// The HSL / Color panel.
@@ -143,6 +146,7 @@ impl Default for DevelopSettings {
             dehaze: 0.0,
             vibrance: 0.0,
             saturation: 0.0,
+            profile: None,
             curve: ToneCurve::default(),
             hsl: Hsl::default(),
             bw_mix: [0.0; 8],
@@ -534,6 +538,13 @@ impl DevelopSettings {
             eat(g.blending.to_bits());
             eat(g.balance.to_bits());
         }
+        if let Some(p) = &self.profile {
+            eat(0x9f_0f11e);
+            for b in p.hash.bytes() {
+                eat(u32::from(b));
+            }
+            eat(p.amount.to_bits());
+        }
         if self.bw_mix.iter().any(|v| *v != 0.0) {
             eat(0xb_a1);
             for v in &self.bw_mix {
@@ -550,6 +561,13 @@ impl DevelopSettings {
             return match self.treatment {
                 Treatment::Color => "Treatment: Color".into(),
                 Treatment::BlackAndWhite => "Treatment: Black & White".into(),
+            };
+        }
+        if self.profile != old.profile {
+            return match (&self.profile, &old.profile) {
+                (None, _) => "Profile: None".into(),
+                (Some(p), Some(o)) if p.hash == o.hash => format!("Profile Amount: {:.0}", p.amount),
+                (Some(p), _) => format!("Profile: {}", p.name),
             };
         }
         if self.curve != old.curve {

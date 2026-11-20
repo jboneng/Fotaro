@@ -7,9 +7,12 @@ mod detail;
 mod dust;
 mod effects;
 mod grading;
+mod groups;
 mod heal;
 mod hsl;
+mod lightroom;
 mod local;
+mod lut;
 mod masks;
 mod matrix;
 mod pipeline;
@@ -31,11 +34,17 @@ pub use dust::{
 };
 pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
+pub use groups::{SettingsGroup, changed_groups, copy_groups};
 pub use heal::{
     Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input,
     find_source,
 };
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
+pub use lightroom::{LrPreset, LrSummary, LrValue, apply_lightroom, lightroom_summary, lr_values_from_xmp, read_lrtemplate};
+pub use lut::{
+    Lut, LutProfile, StoredLut, content_hash, import_lut, list_luts, load_lut, lut_available, lut_store, parse_cube,
+    set_lut_store,
+};
 pub use masks::{
     CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke, save_fill_picture,
     mask_picture, save_mask_picture, set_mask_store,

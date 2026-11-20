@@ -10,6 +10,7 @@ mod import;
 mod jobs;
 mod perf;
 mod platform;
+mod presets;
 mod textures;
 mod ui;
 

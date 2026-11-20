@@ -972,3 +972,49 @@ Seen in testing:
 Findings the app may want:
 - SAM's encoder is 5× faster on the CPU than on the T550, so Select Object's GPU default
   may be the slower choice there.
+
+## Develop: Presets, Snapshots, Lightroom presets, LUT profiles (2026-11-20)
+
+Decided with the user: own presets choose their groups (LrC's New Preset checkboxes, also
+Copy Settings); Lightroom `.xmp` and `.lrtemplate` presets are imported; 3D LUTs (`.cube`)
+are a Profile in Basic, with an Amount, applied after the base tone.
+
+- [x] **Settings groups** (`imaging::develop::groups`): Treatment, White Balance, Basic Tone,
+      Presence, Profile, Tone Curve, HSL, B&W Mix, Color Grading, Sharpening, Noise
+      Reduction, Vignette, Grain, Glow, Transform, Crop, Masks, Spots, Dust. Every field is in
+      exactly one (a test copies all groups of fully changed settings). Transform, Crop and
+      the local ones are per photo: unticked unless asked for. Copy… (Ctrl+Shift+C) opens the
+      group dialog; Paste sets only those groups.
+- [x] **Presets** (left panel): files, one JSON each, in `<app data>/Develop Presets/<Folder>/`
+      (`PL_DATA_DIR` overrides the app data folder). A click applies one as a History step
+      ("Preset: name"); right-click: Update with Current Settings, Rename, Show in Explorer,
+      Delete; a filter box; four built-in presets. New Preset is ticked for what differs from
+      a new photo.
+- [x] **Snapshots** (catalog v8, `develop_snapshots`): "+" or Ctrl+N (Develop; New Collection
+      is now Library-only) keeps the settings under a name (asked for, the date to begin
+      with); a click goes back to them ("Snapshot: name"); Update, Rename, Delete. Virtual
+      copies start without any.
+- [x] **Lightroom presets**: `crs:` properties (`xmp::XmpDoc::properties`, structures such as
+      `crs:Look` as `Name=value` fields) or the `.lrtemplate` Lua table, mapped slider for slider
+      (`imaging::develop::lightroom`): Basic, Presence, parametric and point curves (0..255 →
+      0..1), HSL, B&W Mix, Color Grading and old Split Toning, Detail, vignette (style codes),
+      grain, Glow, Transform and Crop. Incremental WB for JPEG/TIFF, Kelvin for RAW. A black
+      & white profile (Default Monochrome, the B&W looks) turns the treatment B&W, as it does
+      in Lightroom. A preset sets only what it has. Not carried over, and shown in the preset's
+      tooltip: creative / camera profiles, lens corrections, calibration, local adjustments,
+      2010 process sliders, Point Color, Auto. Imported presets keep Lightroom's values (applied
+      per photo, so White Balance follows RAW or not). Import from files, a folder, or
+      Lightroom's own folder. Measured on Lightroom's bundled set: 1,075 files read without an
+      error: 456 presets (619 profiles skipped), 211 with something not carried over (128 a
+      creative profile).
+- [x] **LUT profiles** (`imaging::develop::lut`): `.cube` (3D, optional 1D shaper, DOMAIN, input
+      ranges), tetrahedral interpolation; input taken as sRGB-encoded. In the pipeline after
+      the tone tables and the masks' tone, before HSL: ProPhoto → sRGB (clamped), encode, look
+      up, mix by Amount (0..200; above 100 pushes further), decode, back. Imported files are
+      copied to `<app data>/LUTs/<hash>-<name>.cube`; settings name the hash; a missing file
+      renders without it and shows ⚠ on the Profile row.
+- [x] Hovering a preset or snapshot shows the photo with it in the Navigator (a third render
+      slot, shown once it has arrived for what is hovered; the photo as it is otherwise).
+- [ ] Later: Lightroom creative
+      profiles (their `crs:RGBTable` look tables) as LUTs; presets from Library (Quick
+      Develop, Import's Develop Settings).

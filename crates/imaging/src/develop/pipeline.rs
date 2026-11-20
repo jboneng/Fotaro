@@ -179,6 +179,8 @@ struct Prepared {
     locals: Option<Locals>,
     /// Glow, when on.
     glow: Option<Glow>,
+    /// Profile: a 3D LUT after the base tone, when set (and its file is there).
+    lut: Option<super::lut::PreparedLut>,
 }
 
 impl Prepared {
@@ -229,6 +231,7 @@ impl Prepared {
             vignette: Vignette::new(&s.effects, img.width(), img.height()),
             locals: field.map(|field| Locals::new(field, &s.masks)),
             glow: None,
+            lut: s.profile.as_ref().and_then(super::lut::PreparedLut::new),
         };
         // Masks' Dehaze, Clarity and Texture need the same maps as the global ones.
         let local = |f: fn(&LocalParams) -> f32| {
@@ -422,6 +425,10 @@ impl Prepared {
         ];
         if let Some((l, ms)) = masks {
             d = l.tone(d, ms, &self.luma);
+        }
+        // Profile: the LUT's look on the base tone; the colour panels adjust on top.
+        if let Some(lut) = &self.lut {
+            d = lut.apply(d);
         }
         // HSL in colour; in Black & White the B&W Mix decides how light each colour turns.
         if let Some(hsl) = &self.hsl

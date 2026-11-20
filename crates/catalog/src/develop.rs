@@ -18,6 +18,16 @@ pub struct HistoryStep {
     pub created_at: i64,
 }
 
+/// A Snapshots panel entry: settings kept under a name (`None`: as imported).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    pub id: i64,
+    pub name: String,
+    pub settings: Option<String>,
+    /// Unix seconds (taken or last updated).
+    pub created_at: i64,
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
@@ -118,6 +128,46 @@ impl Catalog {
         Ok(())
     }
 
+    /// The photo's Snapshots, by name.
+    pub fn snapshots(&self, photo_id: i64) -> Result<Vec<Snapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, settings, created_at FROM develop_snapshots WHERE photo_id = ?1
+             ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt.query_map([photo_id], |r| {
+            Ok(Snapshot { id: r.get(0)?, name: r.get(1)?, settings: r.get(2)?, created_at: r.get(3)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Keep `settings` as a Snapshot named `name`; returns its id.
+    pub fn add_snapshot(&mut self, photo_id: i64, name: &str, settings: Option<&str>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO develop_snapshots (photo_id, name, settings, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![photo_id, name, settings, now()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn rename_snapshot(&mut self, id: i64, name: &str) -> Result<()> {
+        self.conn.execute("UPDATE develop_snapshots SET name = ?2 WHERE id = ?1", params![id, name])?;
+        Ok(())
+    }
+
+    /// LrC's Update with Current Settings.
+    pub fn update_snapshot(&mut self, id: i64, settings: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE develop_snapshots SET settings = ?2, created_at = ?3 WHERE id = ?1",
+            params![id, settings, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_snapshot(&mut self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM develop_snapshots WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Photos with Develop settings (for the grid's "edited" badge).
     pub fn developed_photo_ids(&self) -> Result<HashSet<i64>> {
         let mut stmt = self.conn.prepare("SELECT photo_id FROM develop")?;
@@ -196,6 +246,25 @@ mod tests {
         std::fs::write(photos.join("a.xmp"), "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\"/></rdf:RDF></x:xmpmeta>").unwrap();
         assert!(cat.read_xmp(id, none).unwrap());
         assert_eq!(cat.develop_settings(id).unwrap().as_deref(), Some(json));
+    }
+
+    #[test]
+    fn snapshots_are_kept_renamed_updated_and_deleted() {
+        let (_tmp, mut cat, id) = catalog_with_photo();
+        let a = cat.add_snapshot(id, "Before", None).unwrap();
+        let b = cat.add_snapshot(id, "after edits", Some(r#"{"exposure":1.0}"#)).unwrap();
+        let names: Vec<String> = cat.snapshots(id).unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["after edits", "Before"]);
+        cat.rename_snapshot(b, "Bright").unwrap();
+        cat.update_snapshot(a, Some(r#"{"contrast":5}"#)).unwrap();
+        let s = cat.snapshots(id).unwrap();
+        assert_eq!((s[0].name.as_str(), s[0].settings.as_deref()), ("Before", Some(r#"{"contrast":5}"#)));
+        assert_eq!(s[1].name, "Bright");
+        cat.delete_snapshot(a).unwrap();
+        assert_eq!(cat.snapshots(id).unwrap().len(), 1);
+        // A virtual copy has none of its own.
+        let copy = cat.create_virtual_copy(id).unwrap();
+        assert!(cat.snapshots(copy).unwrap().is_empty());
     }
 
     #[test]

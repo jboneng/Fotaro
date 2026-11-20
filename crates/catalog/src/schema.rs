@@ -339,6 +339,17 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX develop_history_photo ON develop_history(photo_id, id);
     "#,
+    // v8: Develop snapshots (named settings kept with a photo).
+    r#"
+    CREATE TABLE develop_snapshots (
+        id         INTEGER PRIMARY KEY,
+        photo_id   INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        name       TEXT    NOT NULL,
+        settings   TEXT,   -- NULL: no settings (as imported)
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX develop_snapshots_photo ON develop_snapshots(photo_id, id);
+    "#,
 ];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
