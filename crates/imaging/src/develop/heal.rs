@@ -4,7 +4,9 @@
 //!
 //! Spots live in the untransformed photo's coordinates and are applied to the photo's own
 //! pixels before anything else (as LrC does), so the Transform, crop and masks follow
-//! them. The healed copy is cached with the image until the spots change.
+//! them. The healed copy is cached with the image until the spots change; so is the photo
+//! with only the spots before the one being worked on, so adding, moving or resizing a spot
+//! redoes that spot and the ones after it, not all of them.
 //!
 //! Healing: for the spot's area, the source's pixels times the ratio of the destination's
 //! and the source's local average colour, both measured on the ring around the spot only
@@ -455,7 +457,8 @@ impl SpotPx {
                 s.strokes.iter().filter(|t| !t.points.is_empty()).map(|t| stroke(&t.points, t.size, t.erase)),
             )
             .collect();
-        let raster_r = raster.as_ref().map_or(1.0, |p| (p.bounds[2] - p.bounds[0]).max(p.bounds[3] - p.bounds[1]) / 2.0);
+        let raster_r =
+            raster.as_ref().map_or(1.0, |p| (p.bounds[2] - p.bounds[0]).max(p.bounds[3] - p.bounds[1]) / 2.0);
         let r = strokes.iter().filter(|t| !t.erase).map(|t| t.r).fold(raster_r, f32::max);
         SpotPx {
             strokes,
@@ -692,7 +695,8 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
             if grain != [0.0; 3] {
                 // The same noise every render (by position), about normal.
                 let n = |k: u32| {
-                    let mut z = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77) ^ k;
+                    let mut z =
+                        (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77) ^ k;
                     z ^= z >> 15;
                     z = z.wrapping_mul(0x2C1B_3C6D);
                     z ^= z >> 12;
@@ -740,9 +744,19 @@ fn surrounding_grain(px: &[f32], w: usize, h: usize, s: &SpotPx) -> [f32; 3] {
     sum.map(|v| ((v / n as f64) / 1.25).sqrt() as f32)
 }
 
-/// The healed copy cached with the image.
+/// The healed copies cached with the image: with all the spots last asked for (`top`), and
+/// with the first of them only, up to the spot being worked on (`under`).
 #[derive(Debug, Default)]
-pub(super) struct HealCache(Mutex<Option<HealKey>>);
+pub(super) struct HealCache(Mutex<HealKept>);
+
+#[derive(Debug, Default)]
+struct HealKept {
+    top: Option<HealKey>,
+    under: Option<HealKey>,
+}
+
+/// Images above this many pixels keep no `under` copy (a full-size photo is hundreds of MB).
+const UNDER_MAX_PIXELS: usize = 4_000_000;
 
 /// The spots and the dust mask (its id, and what was painted out of it) a cached healed
 /// copy was made with.
@@ -768,26 +782,67 @@ pub(super) fn healed<'a>(
     if spots.is_empty() && dust_id.is_none() {
         return Geometry::Same(img);
     }
-    let mut cache = img.heal_cache.0.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(((key, k_dust), out)) = cache.as_ref()
-        && key == spots
-        && *k_dust == dust_id
-    {
-        return Geometry::Transformed(out.clone());
+    let mut kept = img.heal_cache.0.lock().unwrap_or_else(|e| e.into_inner());
+    let is = |k: &HealKey, s: &[Spot]| k.0.0 == s && k.0.1 == dust_id;
+    if let Some(k) = kept.top.as_ref().filter(|k| is(k, spots)) {
+        return Geometry::Transformed(k.1.clone());
     }
-    let mut out = img.clone();
+    // One spot fewer (an undo, a deleted last spot): the copy under it.
+    if let Some(k) = kept.under.clone().filter(|k| is(k, spots)) {
+        kept.top = Some(k.clone());
+        return Geometry::Transformed(k.1);
+    }
+    // Spots apply in order, so a copy made with the first few of these is where to go on
+    // from. `split`: how many spots come before the one being worked on (the first that
+    // differs from last time, or the last one).
+    let common = kept
+        .top
+        .as_ref()
+        .filter(|k| k.0.1 == dust_id)
+        .map_or(0, |k| k.0.0.iter().zip(spots).take_while(|(a, b)| a == b).count());
+    let split = common.min(spots.len().saturating_sub(1));
+    let base = [kept.top.as_ref(), kept.under.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter(|k| k.0.0.len() <= split && is(k, &spots[..k.0.0.len()]))
+        .max_by_key(|k| k.0.0.len())
+        .cloned();
     let f = Frame::of(img);
-    let mut px = std::mem::take(&mut out.pixels).into_raw();
-    // Film dust first (the spots go over it).
-    if let Some(mask) = dust.and_then(|d| d.mask_at_size(w, h)) {
-        super::dust::fill_masked(&mut px, w, h, &mask);
+    let copy = |px: Vec<f32>| Arc::new(img.with_pixels(px));
+    let (done, mut px) = match &base {
+        Some(k) => (k.0.0.len(), k.1.pixels.as_raw().clone()),
+        None => {
+            let mut px = img.pixels.as_raw().clone();
+            // Film dust first (the spots go over it).
+            if let Some(mask) = dust.and_then(|d| d.mask_at_size(w, h)) {
+                super::dust::fill_masked(&mut px, w, h, &mask);
+            }
+            (0, px)
+        }
+    };
+    if w * h <= UNDER_MAX_PIXELS {
+        // The copy under the spot being worked on: the base itself, or made from it.
+        let under = match base {
+            Some(k) if done == split => k,
+            _ => {
+                for spot in &spots[done..split] {
+                    apply_spot(&mut px, w, h, spot, f);
+                }
+                ((spots[..split].to_vec(), dust_id.clone()), copy(px.clone()))
+            }
+        };
+        kept.under = Some(under);
+    } else {
+        for spot in &spots[done..split] {
+            apply_spot(&mut px, w, h, spot, f);
+        }
+        kept.under = None;
     }
-    for spot in spots {
+    for spot in &spots[split..] {
         apply_spot(&mut px, w, h, spot, f);
     }
-    out.pixels = image::ImageBuffer::from_raw(w as u32, h as u32, px).expect("buffer size");
-    let out = Arc::new(out);
-    *cache = Some(((spots.to_vec(), dust_id), out.clone()));
+    let out = copy(px);
+    kept.top = Some(((spots.to_vec(), dust_id), out.clone()));
     Geometry::Transformed(out)
 }
 

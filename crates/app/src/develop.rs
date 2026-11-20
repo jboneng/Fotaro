@@ -1,11 +1,17 @@
 //! The Develop module's state, and the thread that renders the photo being developed.
 //!
-//! The worker keeps the current photo's pixels (a proxy about the screen's size) and
-//! renders the latest settings it was sent: while a slider is dragged, requests pile up
-//! faster than renders finish, and only the newest one is rendered.
+//! The worker keeps the current photo's pixels (a proxy about the screen's size); the
+//! render thread renders the latest settings it was sent from them: while a slider is
+//! dragged, requests pile up faster than renders finish, and only the newest one is
+//! rendered (as a quick draft first when a full render is slow). Everything else (Before,
+//! the Navigator's preview, overlays, thumbnails, analyses, 1:1 regions) is the worker's,
+//! so none of it delays the photo following a slider.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use catalog::{Catalog, FileKind, HistoryStep, PhotoRow};
@@ -14,7 +20,8 @@ use eframe::egui;
 use imaging::SourceKind;
 use imaging::develop::{
     DevelopSettings, Region, ResolvedWb, SharpenView, Upright, WbPreset, WorkingImage, apply_upright,
-    auto_tone, find_source, render_mask, render_region_srgb8_view, straighten_angle,
+    auto_tone, find_source, render_mask, render_region_srgb8_until, render_region_srgb8_view,
+    straighten_angle,
 };
 
 use crate::jobs::Histogram;
@@ -509,7 +516,8 @@ fn run_dust(
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
         ctx.request_repaint();
     };
-    let stamp = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let stamp =
+        || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     if layer.uses_ai() {
         // The model's map of this photo: kept from before (made for this photo, at this
         // size), else made now (and kept: slider moves only threshold it).
@@ -538,7 +546,8 @@ fn run_dust(
                 })?;
                 log::info!("Dust & Scratches: AI map on {} in {:.1?}", device.label(), started.elapsed());
                 let id = format!("{photo_id}-dustmap-{:x}", stamp());
-                let picture = image::GrayImage::from_raw(w as u32, h as u32, map).context("the map's size")?;
+                let picture =
+                    image::GrayImage::from_raw(w as u32, h as u32, map).context("the map's size")?;
                 imaging::develop::save_mask_picture(&id, &picture)?;
                 (picture.into_raw(), Some(id))
             }
@@ -623,7 +632,8 @@ fn run_people(
     let people = segment::find_people(rgb, 0.3, gpu, &|share, what| set(share, what.to_owned()))?;
     log::info!("People: {} found in {:.1?}", people.len(), started.elapsed());
     let (fw, fh) = (size.0 as f32, size.1 as f32);
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let stamp =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let mut out = Vec::new();
     for (k, p) in people.into_iter().enumerate() {
         // Back to the file's orientation (as AI masks are kept).
@@ -637,7 +647,10 @@ fn run_people(
         let id = format!("{photo_id}-person-{stamp:x}-{k}");
         imaging::develop::save_mask_picture(&id, &mask)?;
         out.push(FoundPerson {
-            area: imaging::develop::SpotMask { id, rect: [rect[0] / fw, rect[1] / fh, rect[2] / fw, rect[3] / fh] },
+            area: imaging::develop::SpotMask {
+                id,
+                rect: [rect[0] / fw, rect[1] / fh, rect[2] / fw, rect[3] / fh],
+            },
             score: p.score,
             picked: p.score >= PEOPLE_SURE,
         });
@@ -707,7 +720,14 @@ enum Request {
     Select { photo_id: i64, job: AiJob, settings: DevelopSettings, rotation: u8, gpu: bool },
     /// Dust & Scratches: find the defects for `layer` (its key `key`) in the full-size photo,
     /// with its infrared pass (and that pass's valid mask) if it has one.
-    Dust { photo_id: i64, key: u64, layer: imaging::develop::DustLayer, ir: Option<IrFiles>, job: AiJob, gpu: bool },
+    Dust {
+        photo_id: i64,
+        key: u64,
+        layer: imaging::develop::DustLayer,
+        ir: Option<IrFiles>,
+        job: AiJob,
+        gpu: bool,
+    },
     /// Dust & Scratches' found defects over the proxy, for the red overlay.
     DustOverlay { photo_id: i64, settings: DevelopSettings, seq: u64 },
     /// Distractions → People: find the people in the full-size photo developed with
@@ -878,16 +898,6 @@ pub struct SourceInfo {
     pub full_size: (u32, u32),
 }
 
-fn histogram(rgb: &[u8]) -> Box<Histogram> {
-    let mut h = Box::new([[0u32; 256]; 3]);
-    for px in rgb.as_chunks::<3>().0 {
-        for c in 0..3 {
-            h[c][px[c] as usize] += 1;
-        }
-    }
-    h
-}
-
 /// Count clipped pixels; with `paint`, mark them as LrC does (blue / red).
 fn clipping(rgb: &mut [u8], paint: bool) -> Clipped {
     let (mut dark, mut bright) = (0usize, 0usize);
@@ -909,6 +919,56 @@ fn clipping(rgb: &mut [u8], paint: bool) -> Clipped {
     Clipped { shadows: dark as f32 / n, highlights: bright as f32 / n }
 }
 
+/// A render ready to show: the texture's pixels, the histogram (of the photo, before any
+/// clipping colours) and the clipped shares; with `paint`, clipped pixels are marked as LrC
+/// does (blue / red). One pass over the pixels, rows in parallel.
+fn present(rgb: &image::RgbImage, paint: bool) -> (egui::ColorImage, Box<Histogram>, Clipped) {
+    use rayon::prelude::*;
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    let mut pixels = vec![egui::Color32::BLACK; w * h];
+    let (histogram, dark, bright) = pixels
+        .par_chunks_mut(w.max(1))
+        .zip(rgb.as_raw().par_chunks(3 * w.max(1)))
+        .fold(
+            || (Box::new([[0u32; 256]; 3]), 0usize, 0usize),
+            |(mut hist, mut dark, mut bright), (out, row)| {
+                for (o, p) in out.iter_mut().zip(row.as_chunks::<3>().0) {
+                    for c in 0..3 {
+                        hist[c][p[c] as usize] += 1;
+                    }
+                    let mut p = *p;
+                    if p == [0, 0, 0] {
+                        dark += 1;
+                        if paint {
+                            p = [30, 90, 255];
+                        }
+                    } else if p.contains(&255) {
+                        bright += 1;
+                        if paint {
+                            p = [255, 30, 30];
+                        }
+                    }
+                    *o = egui::Color32::from_rgb(p[0], p[1], p[2]);
+                }
+                (hist, dark, bright)
+            },
+        )
+        .reduce(
+            || (Box::new([[0u32; 256]; 3]), 0, 0),
+            |(mut a, d1, b1), (b, d2, b2)| {
+                for c in 0..3 {
+                    for (x, y) in a[c].iter_mut().zip(&b[c]) {
+                        *x += y;
+                    }
+                }
+                (a, d1 + d2, b1 + b2)
+            },
+        );
+    let n = (w * h).max(1) as f32;
+    let clipped = Clipped { shadows: dark as f32 / n, highlights: bright as f32 / n };
+    (egui::ColorImage::new([w, h], pixels), histogram, clipped)
+}
+
 fn color_image(rgb: &image::RgbImage) -> egui::ColorImage {
     egui::ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw())
 }
@@ -920,8 +980,147 @@ type FullLoaded = (i64, Result<WorkingImage, String>);
 /// Long side of the masks' thumbnails, in pixels.
 const THUMB_PX: u32 = 96;
 
-fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
-    let mut current: Option<(i64, WorkingImage)> = None;
+/// The loaded photo both threads render from: the proxy (the size the photo is shown at)
+/// and a draft a quarter of its pixels, for the first answer to a change.
+#[derive(Clone)]
+struct Proxy {
+    photo_id: i64,
+    full: Arc<WorkingImage>,
+    draft: Arc<WorkingImage>,
+}
+
+/// What the worker and the render thread share.
+#[derive(Default)]
+struct Shared {
+    proxy: Mutex<Option<Proxy>>,
+    /// The newest render of the photo asked for (its sequence number): a refinement of
+    /// older settings stops when it is no longer this.
+    latest: AtomicU64,
+}
+
+impl Shared {
+    fn proxy(&self) -> Option<Proxy> {
+        self.proxy.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set_proxy(&self, proxy: Option<Proxy>) {
+        *self.proxy.lock().unwrap_or_else(|e| e.into_inner()) = proxy;
+    }
+}
+
+/// For the render thread.
+enum RenderJob {
+    /// Render the photo with these settings (the newest wins).
+    Current {
+        photo_id: i64,
+        settings: Box<DevelopSettings>,
+        clipping: bool,
+        view: Option<SharpenView>,
+        seq: u64,
+    },
+    /// The proxy changed (a photo was loaded): look again.
+    Wake,
+}
+
+/// A full render slower than this is preceded by a draft.
+const DRAFT_OVER: Duration = Duration::from_millis(28);
+/// How long the settings must rest before a draft is refined to a full render (a drag
+/// sends a change per frame; refining between them would only delay the next draft).
+const REFINE_AFTER: Duration = Duration::from_millis(45);
+
+/// The photo's own renders, on a thread of their own so nothing else delays them. A
+/// change is answered with a draft (a quarter of the pixels) when a full render is slow,
+/// then with the full render once the settings rest; that one stops as soon as newer
+/// settings arrive.
+fn render_worker(rx: Receiver<RenderJob>, tx: Sender<Reply>, shared: Arc<Shared>, ctx: egui::Context) {
+    type Job = (i64, DevelopSettings, bool, Option<SharpenView>, u64);
+    let mut job: Option<Job> = None;
+    // What was last rendered: its sequence number, whether in full, and from which proxy.
+    let mut done: Option<(u64, bool, usize)> = None;
+    let mut last_full = Duration::ZERO;
+    let render = |img: &WorkingImage, j: &Job, stop: &(dyn Fn() -> bool + Sync)| -> bool {
+        let (photo_id, settings, paint, view, seq) = j;
+        let started = Instant::now();
+        let Some(rgb) = render_region_srgb8_until(img, settings, Region::whole(img), *view, stop) else {
+            return false;
+        };
+        let (image, histogram, clipped) = present(&rgb, *paint && view.is_none());
+        let wb = img.resolve_wb(settings);
+        log::trace!(
+            "develop: render {seq} at {} px in {:.1?}",
+            img.width().max(img.height()),
+            started.elapsed()
+        );
+        let _ = tx.send(Reply::Rendered {
+            photo_id: *photo_id,
+            slot: Slot::Current,
+            seq: *seq,
+            image,
+            histogram,
+            wb,
+            clipped,
+        });
+        ctx.request_repaint();
+        true
+    };
+    loop {
+        let proxy = shared.proxy().filter(|p| job.as_ref().is_some_and(|j| j.0 == p.photo_id));
+        let key = proxy.as_ref().map(|p| Arc::as_ptr(&p.full) as usize);
+        let mut message = None;
+        match (&job, &proxy) {
+            (Some(j), Some(p)) if done.is_none_or(|(seq, _, on)| seq != j.4 || Some(on) != key) => {
+                // New settings (or a new proxy): a draft when a full render is slow.
+                if last_full > DRAFT_OVER {
+                    render(&p.draft, j, &|| false);
+                    done = Some((j.4, false, key.unwrap_or(0)));
+                } else {
+                    let started = Instant::now();
+                    render(&p.full, j, &|| false);
+                    last_full = started.elapsed();
+                    done = Some((j.4, true, key.unwrap_or(0)));
+                }
+            }
+            (Some(j), Some(p)) if done.is_some_and(|(_, full, _)| !full) => {
+                // A draft is shown: refine it once the settings have rested.
+                match rx.recv_timeout(REFINE_AFTER) {
+                    Ok(m) => message = Some(m),
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        let seq = j.4;
+                        let started = Instant::now();
+                        if render(&p.full, j, &|| shared.latest.load(Ordering::Relaxed) != seq) {
+                            last_full = started.elapsed();
+                            done = Some((seq, true, key.unwrap_or(0)));
+                        }
+                    }
+                }
+            }
+            _ => match rx.recv() {
+                Ok(m) => message = Some(m),
+                Err(_) => return,
+            },
+        }
+        for m in message.into_iter().chain(rx.try_iter()) {
+            if let RenderJob::Current { photo_id, settings, clipping, view, seq } = m {
+                job = Some((photo_id, *settings, clipping, view, seq));
+            }
+        }
+    }
+}
+
+/// Long side of the copy the Navigator's preset preview is rendered from.
+const PREVIEW_PX: u32 = 384;
+
+fn worker(
+    rx: Receiver<Request>,
+    tx: Sender<Reply>,
+    render_tx: Sender<RenderJob>,
+    shared: Arc<Shared>,
+    ctx: egui::Context,
+) {
+    let mut current: Option<(i64, Arc<WorkingImage>)> = None;
+    // The photo small, for the Navigator's preview of a hovered preset.
+    let mut preview_small: Option<(i64, WorkingImage)> = None;
     // The current photo's file, the full-size image once loaded, and whether it's loading.
     let mut source: Option<(i64, PathBuf, SourceKind)> = None;
     let mut full: Option<(i64, WorkingImage)> = None;
@@ -985,8 +1184,12 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                 Request::Select { photo_id, job, settings, rotation, gpu } => {
                     selects.push((photo_id, job, settings, rotation, gpu))
                 }
-                Request::Dust { photo_id, key, layer, ir, job, gpu } => dusts.push((photo_id, key, layer, ir, job, gpu)),
-                Request::DustOverlay { photo_id, settings, seq } => dust_overlay = Some((photo_id, settings, seq)),
+                Request::Dust { photo_id, key, layer, ir, job, gpu } => {
+                    dusts.push((photo_id, key, layer, ir, job, gpu))
+                }
+                Request::DustOverlay { photo_id, settings, seq } => {
+                    dust_overlay = Some((photo_id, settings, seq))
+                }
                 Request::FindPeople { photo_id, job, settings, rotation, gpu } => {
                     finds.push((photo_id, job, settings, rotation, gpu))
                 }
@@ -1006,11 +1209,16 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             });
             if stale {
                 current = None;
+                shared.set_proxy(None);
                 let started = std::time::Instant::now();
                 match WorkingImage::load(&path, kind, Some(max_px)) {
                     Ok((img, _)) => {
                         log::debug!("develop: loaded {} in {:.0?}", path.display(), started.elapsed());
-                        current = Some((photo_id, img));
+                        let draft = Arc::new(img.downscaled(img.width().max(img.height()).div_ceil(2)));
+                        let full = Arc::new(img);
+                        shared.set_proxy(Some(Proxy { photo_id, full: full.clone(), draft }));
+                        let _ = render_tx.send(RenderJob::Wake);
+                        current = Some((photo_id, full));
                     }
                     Err(e) => {
                         let _ = tx.send(Reply::Failed { photo_id, error: format!("{e:#}") });
@@ -1038,17 +1246,25 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             ctx.request_repaint();
             continue;
         };
-        for slot in [Slot::Current, Slot::Before, Slot::Preview] {
+        // (The photo's own renders are the render thread's.)
+        for slot in [Slot::Before, Slot::Preview] {
             let Some((photo_id, settings, paint, view, seq)) =
                 renders.get(&slot).is_some_and(|r| r.0 == *id).then(|| renders.remove(&slot)).flatten()
             else {
                 continue;
             };
-            let mut rgb = render_region_srgb8_view(img, &settings, Region::whole(img), view);
-            let histogram = histogram(rgb.as_raw());
-            let clipped = clipping(&mut rgb, paint && view.is_none());
+            // The Navigator's preview is small: rendered from a small copy.
+            let img: &WorkingImage = if slot == Slot::Preview {
+                if preview_small.as_ref().is_none_or(|(sid, _)| *sid != photo_id) {
+                    preview_small = Some((photo_id, img.downscaled(PREVIEW_PX)));
+                }
+                &preview_small.as_ref().expect("just made").1
+            } else {
+                img
+            };
+            let rgb = render_region_srgb8_view(img, &settings, Region::whole(img), view);
+            let (image, histogram, clipped) = present(&rgb, paint && view.is_none());
             let wb = img.resolve_wb(&settings);
-            let image = color_image(&rgb);
             let _ = tx.send(Reply::Rendered { photo_id, slot, seq, image, histogram, wb, clipped });
         }
         let (ready, waiting): (Vec<_>, Vec<_>) =
@@ -1158,8 +1374,9 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         }
         // Dust & Scratches: from the full-size photo (loading it first) and its infrared
         // pass, on a thread of its own (seconds).
-        let (ready, waiting): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut dusts).into_iter().partition(|d| full.as_ref().is_some_and(|(fid, _)| *fid == d.0));
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut dusts)
+            .into_iter()
+            .partition(|d| full.as_ref().is_some_and(|(fid, _)| *fid == d.0));
         dusts = waiting;
         if let Some(d) = dusts.first() {
             load_full(&mut full_loading, &source, d.0, &full_tx, &ctx);
@@ -1183,8 +1400,9 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
         }
         // People: the full-size photo developed as AI masks see it (no geometry, effects or
         // masks; upright), then the models on a thread of their own.
-        let (ready, waiting): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut finds).into_iter().partition(|f| full.as_ref().is_some_and(|(fid, _)| *fid == f.0));
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut finds)
+            .into_iter()
+            .partition(|f| full.as_ref().is_some_and(|(fid, _)| *fid == f.0));
         finds = waiting;
         if let Some(f) = finds.first() {
             load_full(&mut full_loading, &source, f.0, &full_tx, &ctx);
@@ -1206,8 +1424,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
             std::thread::Builder::new()
                 .name("ai-people".into())
                 .spawn(move || {
-                    let result =
-                        run_people(photo_id, &job, &rgb, size, rotation, gpu, &ctx).map_err(|e| format!("{e:#}"));
+                    let result = run_people(photo_id, &job, &rgb, size, rotation, gpu, &ctx)
+                        .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Reply::People { photo_id, result });
                     ctx.request_repaint();
                 })
@@ -1292,9 +1510,32 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
     }
 }
 
+/// Start the worker and the render thread: where to send them work, where their replies
+/// arrive, and what they share.
+fn start_workers(ctx: &egui::Context) -> (Sender<Request>, Sender<RenderJob>, Receiver<Reply>, Arc<Shared>) {
+    let (tx, worker_rx) = crossbeam_channel::unbounded();
+    let (render_tx, render_rx) = crossbeam_channel::unbounded();
+    let (reply_tx, rx) = crossbeam_channel::unbounded();
+    let shared = Arc::new(Shared::default());
+    let (ctx2, tx2, wake, shared2) = (ctx.clone(), reply_tx.clone(), render_tx.clone(), shared.clone());
+    std::thread::Builder::new()
+        .name("develop".into())
+        .spawn(move || worker(worker_rx, tx2, wake, shared2, ctx2))
+        .expect("start the develop thread");
+    let (ctx2, shared2) = (ctx.clone(), shared.clone());
+    std::thread::Builder::new()
+        .name("develop-render".into())
+        .spawn(move || render_worker(render_rx, reply_tx, shared2, ctx2))
+        .expect("start the render thread");
+    (tx, render_tx, rx, shared)
+}
+
 /// The Develop module's state for the open catalog.
 pub struct DevelopState {
     tx: Sender<Request>,
+    /// The render thread, and what it shares with the worker.
+    render_tx: Sender<RenderJob>,
+    shared: Arc<Shared>,
     rx: Receiver<Reply>,
     /// The photo being developed.
     pub photo: Option<i64>,
@@ -1460,15 +1701,11 @@ pub enum SnapshotEdit {
 
 impl DevelopState {
     pub fn new(ctx: &egui::Context) -> Self {
-        let (tx, worker_rx) = crossbeam_channel::unbounded();
-        let (worker_tx, rx) = crossbeam_channel::unbounded();
-        let ctx2 = ctx.clone();
-        std::thread::Builder::new()
-            .name("develop".into())
-            .spawn(move || worker(worker_rx, worker_tx, ctx2))
-            .expect("start the develop thread");
+        let (tx, render_tx, rx, shared) = start_workers(ctx);
         DevelopState {
             tx,
+            render_tx,
+            shared,
             rx,
             photo: None,
             settings: DevelopSettings::default(),
@@ -1673,12 +1910,18 @@ impl DevelopState {
     /// A Snapshot's settings become the photo's (a History step).
     pub fn apply_snapshot(&mut self, catalog: &mut Catalog, snapshot: i64) -> Result<Changed> {
         let Some(s) = self.snapshots.iter().find(|s| s.id == snapshot).cloned() else { return Ok(None) };
-        let settings = s.settings.as_deref().and_then(DevelopSettings::from_json).unwrap_or_else(|| self.defaults());
+        let settings =
+            s.settings.as_deref().and_then(DevelopSettings::from_json).unwrap_or_else(|| self.defaults());
         self.apply(catalog, settings, &format!("Snapshot: {}", s.name))
     }
 
     /// Rename, update with the current settings, or delete a Snapshot.
-    pub fn edit_snapshot(&mut self, catalog: &mut Catalog, snapshot: i64, edit: SnapshotEdit) -> Result<Changed> {
+    pub fn edit_snapshot(
+        &mut self,
+        catalog: &mut Catalog,
+        snapshot: i64,
+        edit: SnapshotEdit,
+    ) -> Result<Changed> {
         let Some(id) = self.photo else { return Ok(None) };
         let mut changed = None;
         match edit {
@@ -1726,8 +1969,15 @@ impl DevelopState {
                 continue;
             }
             self.seq += 1;
-            self.sent.insert(slot, (settings.clone(), clipping, view, self.seq));
-            let _ = self.tx.send(Request::Render { photo_id, slot, settings, clipping, view, seq: self.seq });
+            let seq = self.seq;
+            self.sent.insert(slot, (settings.clone(), clipping, view, seq));
+            if slot == Slot::Current {
+                self.shared.latest.store(seq, Ordering::Relaxed);
+                let settings = Box::new(settings);
+                let _ = self.render_tx.send(RenderJob::Current { photo_id, settings, clipping, view, seq });
+            } else {
+                let _ = self.tx.send(Request::Render { photo_id, slot, settings, clipping, view, seq });
+            }
         }
         self.request_fills();
         // The Masks panel's thumbnails, while it is open and the masks changed.
@@ -1782,7 +2032,8 @@ impl DevelopState {
     pub fn preview_texture(&self) -> Option<&egui::TextureHandle> {
         self.preview.as_ref()?;
         let sent = self.sent.get(&Slot::Preview)?.3;
-        (self.shown.get(&Slot::Preview).copied().unwrap_or(0) >= sent).then(|| self.textures.get(&Slot::Preview))?
+        (self.shown.get(&Slot::Preview).copied().unwrap_or(0) >= sent)
+            .then(|| self.textures.get(&Slot::Preview))?
     }
 
     /// Is a render of newer settings still on its way?
@@ -2028,7 +2279,12 @@ impl DevelopState {
         }
         // One job for the whole batch: its progress is how many are done.
         let batch = self.fill_batch.get_or_insert_with(|| FillBatch {
-            job: AiJob { kind: AiKind::Remove, target: ToolTarget::NewMask, prompt: None, progress: Default::default() },
+            job: AiJob {
+                kind: AiKind::Remove,
+                target: ToolTarget::NewMask,
+                prompt: None,
+                progress: Default::default(),
+            },
             done: 0,
             total: 0,
         });
@@ -2060,10 +2316,16 @@ impl DevelopState {
         let model = segment::AiModel::Scratches;
         if layer.uses_ai() && !self.dust_ai_allowed && !segment::ready(&[model]) {
             let bytes = segment::download_size(&[model]);
-            self.ai_consent = Some(AiConsent { kind: AiKind::Dust, target: ToolTarget::NewMask, prompt: None, bytes });
+            self.ai_consent =
+                Some(AiConsent { kind: AiKind::Dust, target: ToolTarget::NewMask, prompt: None, bytes });
             return;
         }
-        let job = AiJob { kind: AiKind::Dust, target: ToolTarget::NewMask, prompt: None, progress: Default::default() };
+        let job = AiJob {
+            kind: AiKind::Dust,
+            target: ToolTarget::NewMask,
+            prompt: None,
+            progress: Default::default(),
+        };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Finding dust & scratches…".into());
         let ir = self.ir_pass.clone();
         let gpu = self.ai_gpu;
@@ -2084,7 +2346,12 @@ impl DevelopState {
                 Some(AiConsent { kind: AiKind::People, target: ToolTarget::NewMask, prompt: None, bytes });
             return;
         }
-        let job = AiJob { kind: AiKind::People, target: ToolTarget::NewMask, prompt: None, progress: Default::default() };
+        let job = AiJob {
+            kind: AiKind::People,
+            target: ToolTarget::NewMask,
+            prompt: None,
+            progress: Default::default(),
+        };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Finding people…".into());
         let (settings, rotation, gpu) = (self.settings.clone(), self.rotation, self.ai_gpu);
         let _ = self.tx.send(Request::FindPeople { photo_id, job: job.clone(), settings, rotation, gpu });
@@ -2649,6 +2916,50 @@ fn load_full(
 mod tests {
     use super::*;
 
+    /// A photo file, loaded by the worker; the render thread answers each change, and the
+    /// newest one ends up shown in full.
+    #[test]
+    fn the_render_thread_answers_changes_with_the_newest_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.png");
+        image::RgbImage::from_fn(400, 300, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 90]))
+            .save(&path)
+            .unwrap();
+        let (tx, render_tx, rx, shared) = start_workers(&egui::Context::default());
+        // Renders may be asked for before the photo is loaded.
+        let ask = |seq: u64, exposure: f32| {
+            shared.latest.store(seq, Ordering::Relaxed);
+            let settings = Box::new(DevelopSettings { exposure, ..DevelopSettings::default() });
+            render_tx
+                .send(RenderJob::Current { photo_id: 7, settings, clipping: false, view: None, seq })
+                .unwrap();
+        };
+        ask(1, 0.0);
+        tx.send(Request::Load { photo_id: 7, path, kind: SourceKind::Image, max_px: 400 }).unwrap();
+        let next = |rx: &Receiver<Reply>| loop {
+            match rx.recv_timeout(Duration::from_secs(20)).expect("a reply in time") {
+                Reply::Rendered { photo_id: 7, slot: Slot::Current, seq, image, .. } => break (seq, image),
+                Reply::Failed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        };
+        let (seq, plain) = next(&rx);
+        assert_eq!((seq, plain.size), (1, [400, 300]));
+        // Several changes at once: the last one is shown, in full, and brighter.
+        for seq in 2..=5 {
+            ask(seq, 0.2 * seq as f32);
+        }
+        let last = loop {
+            let (seq, image) = next(&rx);
+            if seq == 5 && image.size == [400, 300] {
+                break image;
+            }
+        };
+        let sum = |i: &egui::ColorImage| i.pixels.iter().map(|p| u64::from(p.r())).sum::<u64>();
+        assert!(sum(&last) > sum(&plain));
+        // Nothing more arrives for these settings.
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    }
     #[test]
     fn object_prompts_turn_with_the_photo() {
         // A point near the top left and a box in the top left quarter of a 400 × 200 file.

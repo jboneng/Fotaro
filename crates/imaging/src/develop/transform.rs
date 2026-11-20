@@ -681,6 +681,8 @@ fn warp(img: &WorkingImage, t: &Transform) -> WorkingImage {
         warp_source: Some(map),
         mask_cache: super::masks::MaskCache::default(),
         heal_cache: Default::default(),
+        render_cache: Default::default(),
+        pixels_id: 0,
     }
 }
 

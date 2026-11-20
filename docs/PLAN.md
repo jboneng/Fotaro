@@ -1070,3 +1070,64 @@ Aberration, Manual (Distortion, Lens Vignetting) and Defringe.
       f/2.8 G"), telling an AF-S G from an AF-D of the same focal length. Existing photos
       get it when their metadata is read again.
 - [ ] Later: fisheye lenses (projection change); the profile's crop; Lensfun's ACM models.
+
+## Develop: faster rendering (2026-11-20)
+
+Develop felt slow on sliders, presets / LUTs and Remove / Masking. Measured with the new
+`renderbench` example (`cargo run -p imaging --example renderbench -- <file>`; `PL_ONLY=<name>`
+picks scenarios, `PL_STAGES=1` prints each render's stages) on `_JMB5064.NEF` at a 1280 px
+proxy, a typical edit (RAW defaults, tone, Texture, Clarity, sharpening, colour noise, a
+radial and a brush mask). The laptop (i7-1260P) slows to a half or a third after seconds of
+full load, so numbers are from one run each, in that slowed state; a cold plain render is
+7 ms, a slowed one 17–23 ms.
+
+What was slow:
+- The app is run with `cargo run`, and our own crates were unoptimized there: one slider
+  change on the typical edit took **1,146 ms** in the dev build against ~150 ms in release.
+- One worker thread did everything in order, so a slider's render waited behind Before,
+  the Navigator's preview (rendered at the full proxy size for a ~250 px picture), overlays,
+  thumbnails and analyses.
+- Every render started from scratch, whatever had changed. No single stage dominates
+  (single-threaded: plain 108 ms; the edit ~810 ms, of which Detail 240, Texture / Clarity
+  220, masks 160, Vibrance 115, Highlights / Shadows 100).
+- A changed spot healed all spots again (5 ms each: tiny blurs handed out to 16 threads).
+
+- [x] **Dev builds render at release speed**: `[profile.dev.package.imaging]` (and segment,
+      lensdb, libraw, xmp) `opt-level = 3`; the app and the catalog stay unoptimized. The
+      imaging crate's tests stay unoptimized (`[profile.test.package.imaging]`): optimized,
+      their build took over 15 minutes.
+- [x] **A render thread of its own** for the photo's renders; the worker keeps the rest
+      (Before, preview, overlays, thumbnails, analyses, 1:1 regions). They share the proxy.
+- [x] **Draft, then full**: when a full render takes over 28 ms, a change is answered with
+      a draft from a half-size copy of the proxy (a quarter of the pixels), and refined to
+      the full render once the settings have rested 45 ms. The refinement stops between
+      stages as soon as newer settings arrive (`render_region_srgb8_until`).
+- [x] **The Navigator's preset preview** renders from a 384 px copy.
+- [x] **Kept stages** (`develop/cache.rs`, with the image they were made from, each under a
+      key of just what it depends on): the masks' field (shapes and amounts), luminance and
+      the Highlights / Shadows and Clarity maps, log luminance and Texture's blur, the haze
+      map (white balance), the gains pass (tone and presence amounts), and the photo
+      developed up to Detail (everything but Detail and grain). Tests: a render after any
+      of 24 changes equals one that starts afresh, on both render paths, whole and region.
+- [x] **Remove**: the healed copy under the spot being worked on is kept, so adding, moving
+      or resizing a spot redoes that spot and the ones after it; healed copies share the
+      brush rasters; small blurs stay on one thread (a spot 5 ms → 1.5 ms).
+- [x] Histogram, clipping and the texture's pixels in one parallel pass.
+
+| One change, typical edit, 1280 px | Before | After (full) | After (draft, shown first) |
+|---|---|---|---|
+| Same in a `cargo run` build | 1,146 ms | 114 ms | 34 ms |
+| Exposure, Highlights, Texture | 135–150 ms | 95–103 ms | 29 ms |
+| Contrast, Saturation, Temp, a mask's slider | 135–141 ms | 72–80 ms | 23 ms |
+| Sharpening Amount | 135 ms | 31 ms | 11 ms |
+| Luminance noise, grain | 156 ms | 44–52 ms | |
+| A mask moved, one more brush point | 136–140 ms | 89–93 ms | |
+| One more spot (of 20) | 237 ms | 31 ms heal + render | |
+| An earlier spot moved (of 20) | 239 ms | 163 ms (healing 83 → 25 ms) | |
+| Preset hover (Navigator) | as a full render | 11–13 ms | |
+
+- [ ] Not tried in the app yet (only the worker test and the benchmark).
+- [ ] Later, if needed: the per-pixel pass (42 ms), Detail (24 ms) and the gains pass
+      (21 ms) are what a full render still costs; a transformed or lens-corrected photo
+      warps in 40 ms when its geometry changes; a tile-sized render while a spot or brush
+      is dragged; `Arc` settings on the UI thread; the GPU for the per-pixel stage.

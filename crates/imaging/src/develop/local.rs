@@ -25,6 +25,7 @@ pub(super) const TONE_MAP: MapSpec = MapSpec { px: 384, radius_div: 24, eps: 0.2
 /// Clarity: mid-sized structure (a face, a tree), with edges kept more strictly.
 pub(super) const CLARITY_MAP: MapSpec = MapSpec { px: 900, radius_div: 70, eps: 0.08 };
 
+#[derive(Clone)]
 pub(super) struct BaseMap {
     w: usize,
     h: usize,
@@ -70,52 +71,59 @@ fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
 /// The same box filter on a full-size image: rows in parallel, then columns with a
 /// running sum per column (cache-friendly).
 pub(super) fn box_blur_par(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    // Small images (a Remove spot's box, blurred a few dozen times) aren't worth handing
+    // out to other threads: at least this many rows (or bands) per task.
+    const TASK_PIXELS: usize = 16_384;
     let mut rows = vec![0.0; src.len()];
-    rows.par_chunks_mut(w).zip(src.par_chunks(w)).for_each(|(out, line)| {
-        let mut sum = 0.0;
-        let mut n = 0.0;
-        for v in &line[..=r.min(w - 1)] {
-            sum += v;
-            n += 1.0;
-        }
-        for x in 0..w {
-            out[x] = sum / n;
-            if x + r + 1 < w {
-                sum += line[x + r + 1];
+    rows.par_chunks_mut(w).zip(src.par_chunks(w)).with_min_len(TASK_PIXELS.div_ceil(w.max(1))).for_each(
+        |(out, line)| {
+            let mut sum = 0.0;
+            let mut n = 0.0;
+            for v in &line[..=r.min(w - 1)] {
+                sum += v;
                 n += 1.0;
             }
-            if x >= r {
-                sum -= line[x - r];
-                n -= 1.0;
+            for x in 0..w {
+                out[x] = sum / n;
+                if x + r + 1 < w {
+                    sum += line[x + r + 1];
+                    n += 1.0;
+                }
+                if x >= r {
+                    sum -= line[x - r];
+                    n -= 1.0;
+                }
             }
-        }
-    });
+        },
+    );
     // Columns: bands of rows in parallel, each starting its running sums afresh.
     const BAND: usize = 32;
     let row = |y: usize| &rows[y * w..(y + 1) * w];
     let mut out = vec![0.0; src.len()];
-    out.par_chunks_mut(BAND * w).enumerate().for_each(|(band, dst)| {
-        let y0 = band * BAND;
-        let (lo, hi) = (y0.saturating_sub(r), (y0 + r).min(h - 1));
-        let mut sum = vec![0.0f32; w];
-        for y in lo..=hi {
-            sum.iter_mut().zip(row(y)).for_each(|(s, v)| *s += v);
-        }
-        let mut n = (hi - lo + 1) as f32;
-        for (j, line) in dst.chunks_mut(w).enumerate() {
-            let y = y0 + j;
-            let inv = 1.0 / n;
-            line.iter_mut().zip(&sum).for_each(|(o, s)| *o = s * inv);
-            if y + r + 1 < h {
-                sum.iter_mut().zip(row(y + r + 1)).for_each(|(s, v)| *s += v);
-                n += 1.0;
+    out.par_chunks_mut(BAND * w).enumerate().with_min_len(TASK_PIXELS.div_ceil(BAND * w.max(1))).for_each(
+        |(band, dst)| {
+            let y0 = band * BAND;
+            let (lo, hi) = (y0.saturating_sub(r), (y0 + r).min(h - 1));
+            let mut sum = vec![0.0f32; w];
+            for y in lo..=hi {
+                sum.iter_mut().zip(row(y)).for_each(|(s, v)| *s += v);
             }
-            if y >= r {
-                sum.iter_mut().zip(row(y - r)).for_each(|(s, v)| *s -= v);
-                n -= 1.0;
+            let mut n = (hi - lo + 1) as f32;
+            for (j, line) in dst.chunks_mut(w).enumerate() {
+                let y = y0 + j;
+                let inv = 1.0 / n;
+                line.iter_mut().zip(&sum).for_each(|(o, s)| *o = s * inv);
+                if y + r + 1 < h {
+                    sum.iter_mut().zip(row(y + r + 1)).for_each(|(s, v)| *s += v);
+                    n += 1.0;
+                }
+                if y >= r {
+                    sum.iter_mut().zip(row(y - r)).for_each(|(s, v)| *s -= v);
+                    n -= 1.0;
+                }
             }
-        }
-    });
+        },
+    );
     out
 }
 

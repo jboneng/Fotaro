@@ -34,6 +34,27 @@ all = { level = "warn", priority = -1 }
 [profile.dev.package."*"]
 opt-level = 2
 
+# Our own pixel code too: Develop renders 10-30x slower unoptimized, which makes a plain
+# `cargo run` feel broken. The app and the catalog stay unoptimized (quick to rebuild).
+[profile.dev.package.imaging]
+opt-level = 3
+
+[profile.dev.package.segment]
+opt-level = 3
+
+[profile.dev.package.lensdb]
+opt-level = 3
+
+[profile.dev.package.libraw]
+opt-level = 3
+
+[profile.dev.package.xmp]
+opt-level = 3
+# Its tests unoptimized, as before: optimized, the test build takes many minutes (and the
+# tests themselves only half a minute unoptimized).
+[profile.test.package.imaging]
+opt-level = 0
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

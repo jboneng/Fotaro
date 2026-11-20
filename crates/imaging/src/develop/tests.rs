@@ -1283,9 +1283,13 @@ fn a_spot_with_an_area_picture_covers_that_shape() {
     moved.area.as_mut().unwrap().rect[0] += 0.01;
     assert_ne!(moved.shape_key(), spot.shape_key());
     // Cloned from 60 px to the right: inside the ellipse only.
-    let photo: RgbImage = ImageBuffer::from_fn(300, 200, |x, _| if x < 150 { Rgb([200, 40, 40]) } else { Rgb([40, 40, 200]) });
+    let photo: RgbImage =
+        ImageBuffer::from_fn(300, 200, |x, _| if x < 150 { Rgb([200, 40, 40]) } else { Rgb([40, 40, 200]) });
     let img = rendered(&photo);
-    let s = DevelopSettings { spots: vec![Spot { offset: [60.0 / 300.0, 0.0], ..spot.clone() }], ..Default::default() };
+    let s = DevelopSettings {
+        spots: vec![Spot { offset: [60.0 / 300.0, 0.0], ..spot.clone() }],
+        ..Default::default()
+    };
     let out = render_srgb8(&img, &s);
     let plain = render_srgb8(&img, &DevelopSettings::default());
     assert!(out.get_pixel(130, 100)[2] > out.get_pixel(130, 100)[0], "the inside is cloned (blue)");
@@ -1293,4 +1297,150 @@ fn a_spot_with_an_area_picture_covers_that_shape() {
     // Saved and read back; older spots have no area.
     assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap().spots, s.spots);
     set_mask_store(None);
+}
+
+/// A render that reuses what an earlier render kept (see `cache`) equals one that starts
+/// afresh, whatever changed in between: with and without Detail (the two render paths).
+#[test]
+fn kept_stages_never_change_a_render() {
+    let src =
+        RgbImage::from_fn(96, 64, |x, y| Rgb([(x * 2 + y) as u8, (y * 3) as u8, ((x * y) % 255) as u8]));
+    let img = rendered(&src);
+    let stroke = |n: usize| Stroke {
+        points: (0..n).map(|i| [0.2 + 0.05 * i as f32, 0.3 + 0.04 * i as f32]).collect(),
+        size: 0.15,
+        ..Stroke::default()
+    };
+    let mut plain = DevelopSettings {
+        exposure: 0.2,
+        highlights: -30.0,
+        shadows: 20.0,
+        texture: 20.0,
+        clarity: 15.0,
+        dehaze: 10.0,
+        vibrance: 10.0,
+        ..DevelopSettings::default()
+    };
+    let mut radial = Mask::new(
+        "Radial",
+        Shape::Radial { center: [0.5, 0.5], radii: [0.4, 0.3], angle: 10.0, feather: 50.0 },
+    );
+    radial.adjust.exposure = 0.5;
+    radial.adjust.clarity = 20.0;
+    let mut brush = Mask::new("Brush", Shape::Brush { strokes: vec![stroke(4)] });
+    brush.adjust.saturation = 30.0;
+    plain.masks = vec![radial, brush];
+    let mut detailed = plain.clone();
+    detailed.detail.sharpen_amount = 40.0;
+    detailed.detail.color = 25.0;
+    detailed.detail.luminance = 10.0;
+    detailed.masks[1].adjust.sharpness = 20.0;
+
+    type Change = (&'static str, fn(&mut DevelopSettings));
+    let changes: [Change; 24] = [
+        ("exposure", |s| s.exposure = 0.6),
+        ("contrast", |s| s.contrast = 25.0),
+        ("highlights", |s| s.highlights = -60.0),
+        ("shadows off", |s| (s.highlights, s.shadows) = (0.0, 0.0)),
+        ("clarity", |s| s.clarity = 40.0),
+        ("texture", |s| s.texture = -30.0),
+        ("texture and clarity off", |s| (s.texture, s.clarity) = (0.0, 0.0)),
+        ("dehaze", |s| s.dehaze = 40.0),
+        ("temp", |s| s.temp = 20.0),
+        ("saturation", |s| s.saturation = 20.0),
+        ("black and white", |s| s.treatment = Treatment::BlackAndWhite),
+        ("sharpening", |s| s.detail.sharpen_amount = 80.0),
+        ("luminance noise", |s| s.detail.luminance = 40.0),
+        ("grain", |s| s.effects.grain_amount = 40.0),
+        ("vignette", |s| s.effects.vignette_amount = -40.0),
+        ("glow", |s| s.effects.glow_amount = 40.0),
+        ("mask exposure", |s| s.masks[0].adjust.exposure = -0.5),
+        ("mask clarity", |s| s.masks[0].adjust.clarity = -20.0),
+        ("mask sharpness", |s| s.masks[1].adjust.sharpness = 60.0),
+        ("mask amount", |s| s.masks[0].amount = 50.0),
+        ("mask moved", |s| {
+            if let Shape::Radial { center, .. } = &mut s.masks[0].components[0].shape {
+                center[0] = 0.4;
+            }
+        }),
+        ("mask hidden", |s| s.masks[1].visible = false),
+        ("a spot", |s| {
+            s.spots.push(Spot { points: vec![[0.3, 0.3]], size: 0.1, offset: [0.3, 0.2], ..Spot::default() })
+        }),
+        ("straightened", |s| s.transform.crop.angle = 2.0),
+    ];
+    for (path, base) in [("plain", &plain), ("with Detail", &detailed)] {
+        for (name, change) in changes {
+            let mut s = base.clone();
+            change(&mut s);
+            // From the base's kept stages to the change, and back.
+            render_srgb8(&img, base);
+            assert!(render_srgb8(&img, &s) == render_srgb8(&img.clone(), &s), "{path}: {name}");
+            assert!(render_srgb8(&img, base) == render_srgb8(&img.clone(), base), "{path}: {name}, back");
+            // A region, after the whole.
+            let r = Region { x: 20, y: 10, w: 40, h: 30 };
+            assert!(
+                render_region_srgb8(&img, &s, r) == render_region_srgb8(&img.clone(), &s, r),
+                "{path}: {name}, a region"
+            );
+        }
+    }
+    // One more brush point (the brush raster and the field are made again).
+    let mut more = detailed.clone();
+    more.masks[1].components[0].shape = Shape::Brush { strokes: vec![stroke(5)] };
+    render_srgb8(&img, &detailed);
+    assert!(render_srgb8(&img, &more) == render_srgb8(&img.clone(), &more));
+    assert!(render_srgb8(&img, &more) != render_srgb8(&img, &detailed));
+}
+
+/// A stopped render gives nothing, and leaves nothing wrong behind.
+#[test]
+fn a_stopped_render_gives_nothing() {
+    let img = rendered(&gradient());
+    let s = DevelopSettings { clarity: 30.0, ..Default::default() };
+    assert!(render_region_srgb8_until(&img, &s, Region::whole(&img), None, &|| true).is_none());
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let later = || calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 2;
+    assert!(render_region_srgb8_until(&img, &s, Region::whole(&img), None, &later).is_none());
+    assert!(render_srgb8(&img, &s) == render_srgb8(&img.clone(), &s));
+}
+
+/// Spots are healed going on from what was kept (the copy under the spot being worked on):
+/// every step of adding, moving, resizing and removing spots gives what healing from
+/// scratch gives.
+#[test]
+fn spots_healed_step_by_step_match_healing_afresh() {
+    let src = RgbImage::from_fn(120, 80, |x, y| {
+        Rgb([(x * 2) as u8, (y * 3) as u8, ((x * 7 + y * 13) % 255) as u8])
+    });
+    let img = rendered(&src);
+    let spot = |x: f32, y: f32, mode: SpotMode| Spot {
+        mode,
+        points: vec![[x, y]],
+        size: 0.12,
+        offset: [0.2, 0.1],
+        ..Spot::default()
+    };
+    let (a, b, c) =
+        (spot(0.3, 0.3, SpotMode::Heal), spot(0.35, 0.4, SpotMode::Clone), spot(0.6, 0.5, SpotMode::Heal));
+    let moved = |s: &Spot, dx: f32| Spot { points: vec![[s.points[0][0] + dx, s.points[0][1]]], ..s.clone() };
+    let steps: Vec<Vec<Spot>> = vec![
+        vec![a.clone()],
+        vec![a.clone(), b.clone()],
+        vec![a.clone(), moved(&b, 0.02)],
+        vec![a.clone(), moved(&b, 0.04)],
+        vec![a.clone(), moved(&b, 0.04), c.clone()],
+        // An earlier spot dragged, twice (the second step goes on from the copy under it).
+        vec![moved(&a, 0.02), moved(&b, 0.04), c.clone()],
+        vec![moved(&a, 0.04), moved(&b, 0.04), c.clone()],
+        // The last one removed, then all but one, then none and one again.
+        vec![moved(&a, 0.04), moved(&b, 0.04)],
+        vec![c.clone()],
+        vec![],
+        vec![b.clone()],
+    ];
+    for (i, spots) in steps.into_iter().enumerate() {
+        let s = DevelopSettings { spots, ..Default::default() };
+        assert!(render_srgb8(&img, &s) == render_srgb8(&img.clone(), &s), "step {i}");
+    }
 }

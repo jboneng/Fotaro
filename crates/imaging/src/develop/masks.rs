@@ -595,7 +595,10 @@ fn rasterize(strokes: &[Stroke], frame: Frame, bbox: (usize, usize, usize, usize
 
 /// Brush rasters kept with the source image, so slider drags reuse them.
 #[derive(Debug, Default)]
-pub(super) struct MaskCache(Mutex<Vec<(u64, Arc<Raster>)>>);
+pub(super) struct MaskCache(Arc<Mutex<Rasters>>);
+
+/// Kept rasters by key, oldest first.
+type Rasters = Vec<(u64, Arc<Raster>)>;
 
 impl Clone for MaskCache {
     /// A copy starts empty (it is only a cache).
@@ -603,6 +606,17 @@ impl Clone for MaskCache {
         MaskCache::default()
     }
 }
+
+impl MaskCache {
+    /// This very cache, for a healed copy of its image.
+    pub(super) fn shared(&self) -> MaskCache {
+        MaskCache(self.0.clone())
+    }
+}
+
+/// Rasters kept per image: brush masks and AI masks for the proxy, the 1:1 view and the
+/// Detail box, and AI masks again for each healed copy.
+const MASK_RASTERS: usize = 12;
 
 fn hash_strokes(strokes: &[Stroke], extra: [usize; 6]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -641,8 +655,7 @@ fn brush_raster(
     }
     let r = Arc::new(rasterize(strokes, Frame::new(source.width(), source.height()), bbox));
     cache.push((key, r.clone()));
-    // A few rasters: the proxy, the 1:1 view and the Detail box.
-    if cache.len() > 6 {
+    if cache.len() > MASK_RASTERS {
         cache.remove(0);
     }
     r
@@ -655,7 +668,11 @@ fn brush_raster(
 fn ai_raster(source: &WorkingImage, id: &str, bbox: (usize, usize, usize, usize)) -> Arc<Raster> {
     let (sw, sh) = (source.width() as usize, source.height() as usize);
     let mut key: u64 = 0x9e37_79b9_7f4a_7c15;
-    for b in id.bytes().map(u64::from).chain([bbox.0, bbox.1, bbox.2, bbox.3, sw, sh].map(|v| v as u64)) {
+    // Its edges are fitted to these pixels: each healed copy has its own.
+    let pixels = source.pixels_id as usize;
+    for b in
+        id.bytes().map(u64::from).chain([bbox.0, bbox.1, bbox.2, bbox.3, sw, sh, pixels].map(|v| v as u64))
+    {
         key = (key ^ b).wrapping_mul(0x0000_0100_0000_01b3);
     }
     {
@@ -670,7 +687,7 @@ fn ai_raster(source: &WorkingImage, id: &str, bbox: (usize, usize, usize, usize)
     });
     let mut cache = source.mask_cache.0.lock().unwrap_or_else(|e| e.into_inner());
     cache.push((key, r.clone()));
-    if cache.len() > 6 {
+    if cache.len() > MASK_RASTERS {
         cache.remove(0);
     }
     r
@@ -741,16 +758,26 @@ pub(super) struct MaskField {
 
 impl MaskField {
     /// Mask values over `region` of `shown` (the image being rendered: `source`, or its
-    /// transformed copy). `None` when no mask changes anything.
+    /// transformed copy). `None` when no mask changes anything. Kept with `shown` until the
+    /// masks' shapes change (their adjustments don't matter).
     pub(super) fn build(
         source: &WorkingImage,
         shown: &WorkingImage,
         masks: &[Mask],
         region: Region,
-    ) -> Option<MaskField> {
+    ) -> Option<Arc<MaskField>> {
         let active: Vec<usize> =
             masks.iter().enumerate().filter(|(_, m)| m.is_active()).map(|(i, _)| i).collect();
-        Self::build_for(source, shown, masks, active, region)
+        if active.is_empty() {
+            return None;
+        }
+        let key = (
+            region,
+            active.iter().map(|&i| (i, masks[i].amount.to_bits(), masks[i].components.clone())).collect(),
+        );
+        Some(shown.render_cache.field.get_or(key, || {
+            Self::build_for(source, shown, masks, active, region).expect("there are active masks")
+        }))
     }
 
     /// Values of the masks `active` (indices into `masks`), whatever they adjust: also for

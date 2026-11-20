@@ -11,6 +11,9 @@
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 
+use std::sync::Arc;
+
+use super::cache::{GainsKey, WbKey};
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
 use super::detail::{SharpenView, apply as apply_detail, apply_local};
@@ -167,12 +170,12 @@ struct Prepared {
     texture: f32,
     /// With any of them on: the exposure gain of every pixel of `region` (`gain` with
     /// the local adjustments applied), computed in one pass before rendering.
-    gains: Option<Vec<f32>>,
+    gains: Option<Arc<Vec<f32>>>,
     /// The part of the image being rendered.
     region: Region,
     /// Dehaze, −1..+1, and the haze map (also used for its colour when adding haze).
     dehaze: f32,
-    haze: Option<HazeMap>,
+    haze: Option<Arc<HazeMap>>,
     /// Post-Crop Vignetting, when on.
     vignette: Option<Vignette>,
     /// Masks' local adjustments, when any mask changes something.
@@ -189,7 +192,12 @@ impl Prepared {
     /// Prepare to render `region` of `img`, with the masks' values over it (`field`).
     /// Local adjustments look at the whole image, so a region renders exactly like that
     /// part of a full render.
-    fn new(img: &WorkingImage, s: &DevelopSettings, region: Region, field: Option<MaskField>) -> Prepared {
+    fn new(
+        img: &WorkingImage,
+        s: &DevelopSettings,
+        region: Region,
+        field: Option<Arc<MaskField>>,
+    ) -> Prepared {
         let wb = img.resolve_wb(s);
         let input = match &img.color {
             SourceColor::Camera(c) => Input::Camera { m: wb.multipliers, mat: c.cam_to_work },
@@ -236,11 +244,13 @@ impl Prepared {
             lut: s.profile.as_ref().and_then(super::lut::PreparedLut::new),
             fringe: None,
         };
+        super::perf::mark("tone tables, setup");
         if s.transform.lens.defringes() {
             let (w, h) = (img.width() as usize, img.height() as usize);
             let scale = img.width() as f32 / img.full_size.0.max(1) as f32;
             let lum = |x: usize, y: usize| prep.luminance(prep.linear(input_at(img, x, y)));
             prep.fringe = super::lens::Defringe::new(&s.transform.lens, w, h, region, scale, lum);
+            super::perf::mark("defringe map");
         }
         // Masks' Dehaze, Clarity and Texture need the same maps as the global ones.
         let local = |f: fn(&LocalParams) -> f32| {
@@ -250,13 +260,18 @@ impl Prepared {
             (local(|p| p.dehaze), local(|p| p.clarity) || local(|p| p.texture));
         if prep.dehaze != 0.0 || local_dehaze {
             let (w, h) = (img.width() as usize, img.height() as usize);
-            let map = HazeMap::build(w, h, |x, y| prep.linear(input_at(img, x, y)));
+            let map = img
+                .render_cache
+                .haze
+                .get_or(prep.wb_key(), || HazeMap::build(w, h, |x, y| prep.linear(input_at(img, x, y))));
             prep.haze = Some(map);
+            super::perf::mark("haze map");
         }
         let tone = prep.highlights != 0.0 || prep.shadows != 0.0;
         let detail = prep.clarity != 0.0 || prep.texture != 0.0 || local_detail;
         if tone || detail {
             prep.gains = Some(prep.local_gains(img));
+            super::perf::mark("gains pass");
         }
         // Glow: from the whole photo developed (without the region-only parts: local
         // gains and masks, which only cover the region), so every region agrees.
@@ -265,6 +280,7 @@ impl Prepared {
             let (w, h) = (img.width() as usize, img.height() as usize);
             prep.glow = Glow::new(&s.effects, w, h, prep.luma, |x, y| prep.pixel(input_at(img, x, y), x, y));
             (prep.gains, prep.locals) = (gains, locals);
+            super::perf::mark("glow");
         }
         prep
     }
@@ -272,25 +288,56 @@ impl Prepared {
     /// The exposure gain of every pixel of the region with Highlights / Shadows, Clarity
     /// and Texture applied: maps of local brightness first (from the whole image), then
     /// one simple pass over the region's pixels.
-    fn local_gains(&self, img: &WorkingImage) -> Vec<f32> {
+    fn local_gains(&self, img: &WorkingImage) -> Arc<Vec<f32>> {
+        // The masks only matter here when one of them has Clarity or Texture.
+        let locals =
+            self.locals.as_ref().filter(|l| l.params.iter().any(|p| p.clarity != 0.0 || p.texture != 0.0));
+        let key = GainsKey {
+            wb: self.wb_key(),
+            region: self.region,
+            amounts: [self.gain, self.highlights, self.shadows, self.clarity, self.texture].map(f32::to_bits),
+            field: locals.map(|l| l.field.clone()),
+            local: locals.map_or_else(Vec::new, |l| {
+                l.params.iter().map(|p| [p.clarity.to_bits(), p.texture.to_bits()]).collect()
+            }),
+        };
+        img.render_cache.gains.get_or(key, || self.make_local_gains(img))
+    }
+
+    /// The white balance as a cache key: everything [`Self::linear`] depends on (the
+    /// camera matrix is the image's own).
+    fn wb_key(&self) -> WbKey {
+        match &self.input {
+            Input::Camera { m, .. } => m.map(f32::to_bits),
+            Input::Gains(m) => m.map(f32::to_bits),
+        }
+    }
+
+    fn make_local_gains(&self, img: &WorkingImage) -> Vec<f32> {
+        let cache = &img.render_cache;
+        let wb = self.wb_key();
         let (w, h) = (img.width() as usize, img.height() as usize);
         // Rendering everything (the proxy, exports): every pixel's luminance once, shared by
         // the maps and the detail pass. A region of a full-size image instead computes it
         // where needed: the maps only sample a fraction of the pixels.
         let whole = self.region == Region::whole(img);
-        let lum: Option<Vec<f32>> = whole.then(|| {
-            img.pixels
-                .as_raw()
-                .par_chunks(3)
-                .map(|p| self.luminance(self.linear([p[0], p[1], p[2]])))
-                .collect()
+        let lum: Option<Arc<Vec<f32>>> = whole.then(|| {
+            cache.luminance.get_or(wb, || {
+                img.pixels
+                    .as_raw()
+                    .par_chunks(3)
+                    .map(|p| self.luminance(self.linear([p[0], p[1], p[2]])))
+                    .collect()
+            })
         });
+        super::perf::mark("luminance");
         let lum_at = |x: usize, y: usize| match &lum {
             Some(l) => l[y * w + x],
             None => self.luminance(self.linear(input_at(img, x, y))),
         };
         let tone = (self.highlights != 0.0 || self.shadows != 0.0).then(|| {
-            let mut map = BaseMap::build(w, h, TONE_MAP, lum_at);
+            let mut map =
+                BaseMap::clone(&cache.tone_map.get_or(wb, || BaseMap::build(w, h, TONE_MAP, lum_at)));
             // Brightness (stops from middle grey after exposure) → gain, per map cell.
             let offset = self.gain.log2() - MIDDLE_GREY.log2();
             let (hl, sh) = (self.highlights, self.shadows);
@@ -302,7 +349,10 @@ impl Prepared {
         let local = |f: fn(&LocalParams) -> f32| locals.is_some_and(|l| l.params.iter().any(|p| f(p) != 0.0));
         let clarity_on = self.clarity != 0.0 || local(|p| p.clarity);
         let texture_on = self.texture != 0.0 || local(|p| p.texture);
-        let clarity = clarity_on.then(|| BaseMap::build(w, h, CLARITY_MAP, lum_at));
+        super::perf::mark("tone map");
+        let clarity =
+            clarity_on.then(|| cache.clarity_map.get_or(wb, || BaseMap::build(w, h, CLARITY_MAP, lum_at)));
+        super::perf::mark("clarity map");
 
         // log2 luminance over the region, plus the margin Texture's blur reaches into.
         let r = (w.max(h) as f32 / 1000.0).round().max(1.0) as usize;
@@ -312,18 +362,22 @@ impl Prepared {
         let ex1 = (reg.x as usize + reg.w as usize + margin).min(w);
         let ey1 = (reg.y as usize + reg.h as usize + margin).min(h);
         let (ew, eh) = (ex1 - ex0, ey1 - ey0);
-        let ylog: Option<Vec<f32>> = (clarity_on || texture_on).then(|| {
-            (ey0..ey1)
-                .into_par_iter()
-                .flat_map_iter(|y| (ex0..ex1).map(move |x| fast_log2(lum_at(x, y).max(1e-6))))
-                .collect()
+        let extent = (wb, [ex0, ey0, ew, eh]);
+        let ylog: Option<Arc<Vec<f32>>> = (clarity_on || texture_on).then(|| {
+            cache.log_luminance.get_or(extent, || {
+                (ey0..ey1)
+                    .into_par_iter()
+                    .flat_map_iter(|y| (ex0..ex1).map(move |x| fast_log2(lum_at(x, y).max(1e-6))))
+                    .collect()
+            })
         });
         // Texture: log luminance blurred twice (close to a Gaussian) over a few pixels; the
         // radius follows the image size so a preview and a full-size export agree.
         let texture = texture_on.then(|| {
-            let ylog = ylog.as_deref().unwrap_or_default();
-            box_blur_par(&box_blur_par(ylog, ew, eh, r), ew, eh, r)
+            let ylog: &[f32] = ylog.as_ref().map_or(&[], |v| v.as_slice());
+            cache.texture.get_or(extent, || box_blur_par(&box_blur_par(ylog, ew, eh, r), ew, eh, r))
         });
+        super::perf::mark("log lum, texture blur");
         let grey = MIDDLE_GREY.log2();
         let (rx, ry, rw) = (reg.x as usize, reg.y as usize, reg.w as usize);
         let mut gains = vec![self.gain; rw * reg.h as usize];
@@ -548,14 +602,14 @@ impl LocalParams {
 
 /// The masks' local adjustments for a render.
 struct Locals {
-    field: MaskField,
+    field: Arc<MaskField>,
     params: Vec<LocalParams>,
     to_srgb: Mat3f,
     to_work: Mat3f,
 }
 
 impl Locals {
-    fn new(field: MaskField, masks: &[Mask]) -> Locals {
+    fn new(field: Arc<MaskField>, masks: &[Mask]) -> Locals {
         let params = field.active.iter().map(|&i| LocalParams::new(&masks[i].adjust)).collect();
         Locals {
             field,
@@ -718,11 +772,33 @@ pub fn render_region_srgb8_view(
     region: Region,
     view: Option<SharpenView>,
 ) -> RgbImage {
+    render_region_srgb8_until(img, s, region, view, &|| false).expect("a render nothing stops")
+}
+
+/// [`render_region_srgb8_view`] that gives up (`None`) once `stop` says so: it is asked
+/// between the render's stages, so a render nobody waits for any more (the slider moved
+/// on) ends within a few milliseconds.
+pub fn render_region_srgb8_until(
+    img: &WorkingImage,
+    s: &DevelopSettings,
+    region: Region,
+    view: Option<SharpenView>,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Option<RgbImage> {
+    super::perf::begin();
     // The Remove tool's spots first, on the photo's own pixels.
     let spotless = healed(img, &s.spots, s.dust.as_ref());
+    super::perf::mark("heal");
+    if stop() {
+        return None;
+    }
     let img: &WorkingImage = &spotless;
     let source = img;
     let geometry = transformed(img, &s.transform);
+    super::perf::mark("transform");
+    if stop() {
+        return None;
+    }
     let img: &WorkingImage = &geometry;
     let region = region.clipped(img);
     let enc = SrgbEncoder::new();
@@ -731,20 +807,30 @@ pub fn render_region_srgb8_view(
     let finish = Finish::new(img, s, view.is_none());
     let (rx, ry) = (region.x as usize, region.y as usize);
     if uses_detail(s) || view.is_some() {
-        let detailed = Detailed::render(source, img, s, region, view);
+        let detailed = Detailed::render(source, img, s, region, view, stop)?;
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 *o = finish.apply(detailed.srgb(i, j), rx + i, ry + j).map(|v| enc.encode(v));
             }
         });
-        return out;
+        super::perf::mark("encode");
+        return Some(out);
     }
-    let prep = Prepared::new(img, s, region, MaskField::build(source, img, &s.masks, region));
+    let field = MaskField::build(source, img, &s.masks, region);
+    super::perf::mark("mask field");
+    if stop() {
+        return None;
+    }
+    let prep = Prepared::new(img, s, region, field);
+    if stop() {
+        return None;
+    }
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         let l = finish.apply(matrix::apply(&to_srgb, prep.pixel(p, x, y)), x, y);
         o.copy_from_slice(&l.map(|v| enc.encode(v)));
     });
-    out
+    super::perf::mark("pixels + encode");
+    Some(out)
 }
 
 /// Mask `index`'s values over the developed photo (the size `render_srgb8` makes it), as
@@ -817,7 +903,7 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
     let to_u16 = |v: f32| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
     let finish = Finish::new(img, s, true);
     if uses_detail(s) {
-        let detailed = Detailed::render(source, img, s, region, None);
+        let detailed = Detailed::render(source, img, s, region, None, &|| false).expect("nothing stops it");
         let to_work = matrix::to_f32(&matrix::srgb_to_work());
         out.par_chunks_mut(3 * region.w as usize).enumerate().for_each(|(j, row)| {
             for (i, o) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
@@ -850,7 +936,8 @@ impl Detailed {
         s: &DevelopSettings,
         region: Region,
         view: Option<SharpenView>,
-    ) -> Detailed {
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Option<Detailed> {
         // Rendered pixels per full-size pixel: the filters' radii are in full-size pixels.
         let scale = render_scale(img);
         let m = s.detail.margin(scale) as u32;
@@ -862,27 +949,58 @@ impl Detailed {
             w: (region.x + region.w + m).min(img.width()) - x0,
             h: (region.y + region.h + m).min(img.height()) - y0,
         };
-        let prep = Prepared::new(img, s, area, MaskField::build(source, img, &s.masks, area));
-        let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
+        let field = MaskField::build(source, img, &s.masks, area);
+        super::perf::mark("mask field");
+        if stop() {
+            return None;
+        }
+        // The area developed up to Detail: kept until something before Detail changes, so
+        // the Detail sliders (and grain) only redo what comes after.
+        let effects = Effects {
+            grain_amount: 0.0,
+            grain_size: Effects::default().grain_size,
+            grain_roughness: Effects::default().grain_roughness,
+            ..s.effects.clone()
+        };
+        let key = (DevelopSettings { detail: Default::default(), effects, ..s.clone() }, area);
         let (aw, ah, w) = (area.w as usize, area.h as usize, img.width() as usize);
-        let mut planes: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; aw * ah]);
-        let [l, a, b] = &mut planes;
-        let src = img.pixels.as_raw();
-        (l.par_chunks_mut(aw), a.par_chunks_mut(aw), b.par_chunks_mut(aw))
-            .into_par_iter()
-            .enumerate()
-            .for_each(|(j, (l, a, b))| {
-                let (x0, y) = (area.x as usize, area.y as usize + j);
-                let row = &src[3 * (y * w + x0)..3 * (y * w + x0 + aw)];
-                for (i, p) in row.as_chunks::<3>().0.iter().enumerate() {
-                    let lab = srgb_to_oklab(matrix::apply(&to_srgb, prep.pixel(*p, x0 + i, y)));
-                    (l[i], a[i], b[i]) = (lab[0], lab[1], lab[2]);
+        let developed = match img.render_cache.planes.get(&key) {
+            Some(planes) => planes,
+            None => {
+                let prep = Prepared::new(img, s, area, field.clone());
+                if stop() {
+                    return None;
                 }
-            });
+                let to_srgb = matrix::to_f32(&matrix::work_to_srgb());
+                let mut planes: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; aw * ah]);
+                let [l, a, b] = &mut planes;
+                let src = img.pixels.as_raw();
+                (l.par_chunks_mut(aw), a.par_chunks_mut(aw), b.par_chunks_mut(aw))
+                    .into_par_iter()
+                    .enumerate()
+                    .for_each(|(j, (l, a, b))| {
+                        let (x0, y) = (area.x as usize, area.y as usize + j);
+                        let row = &src[3 * (y * w + x0)..3 * (y * w + x0 + aw)];
+                        for (i, p) in row.as_chunks::<3>().0.iter().enumerate() {
+                            let lab = srgb_to_oklab(matrix::apply(&to_srgb, prep.pixel(*p, x0 + i, y)));
+                            (l[i], a[i], b[i]) = (lab[0], lab[1], lab[2]);
+                        }
+                    });
+                let planes = Arc::new(planes);
+                img.render_cache.planes.put(key, planes.clone());
+                planes
+            }
+        };
+        super::perf::mark("pixels to Oklab");
+        if stop() {
+            return None;
+        }
+        let mut planes = <[Vec<f32>; 3]>::clone(&developed);
         apply_detail(&mut planes, area.w as usize, area.h as usize, &s.detail, scale, view);
+        super::perf::mark("detail");
         // Masks' Sharpness and Noise, after the global Detail (not in its previews).
-        if let Some(lo) = &prep.locals
-            && view.is_none()
+        let locals = field.filter(|_| view.is_none()).map(|f| Locals::new(f, &s.masks));
+        if let Some(lo) = &locals
             && lo.params.iter().any(|p| p.sharpness != 0.0 || p.noise > 0.0)
         {
             let n = aw * ah;
@@ -897,11 +1015,11 @@ impl Detailed {
             );
             apply_local(&mut planes[0], aw, ah, &sharp, &noise, scale);
         }
-        Detailed {
+        Some(Detailed {
             planes,
             width: area.w as usize,
             offset: ((region.x - x0) as usize, (region.y - y0) as usize),
-        }
+        })
     }
 
     /// Linear sRGB at (i, j) of the requested region.

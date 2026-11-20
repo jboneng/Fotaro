@@ -61,6 +61,12 @@ pub struct WorkingImage {
     pub(super) mask_cache: MaskCache,
     /// The photo with the Remove tool's spots healed (see [`super::heal`]).
     pub(super) heal_cache: HealCache,
+    /// Which pixels these are among the copies sharing a mask cache: 0 for the photo as
+    /// loaded, another number for each healed copy (masks made from the pixels are kept
+    /// per copy).
+    pub(super) pixels_id: u64,
+    /// Render stages kept for the next render (see [`super::cache`]).
+    pub(super) render_cache: super::cache::RenderCache,
 }
 
 /// The resolved white balance: multipliers to apply and the Temp/Tint the panel shows.
@@ -82,6 +88,8 @@ impl WorkingImage {
             warp_source: None,
             mask_cache: MaskCache::default(),
             heal_cache: HealCache::default(),
+            render_cache: Default::default(),
+            pixels_id: 0,
         }
     }
 
@@ -126,6 +134,24 @@ impl WorkingImage {
         if self.kelvin() { &WbPreset::RAW } else { &WbPreset::RELATIVE }
     }
 
+    /// These pixels as an image like this one (the Remove tool's healed copy). It shares
+    /// this image's brush rasters, which depend on the strokes and the size only.
+    pub(super) fn with_pixels(&self, pixels: Vec<f32>) -> WorkingImage {
+        static HEALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        WorkingImage {
+            pixels: image::ImageBuffer::from_raw(self.width(), self.height(), pixels).expect("buffer size"),
+            color: self.color.clone(),
+            full_size: self.full_size,
+            coverage: self.coverage.clone(),
+            transform_cache: TransformCache::default(),
+            warp_source: self.warp_source,
+            mask_cache: self.mask_cache.shared(),
+            heal_cache: HealCache::default(),
+            render_cache: Default::default(),
+            pixels_id: HEALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
     /// A smaller copy (longest side at most `max_px`).
     pub fn downscaled(&self, max_px: u32) -> WorkingImage {
         let pixels = fit_image(DynamicImage::ImageRgb32F(self.pixels.clone()), max_px).into_rgb32f();
@@ -138,6 +164,8 @@ impl WorkingImage {
             warp_source: None,
             mask_cache: MaskCache::default(),
             heal_cache: HealCache::default(),
+            render_cache: Default::default(),
+            pixels_id: 0,
         }
     }
 

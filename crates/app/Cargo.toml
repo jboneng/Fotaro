@@ -25,6 +25,7 @@ directories = "6.0.0"
 crossbeam-channel = "0.5.17"
 fs4 = "1.1.0"
 mimalloc = "0.1.52"
+rayon = "1.12"
 thread-priority = "3.1.1"
 
 [lints]
