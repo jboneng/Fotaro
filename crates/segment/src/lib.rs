@@ -340,7 +340,7 @@ pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, D
         let result = match model {
             AiModel::Subject => subject_rmbg(session, img),
             AiModel::Sky => sky(session, img),
-            AiModel::Object | AiModel::Remove | AiModel::RemoveBest => {
+            AiModel::Object | AiModel::Remove | AiModel::RemoveBest | AiModel::Scratches => {
                 bail!("{} isn't a selection", model.label())
             }
         };
@@ -531,6 +531,103 @@ fn folded(src: &Path) -> Result<std::path::PathBuf> {
     std::fs::rename(&part, &dst)?;
     log::info!("AI: decoded {} for the GPU in {:.1?}", src.display(), started.elapsed());
     Ok(dst)
+}
+
+/// The scratch detector, kept loaded while it is used.
+static SCRATCH: std::sync::Mutex<Option<(Device, Model)>> = std::sync::Mutex::new(None);
+
+/// Dust & Scratches with the AI model: the chance (0..255) that each pixel of a photo's
+/// lightness (`gray` 0..1, `w × h`) is dust, a hair or a scratch. The model looks at the
+/// photo made `scale` times smaller (it was trained on small prints; film specks are a few
+/// pixels), in 512 px tiles overlapping by 32; `progress` hears the share done. On the GPU
+/// (DirectML) when `gpu`, else (or if that fails) the CPU.
+pub fn scratches(
+    gray: &[f32],
+    w: usize,
+    h: usize,
+    scale: f32,
+    gpu: bool,
+    progress: &dyn Fn(f32),
+) -> Result<(Vec<u8>, Device)> {
+    use image::{ImageBuffer, Luma};
+    const TILE: usize = 512;
+    const PAD: usize = 32;
+    let full: ImageBuffer<Luma<f32>, Vec<f32>> =
+        ImageBuffer::from_raw(w as u32, h as u32, gray.to_vec()).context("the photo's size")?;
+    let (sw, sh) = (((w as f32 * scale).round() as usize).max(1), ((h as f32 * scale).round() as usize).max(1));
+    let small = imageops::resize(&full, sw as u32, sh as u32, imageops::FilterType::Triangle);
+    let px = small.as_raw();
+    // Reflected at the borders, so every tile is the same size (DirectML compiles once).
+    let at = |x: isize, y: isize| {
+        let r = |v: isize, n: usize| -> usize {
+            let n = n as isize;
+            let v = if v < 0 { -v } else { v };
+            let v = v % (2 * n);
+            (if v >= n { 2 * n - 1 - v } else { v }) as usize
+        };
+        px[r(y, sh) * sw + r(x, sw)]
+    };
+    let step = TILE - 2 * PAD;
+    let tiles: Vec<(usize, usize)> =
+        (0..sh).step_by(step).flat_map(|y| (0..sw).step_by(step).map(move |x| (x, y))).collect();
+    let run = |model: &mut Model| -> Result<Vec<f32>> {
+        let mut prob = vec![0.0f32; sw * sh];
+        for (k, &(x0, y0)) in tiles.iter().enumerate() {
+            let mut input = vec![0.0f32; TILE * TILE];
+            for ty in 0..TILE {
+                for tx in 0..TILE {
+                    let v = at(x0 as isize + tx as isize - PAD as isize, y0 as isize + ty as isize - PAD as isize);
+                    input[ty * TILE + tx] = v * 2.0 - 1.0;
+                }
+            }
+            let tensor = Tensor::from_array(([1usize, 1, TILE, TILE], input))?;
+            let outputs = model.session.run(ort::inputs![tensor])?;
+            let (_, out) = outputs[0].try_extract_tensor::<f32>()?;
+            let (tw, th) = (step.min(sw - x0), step.min(sh - y0));
+            for ty in 0..th {
+                for tx in 0..tw {
+                    prob[(y0 + ty) * sw + x0 + tx] = out[(ty + PAD) * TILE + tx + PAD];
+                }
+            }
+            progress((k + 1) as f32 / tiles.len() as f32);
+        }
+        Ok(prob)
+    };
+    let devices: &[Device] =
+        if gpu && cfg!(windows) { &[Device::DirectMl, Device::Cpu] } else { &[Device::Cpu] };
+    let model = AiModel::Scratches;
+    let mut last = None;
+    for &device in devices {
+        let mut loaded = SCRATCH.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(&*loaded, Some((d, _)) if *d == device) {
+            *loaded = None;
+            match Model::load(&model.path(), device) {
+                Ok(m) => *loaded = Some((device, m)),
+                Err(e) => {
+                    log::warn!("AI: {} on {}: {e:#}", model.label(), device.label());
+                    last = Some(e);
+                    continue;
+                }
+            }
+        }
+        let Some((_, session)) = loaded.as_mut() else { continue };
+        match run(session) {
+            Ok(prob) => {
+                *loaded = None;
+                let small: ImageBuffer<Luma<f32>, Vec<f32>> =
+                    ImageBuffer::from_raw(sw as u32, sh as u32, prob).context("the map's size")?;
+                let back = imageops::resize(&small, w as u32, h as u32, imageops::FilterType::Triangle);
+                let map = back.as_raw().iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+                return Ok((map, device));
+            }
+            Err(e) => {
+                log::warn!("AI: {} failed on {}: {e:#}", model.label(), device.label());
+                *loaded = None;
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("no device to run {} on", model.label())))
 }
 
 /// Unload the Remove models (they hold GPU memory another model may need).

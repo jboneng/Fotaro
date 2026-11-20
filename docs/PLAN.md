@@ -893,3 +893,42 @@ LrC's Distractions has Dust (sensor dust). Film scans need more, so two parts:
     find); adds the small specks IR only hints at, never wires or edges. The default with
     an IR pass.
 - Not done: Reflections and People (LrC's other Distractions).
+
+### Picture-only Dust & Scratches, measured (2026-11-20)
+
+Measured against **FILM-AA** (Ivanova et al. 2023, CC BY 4.0: ten blank 35 mm frames from a
+Plustek 7600i with 12,135 hand-marked defects). Also used: composites of its defects on a
+digital photo, clean digital photos (everything found is false), and the user's SilverFast
+Kodak Gold scans. The colour scan's IR pass served as a reference for real dust.
+
+| Picture detector | FILM-AA recall | SilverFast scan: flagged px/MP | 17–24 MP |
+|---|---|---|---|
+| Before (dark and light) | 42–67% | 4,373 | ~2 s |
+| Classroom top-hat pipeline (the linked repo) | 26% | 18,929 (blank film) | 0.7 s |
+| **Now: Light only, recalibrated** | **77–91%** | 3,769 | **1.3–2.5 s** |
+| **AI: Microsoft's scratch U-Net at ½ scale + Light** | **85%** | **328** | 45–55 s (T550) |
+
+- **Polarity.** On scans of negatives, dust comes out light: 89% of finds on FILM-AA, 86%
+  of IR-confirmed dust on the colour scan. The false finds on the Kodak Gold scan were 68%
+  dark. **Defects: Light / Dark / Both**, Light by default; Dark is for slides. Looking one
+  way needs stricter factors (the usual level halves).
+- **Tried and dropped:**
+  - a "carries on past the find" test: little gain, and it cost scratches;
+  - colour and edge sharpness: no separation in the IR-checked data.
+- **Use AI (slower, cleaner)**, for Picture: Microsoft's U-Net, "Bringing Old Photos Back
+  to Life" (MIT), a 151 MB download with consent.
+  - It runs once a photo: grey, ½ scale, 512 px tiles. Its map is kept (`ai_map`), so
+    Sensitivity, Max Size and Defects only threshold it.
+  - At ⅓ scale it takes half the time, but recall drops to 77%.
+  - It takes about 1.8 s per 512² tile on the T550 (6–8 s on the CPU). No faster path
+    found.
+  - The user chose it as an option, not the default.
+- **Sensor Dust's Find found nothing.**
+  - Its thresholds needed blobs much darker than sensor dust (0/40 synthetic 2–6% blobs,
+    even at 100).
+  - Now relative to the local noise: 19/40 at the default with no false finds on clean
+    digital photos, 27/40 at 70.
+  - The panel says what it found (or that it found nothing); the History step is
+    "Sensor Dust: n spots".
+- **Speed.** Masks are saved with fast PNG compression. Each stage of the dust job is
+  logged (read, found, saved; and the full-size load).

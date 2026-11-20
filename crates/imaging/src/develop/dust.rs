@@ -41,6 +41,32 @@ impl DustSource {
     }
 }
 
+/// Which way film defects depart from the picture, seen in the picture. Dust and hairs
+/// block light: on a negative that comes out **light** in the positive, on a slide
+/// **dark**. Looking one way only leaves the picture's own detail of the other alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DustPolarity {
+    /// Scans of negatives (colour or black & white), inverted.
+    #[default]
+    Light,
+    /// Slides.
+    Dark,
+    /// Either (finds more of the picture's own detail too).
+    Both,
+}
+
+impl DustPolarity {
+    pub const ALL: [DustPolarity; 3] = [Self::Light, Self::Dark, Self::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+            Self::Both => "Both",
+        }
+    }
+}
+
 /// Dust & Scratches: what to find, and the mask found (`picture`, in the mask store,
 /// made for `made_for` = [`DustLayer::key`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +78,13 @@ pub struct DustLayer {
     pub sensitivity: f32,
     /// The thickest defect, in full-size pixels (hairs and scratches can be long).
     pub max_size: f32,
+    /// Which way defects look in the picture (for Picture, and Both's picture part).
+    pub polarity: DustPolarity,
+    /// Picture: find defects with an AI model (slower, cleaner) instead of by filtering.
+    pub ai: bool,
+    /// The model's map of the photo (probabilities as a picture in the mask store), made
+    /// once: Sensitivity and the rest only threshold it.
+    pub ai_map: Option<String>,
     pub picture: Option<String>,
     pub made_for: u64,
 }
@@ -63,6 +96,9 @@ impl Default for DustLayer {
             source: DustSource::Picture,
             sensitivity: 50.0,
             max_size: 12.0,
+            polarity: DustPolarity::Light,
+            ai: false,
+            ai_map: None,
             picture: None,
             made_for: 0,
         }
@@ -73,10 +109,21 @@ impl DustLayer {
     /// What the mask depends on.
     pub fn key(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for v in [self.source as u32, self.sensitivity.to_bits(), self.max_size.to_bits()] {
+        for v in [
+            self.source as u32,
+            self.sensitivity.to_bits(),
+            self.max_size.to_bits(),
+            self.polarity as u32,
+            u32::from(self.uses_ai()),
+        ] {
             h = (h ^ u64::from(v)).wrapping_mul(0x0000_0100_0000_01b3);
         }
         h
+    }
+
+    /// Found with the AI model: asked for, and looking at the picture alone.
+    pub fn uses_ai(&self) -> bool {
+        self.ai && self.source == DustSource::Picture
     }
 
     /// The mask to fill with, if on and made for these settings.
@@ -419,19 +466,15 @@ fn ir_mask(dip: &[f32], w: usize, h: usize, t: f32, max_size: f32) -> Vec<u8> {
 /// Film defects from both the picture and the infrared pass: what the infrared finds, and
 /// what the picture finds where the infrared shows at least a faint dip too, so the
 /// picture's own fine detail (wires, edges, highlights) is left alone while the picture's
-/// sharper view adds small specks the infrared only hints at.
-pub fn detect_both(
-    lum: &[f32],
-    ir: &[f32],
-    valid: Option<&[u8]>,
-    w: usize,
-    h: usize,
-    sensitivity: f32,
-    max_size: f32,
-) -> Vec<u8> {
+/// sharper view adds small specks the infrared only hints at. `layer` gives the
+/// sensitivity, Max Size and polarity.
+pub fn detect_both(lum: &[f32], ir: &[f32], valid: Option<&[u8]>, w: usize, h: usize, layer: &DustLayer) -> Vec<u8> {
+    let (sensitivity, max_size, polarity) = (layer.sensitivity, layer.max_size, layer.polarity);
     let t = ir_threshold(sensitivity);
-    let (dip, mut pic) =
-        rayon::join(|| ir_dip(ir, lum, valid, w, h, t, max_size), || detect_picture(lum, w, h, sensitivity, max_size));
+    let (dip, mut pic) = rayon::join(
+        || ir_dip(ir, lum, valid, w, h, t, max_size),
+        || detect_picture_as(lum, w, h, sensitivity, max_size, polarity),
+    );
     // Confirmed: the infrared, over the whole of what the picture found, dips by a good
     // part of its threshold (the picture's own detail shows no dip, once its share is
     // taken away; a speck too small to clear the threshold in infrared still does).
@@ -504,29 +547,61 @@ fn keep_parts(mask: &mut [u8], w: usize, h: usize, keep: impl Fn(&[usize]) -> bo
 /// dark or light — by more than the film's grain (measured locally) times a factor the
 /// sensitivity sets. Returns a mask, 255 at defects.
 pub fn detect_picture(lum: &[f32], w: usize, h: usize, sensitivity: f32, max_size: f32) -> Vec<u8> {
+    detect_picture_as(lum, w, h, sensitivity, max_size, DustPolarity::Both)
+}
+
+/// How far each pixel of `lum` stands out, the way `polarity` asks, from what is around it
+/// within `r` pixels: closing (max then min) fills dark features smaller than the window,
+/// opening (min then max) removes light ones; their differences from the picture.
+fn departure(lum: &[f32], w: usize, h: usize, r: usize, polarity: DustPolarity) -> Vec<f32> {
+    let closing = || min_max_filter(&min_max_filter(lum, w, h, r, true), w, h, r, false);
+    let opening = || min_max_filter(&min_max_filter(lum, w, h, r, false), w, h, r, true);
+    match polarity {
+        DustPolarity::Light => {
+            let o = opening();
+            lum.par_iter().zip(&o).map(|(v, o)| v - o).collect()
+        }
+        DustPolarity::Dark => {
+            let c = closing();
+            lum.par_iter().zip(&c).map(|(v, c)| c - v).collect()
+        }
+        DustPolarity::Both => {
+            let (c, o) = rayon::join(closing, opening);
+            (0..w * h).into_par_iter().map(|i| (c[i] - lum[i]).max(lum[i] - o[i])).collect()
+        }
+    }
+}
+
+/// [`detect_picture`] looking one way (or both): see [`DustPolarity`].
+pub fn detect_picture_as(
+    lum: &[f32],
+    w: usize,
+    h: usize,
+    sensitivity: f32,
+    max_size: f32,
+    polarity: DustPolarity,
+) -> Vec<u8> {
     let s = sensitivity / 100.0;
     let r = (max_size / 2.0).ceil() as usize + 1;
     // Lightly smoothed: grain extremes shrink a lot, a speck of a few pixels keeps its depth.
     let smooth = box_blur_par(lum, w, h, 1);
     let lum = smooth.as_slice();
-    // Closing (max then min) fills dark features smaller than the window; opening (min
-    // then max) removes light ones. Their differences from the picture are the defects.
-    let (closing, opening) = rayon::join(
-        || min_max_filter(&min_max_filter(lum, w, h, r, true), w, h, r, false),
-        || min_max_filter(&min_max_filter(lum, w, h, r, false), w, h, r, true),
-    );
     // How far each pixel stands out (darker or lighter than what is around it at this
     // size), and how much that is usual here: film grain clumps stand out a little
     // everywhere, a speck far more than its surroundings do.
-    let d: Vec<f32> = (0..w * h).into_par_iter().map(|i| (closing[i] - lum[i]).max(lum[i] - opening[i])).collect();
+    let d = departure(lum, w, h, r, polarity);
     // Measured twice, the second time with the defects clipped, so a long hair does
     // not raise the usual level along itself.
     let reach = (4 * r).max(12);
     let rough = box_blur_par(&d, w, h, reach);
     let clipped: Vec<f32> = d.iter().zip(&rough).map(|(v, u)| v.min(2.0 * u)).collect();
     let usual = box_blur_par(&clipped, w, h, reach);
-    let k = lerp(9.0, 3.5, s);
-    let floor = lerp(0.08, 0.02, s);
+    // Looking one way, the usual level is about half: stricter factors keep the same
+    // sensitivity meaning about as much (measured on annotated film scans).
+    let (k, floor) = match polarity {
+        DustPolarity::Both => (lerp(9.0, 3.5, s), lerp(0.08, 0.02, s)),
+        _ => (lerp(11.0, 5.5, s), lerp(0.1, 0.04, s)),
+    };
     let thr: Vec<f32> = usual.iter().map(|u| (k * u).max(floor)).collect();
     // Defects judged on where they clearly stand out: thin enough, and long thin shapes
     // (often the picture's own: wires, edges, letters) only when very strong; then
@@ -538,7 +613,7 @@ pub fn detect_picture(lum: &[f32], w: usize, h: usize, sensitivity: f32, max_siz
     // scratches are lost too, and can be painted out with spots.
     keep_parts(&mut seeds, w, h, |part| !straight(part, w, max_size));
     // Hairs too faint to stand out pixel by pixel in heavy grain, found along their length.
-    let hairs = hair_seeds(lum, w, h, s, max_size);
+    let hairs = hair_seeds(lum, w, h, s, max_size, polarity);
     for (a, b) in seeds.iter_mut().zip(&hairs) {
         *a = (*a).max(*b);
     }
@@ -554,17 +629,13 @@ pub fn detect_picture(lum: &[f32], w: usize, h: usize, sensitivity: f32, max_siz
 /// sensitivity `s` 0..1 sets) a hair starts, and is followed along its fainter rest; it
 /// must be long, thin and curling. Worked at half size. Returns a mask, 255 at the hairs'
 /// pixels that stand out.
-fn hair_seeds(lum: &[f32], w: usize, h: usize, s: f32, max_size: f32) -> Vec<u8> {
+fn hair_seeds(lum: &[f32], w: usize, h: usize, s: f32, max_size: f32, polarity: DustPolarity) -> Vec<u8> {
     const L: isize = 6;
     let (hw, hh) = (w / 2, h / 2);
     if (hw as isize) < 4 * L || (hh as isize) < 4 * L {
         return vec![0; w * h];
     }
-    let (closing, opening) = rayon::join(
-        || min_max_filter(&min_max_filter(lum, w, h, 2, true), w, h, 2, false),
-        || min_max_filter(&min_max_filter(lum, w, h, 2, false), w, h, 2, true),
-    );
-    let d: Vec<f32> = (0..w * h).into_par_iter().map(|i| (closing[i] - lum[i]).max(lum[i] - opening[i])).collect();
+    let d = departure(lum, w, h, 2, polarity);
     let usual = box_blur_par(&d, w, h, 12);
     let half: Vec<f32> = (0..hw * hh)
         .into_par_iter()
@@ -672,29 +743,28 @@ pub fn find_sensor_dust(lum: &[f32], w: usize, h: usize, sensitivity: f32) -> Ve
         let k = patches.len() * 3 / 10;
         if patches.is_empty() { 0.0 } else { *patches.select_nth_unstable_by(k, f32::total_cmp).1 }
     };
-    // How dark a blob must be (in log lightness: 0.01 ≈ 1% darker).
-    let t = lerp(0.05, 0.008, s);
+    // How dark a blob must be (in log lightness: 0.01 ≈ 1% darker): at least a share the
+    // sensitivity sets, and well above the noise where it is. Sensor dust is faint: a few %.
+    let t_min = lerp(0.012, 0.002, s);
+    let k_noise = lerp(4.0, 1.2, s);
     let mut found: Vec<(f32, f32, f32, f32)> = Vec::new(); // (strength, x, y, radius) in small px
     for r in [1usize, 2, 3, 5, 8] {
         let inner = blur(&small, r);
         let outer = blur(&small, 2 * r + 1);
         // Difference of blurs: negative at a dark blob of about this size.
         let dog: Vec<f32> = inner.iter().zip(&outer).map(|(a, b)| a - b).collect();
-        // Smoothness: the local spread of the lightness itself (texture shows there, not in
-        // the blur) around each pixel.
-        let sq: Vec<f32> = small.iter().map(|v| v * v).collect();
-        let reach = 3 * r + 2;
-        let ((m, m2), busy) = rayon::join(
-            || rayon::join(|| box_blur_par(&small, sw, sh, reach), || box_blur_par(&sq, sw, sh, reach)),
-            || box_blur_par(&fine, sw, sh, 4 * r + 4),
-        );
+        // How busy it is around each pixel: its fine detail (noise, grain, texture).
+        let busy = box_blur_par(&fine, sw, sh, 4 * r + 4);
+        // A blurred blob of this size keeps about this much of the noise's fine detail.
+        let keep = 1.0 / (r as f32 + 1.0);
         let ring = (2 * r + 2) as isize;
         let edge = 3 * r + 3;
         for y in edge..sh.saturating_sub(edge) {
             for x in edge..sw.saturating_sub(edge) {
                 let i = y * sw + x;
                 let v = dog[i];
-                if v > -t {
+                let noise = busy[i] * keep;
+                if v > -t_min.max(k_noise * noise) {
                     continue;
                 }
                 // A local minimum over its own size.
@@ -721,12 +791,6 @@ pub fn find_sensor_dust(lum: &[f32], w: usize, h: usize, sensitivity: f32) -> Ve
                 if busy[i] > 2.0 * quiet + 0.002 {
                     continue;
                 }
-                // Smooth around it: the spread (which the blob itself adds to) only a
-                // little more than the blob's own depth.
-                let spread = (m2[i] - m[i] * m[i]).max(0.0).sqrt();
-                if spread > 1.2 * -v + 0.004 {
-                    continue;
-                }
                 // Darker than all around it, and the surroundings alike (an edge or a
                 // shadow's side has a dark side; a gradient changes across).
                 let around: Vec<f32> = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
@@ -737,7 +801,7 @@ pub fn find_sensor_dust(lum: &[f32], w: usize, h: usize, sensitivity: f32) -> Ve
                     })
                     .collect();
                 let (lo, hi) = around.iter().fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
-                if inner[i] > lo - 0.5 * -v || hi - lo > 0.8 * -v + 0.004 {
+                if inner[i] > lo - 0.5 * -v || hi - lo > 1.5 * -v + 3.0 * noise {
                     continue;
                 }
                 found.push((-v, x as f32 + 0.5, y as f32 + 0.5, 1.6 * r as f32 + 1.0));
@@ -884,6 +948,25 @@ pub struct IrPass {
     pub valid: Option<Vec<u8>>,
 }
 
+/// Dust & Scratches' mask from the AI model's map (`map`: probabilities 0..255, `w × h`) for
+/// `layer`: above a level the sensitivity sets, no thicker than Max Size, and departing the
+/// way the polarity asks from the picture around (`lum`, lightness).
+pub fn dust_from_map(map: &[u8], lum: &[f32], w: usize, h: usize, layer: &DustLayer) -> Vec<u8> {
+    let s = layer.sensitivity / 100.0;
+    let level = (lerp(0.65, 0.2, s) * 255.0) as u8;
+    let mut mask: Vec<u8> = map.iter().map(|v| if *v >= level { 255 } else { 0 }).collect();
+    keep_thin(&mut mask, w, h, 1.5 * layer.max_size, 2);
+    if layer.polarity != DustPolarity::Both {
+        let around = box_blur_par(lum, w, h, (2.0 * layer.max_size) as usize + 6);
+        let light = layer.polarity == DustPolarity::Light;
+        keep_parts(&mut mask, w, h, |part| {
+            let dev: f32 = part.iter().map(|&i| lum[i] - around[i]).sum();
+            (dev > 0.0) == light
+        });
+    }
+    grow(&mask, w, h, 1)
+}
+
 /// Dust & Scratches' mask for `layer`, from the photo's lightness (`lum`, `w × h`, see
 /// [`dust_lightness`]) and its infrared pass if it has one (without, IR and Both look at
 /// the picture alone). 255 at defects.
@@ -891,8 +974,10 @@ pub fn detect_dust(lum: &[f32], w: usize, h: usize, layer: &DustLayer, ir: Optio
     let (sens, size) = (layer.sensitivity, layer.max_size);
     match (layer.source, ir) {
         (DustSource::Ir, Some(ir)) => detect_ir(&ir.pixels, lum, ir.valid.as_deref(), w, h, sens, size),
-        (DustSource::Both, Some(ir)) => detect_both(lum, &ir.pixels, ir.valid.as_deref(), w, h, sens, size),
-        _ => detect_picture(lum, w, h, sens, size),
+        (DustSource::Both, Some(ir)) => {
+            detect_both(lum, &ir.pixels, ir.valid.as_deref(), w, h, layer)
+        }
+        _ => detect_picture_as(lum, w, h, sens, size, layer.polarity),
     }
 }
 
@@ -1055,6 +1140,63 @@ mod tests {
         assert!(along(&hair) > 200, "hair followed along {} of 260", along(&hair));
         let soft_found = along(&|x| soft(x) as usize);
         assert!(soft_found < 20, "soft line taken along {soft_found}");
+    }
+
+    #[test]
+    fn light_defects_only_leave_dark_ones_alone() {
+        let (w, h) = (200, 150);
+        let mut lum = grainy(w, h);
+        for (cx, cy, v) in [(40.0f32, 40.0f32, 0.2f32), (120.0, 50.0, 0.85)] {
+            for y in 0..h {
+                for x in 0..w {
+                    if (x as f32 - cx).hypot(y as f32 - cy) < 3.0 {
+                        lum[y * w + x] = v;
+                    }
+                }
+            }
+        }
+        let light = detect_picture_as(&lum, w, h, 50.0, 10.0, DustPolarity::Light);
+        assert_eq!(light[50 * w + 120], 255, "light speck");
+        assert_eq!(light[40 * w + 40], 0, "dark speck left");
+        let dark = detect_picture_as(&lum, w, h, 50.0, 10.0, DustPolarity::Dark);
+        assert_eq!((dark[40 * w + 40], dark[50 * w + 120]), (255, 0));
+        assert!(detect_picture_as(&grainy(w, h), w, h, 50.0, 10.0, DustPolarity::Light).iter().all(|m| *m == 0));
+    }
+
+    #[test]
+    fn the_ai_map_is_thresholded_by_sensitivity_and_polarity() {
+        let (w, h) = (100, 80);
+        let mut lum = vec![0.5f32; w * h];
+        let mut map = vec![0u8; w * h];
+        // A light speck the model is fairly sure of, and a dark one it is sure of.
+        for (cx, cy, v, p) in [(30usize, 40usize, 0.8f32, 120u8), (70, 40, 0.2, 230)] {
+            for y in cy - 2..=cy + 2 {
+                for x in cx - 2..=cx + 2 {
+                    lum[y * w + x] = v;
+                    map[y * w + x] = p;
+                }
+            }
+        }
+        let layer = |sensitivity: f32, polarity| DustLayer { sensitivity, polarity, ..Default::default() };
+        let m = dust_from_map(&map, &lum, w, h, &layer(50.0, DustPolarity::Light));
+        assert_eq!((m[40 * w + 30], m[40 * w + 70]), (255, 0), "light only");
+        let m = dust_from_map(&map, &lum, w, h, &layer(10.0, DustPolarity::Both));
+        assert_eq!((m[40 * w + 30], m[40 * w + 70]), (0, 255), "only the surest at low sensitivity");
+    }
+
+    #[test]
+    fn the_layer_key_follows_what_the_mask_depends_on() {
+        let base = DustLayer::default();
+        let key = base.key();
+        assert_ne!(DustLayer { polarity: DustPolarity::Dark, ..base.clone() }.key(), key);
+        assert_ne!(DustLayer { ai: true, ..base.clone() }.key(), key);
+        // The AI map is of the photo, not of the settings.
+        assert_eq!(DustLayer { ai_map: Some("x".into()), ..base.clone() }.key(), key);
+        // Settings saved before polarity and AI existed still load (as Light, no AI).
+        let old: DustLayer =
+            serde_json::from_str(r#"{"enabled":true,"source":"Picture","sensitivity":40.0,"max_size":12.0}"#)
+                .expect("old layer");
+        assert_eq!((old.polarity, old.ai, old.sensitivity), (DustPolarity::Light, false, 40.0));
     }
 
     #[test]

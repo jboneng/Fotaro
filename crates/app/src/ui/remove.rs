@@ -4,7 +4,7 @@
 //! Heal matches the source to the spot's surroundings, Clone copies it.
 
 use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Stroke};
-use imaging::develop::{DevelopSettings, DustLayer, DustSource, Slider, Spot, SpotArea, SpotMode, SpotStroke};
+use imaging::develop::{DevelopSettings, DustLayer, DustPolarity, DustSource, Slider, Spot, SpotArea, SpotMode, SpotStroke};
 
 use super::develop::{Spec, slider_row_as, weak};
 use super::masking::{Canvas, header, pill};
@@ -503,9 +503,7 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     let mut done: Option<Option<String>> = None;
     let mut leave = false;
     let mut new_source = false;
-    let mut find_dust = false;
-    let mut dust_changed = false;
-    let mut show_changed = false;
+    let mut asks = DistractionAsks::default();
     tool.selected = tool.selected.filter(|&i| i < st.spots.len());
     let title = match tool.selected {
         Some(i) => format!("Remove: Spot {}", i + 1),
@@ -635,7 +633,7 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             ui.add_space(6.0);
             super::masking::ai_progress(ui, job);
         }
-        distractions(ui, d, &mut st, &mut tool, &mut done, &mut find_dust, &mut dust_changed, &mut show_changed);
+        distractions(ui, d, &mut st, &mut tool, &mut done, &mut asks);
         ui.add_space(6.0);
         let n = st.spots.len();
         ui.label(RichText::new(format!("{n} spot{}", if n == 1 { "" } else { "s" })).size(12.0).color(theme::TEXT_WEAK));
@@ -654,37 +652,50 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     if new_source && let Some(i) = index {
         d.find_source(i, true);
     }
-    if find_dust {
+    if asks.find_dust {
         d.find_sensor_dust();
     }
-    if show_changed {
+    if asks.show_changed {
         d.request_renders();
     }
     // Dust & Scratches: saved now if nothing needs finding, else when the defects are found.
-    if dust_changed {
+    if asks.dust_changed {
         if d.settings.dust.as_ref().is_some_and(DustLayer::needs_detection) {
             d.request_dust();
         } else {
             done = Some(None);
         }
     }
+    if asks.recalculate {
+        d.recalculate_dust();
+    }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
     }
 }
 
+/// What the Distractions section asks for once the panel is drawn.
+#[derive(Default)]
+struct DistractionAsks {
+    /// Sensor Dust's Find.
+    find_dust: bool,
+    /// Dust & Scratches' settings changed (find again, or save).
+    dust_changed: bool,
+    /// Show found was switched.
+    show_changed: bool,
+    /// Dust & Scratches' Recalculate.
+    recalculate: bool,
+}
+
 /// The Remove panel's Distractions: Sensor Dust (Find makes spots) and Dust & Scratches
 /// (film defects found from the infrared pass or the picture, filled as one layer).
-#[allow(clippy::too_many_arguments)]
 fn distractions(
     ui: &mut egui::Ui,
     d: &mut DevelopState,
     st: &mut DevelopSettings,
     tool: &mut RemoveTool,
     done: &mut Option<Option<String>>,
-    find_dust: &mut bool,
-    dust_changed: &mut bool,
-    show_changed: &mut bool,
+    asks: &mut DistractionAsks,
 ) {
     let spec = |id: u8, range: (f32, f32), default: f32| Spec {
         slider: Slider::MaskAmount(id),
@@ -710,11 +721,24 @@ fn distractions(
                        (skies, walls), as Heal spots you can check, move or delete. Finding \
                        again replaces the found spots you haven't changed";
             if pill(ui, "Find", false).on_hover_text(tip).clicked() {
-                *find_dust = true;
+                asks.find_dust = true;
             }
         });
     });
     slider_row_as(ui, &spec(243, (0.0, 100.0), 50.0), "Sensitivity", &mut d.sensor_sensitivity);
+    // What Find is doing, or found.
+    if d.sensor_finding {
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(weak("Finding…").size(12.0));
+        });
+    } else if let Some(result) = &d.sensor_result {
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            ui.label(weak(result.as_str()).size(12.0));
+        });
+    }
     let found = st.spots.iter().filter(|s| s.found).count();
     if found > 0 {
         ui.horizontal(|ui| {
@@ -747,16 +771,23 @@ fn distractions(
                     layer = Some(DustLayer { source, ..Default::default() });
                 }
             }
-            *dust_changed = true;
+            asks.dust_changed = true;
         }
         row_label(ui, "Dust & Scratches");
-        if d.dust_job.is_some() {
+        if on {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(weak("Finding…").size(12.0));
-                ui.add(egui::Spinner::new().size(12.0));
+                let tip = "Find the dust and scratches again with these settings";
+                let busy = d.dust_job.is_some();
+                if ui.add_enabled_ui(!busy, |ui| pill(ui, "Recalculate", false)).inner.on_hover_text(tip).clicked() {
+                    asks.recalculate = true;
+                }
             });
         }
     });
+    if let Some((_, job)) = &d.dust_job {
+        ui.add_space(4.0);
+        super::masking::ai_progress(ui, job);
+    }
     if let Some(l) = layer.as_mut().filter(|l| l.enabled) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -776,21 +807,52 @@ fn distractions(
                     .on_disabled_hover_text("This photo has no infrared pass (a file named like it, ending in _IR)");
                 if r.clicked() && l.source != source {
                     l.source = source;
-                    *dust_changed = true;
+                    asks.dust_changed = true;
                 }
             }
         });
+        // Which way defects look: picture detail of the other kind is left alone.
+        if l.source != DustSource::Ir {
+            ui.horizontal(|ui| {
+                ui.add_space(super::develop::LABEL_W - 40.0);
+                row_label(ui, "Defects");
+                for polarity in DustPolarity::ALL {
+                    let tip = match polarity {
+                        DustPolarity::Light => "Light specks and hairs: scans of negatives (colour or black & white), where dust blocked light",
+                        DustPolarity::Dark => "Dark specks and hairs: scans of slides",
+                        DustPolarity::Both => "Either way: finds more of the picture's own fine detail too",
+                    };
+                    if mode_button(ui, polarity.label(), l.polarity == polarity).on_hover_text(tip).clicked()
+                        && l.polarity != polarity
+                    {
+                        l.polarity = polarity;
+                        asks.dust_changed = true;
+                    }
+                }
+            });
+        }
+        if l.source == DustSource::Picture {
+            ui.horizontal(|ui| {
+                ui.add_space(super::develop::LABEL_W - 40.0);
+                let tip = "Find defects with an AI model (Microsoft's scratch detector, run on this \
+                           computer): far fewer false finds on detailed pictures, but it takes about \
+                           a minute a photo the first time (then the sliders are quick)";
+                if ui.checkbox(&mut l.ai, "Use AI (slower, cleaner)").on_hover_text(tip).changed() {
+                    asks.dust_changed = true;
+                }
+            });
+        }
         if slider_row_as(ui, &spec(244, (0.0, 100.0), 50.0), "Sensitivity", &mut l.sensitivity).done {
-            *dust_changed = true;
+            asks.dust_changed = true;
         }
         if slider_row_as(ui, &spec(245, (2.0, 60.0), 12.0), "Max Size", &mut l.max_size).done {
-            *dust_changed = true;
+            asks.dust_changed = true;
         }
         ui.horizontal(|ui| {
             ui.add_space(super::develop::LABEL_W - 40.0);
             let tip = "Show what was found in red";
             if ui.checkbox(&mut d.show_dust, "Show found").on_hover_text(tip).changed() {
-                *show_changed = true;
+                asks.show_changed = true;
             }
         });
         if !has_ir && l.source == DustSource::Picture {

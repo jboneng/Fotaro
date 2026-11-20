@@ -761,6 +761,7 @@ pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
         ui.set_width(380.0);
         let (title, what) = match kind {
             AiKind::Remove => ("Remove".to_owned(), "the model that fills removed areas".to_owned()),
+            AiKind::Dust => ("Dust & Scratches".to_owned(), "the model that finds dust and scratches".to_owned()),
             k => (
                 format!("Select {}", k.label()),
                 format!("the model that finds the {}", k.label().to_lowercase()),
@@ -795,6 +796,7 @@ pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     }
     match answer {
         Some(true) => d.start_ai(kind, consent.target, consent.prompt),
+        Some(false) if kind == AiKind::Dust => d.decline_dust_ai(),
         Some(false) => {
             d.fill_declined |= kind == AiKind::Remove;
             d.ai_consent = None;

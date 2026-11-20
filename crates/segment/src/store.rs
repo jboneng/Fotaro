@@ -23,6 +23,8 @@ pub enum AiModel {
     /// Remove at best quality: big-LaMa (int4/int8 weights; DirectML runs a copy with them
     /// decoded, see `folded`).
     RemoveBest,
+    /// Dust & Scratches: the scratch detector of "Bringing Old Photos Back to Life".
+    Scratches,
 }
 
 impl AiModel {
@@ -33,6 +35,7 @@ impl AiModel {
             AiModel::Object => "Objects (SAM 2.1 tiny)",
             AiModel::Remove => "Remove (LaMa-Dilated)",
             AiModel::RemoveBest => "Remove, best quality (big-LaMa)",
+            AiModel::Scratches => "Dust & Scratches (old-photo scratch detector)",
         }
     }
 
@@ -43,6 +46,7 @@ impl AiModel {
             AiModel::Object => &OBJECT,
             AiModel::Remove => &REMOVE,
             AiModel::RemoveBest => &REMOVE_BEST,
+            AiModel::Scratches => &SCRATCHES,
         }
     }
 
@@ -100,6 +104,16 @@ const REMOVE_BEST: [Asset; 1] = [Asset {
     sha256: "4e3b78a253eb4abf21896811c928ffa91214b916e5d6ced24cecdd7999b4aaa1",
     size: 36_931_151,
     file: "lama-r4.onnx",
+}];
+
+/// Dust & Scratches' detector (MIT): the scratch-detection U-Net of Wan et al., "Bringing
+/// Old Photos Back to Life" (Microsoft), as artiva-ai export it to ONNX: grey in, the
+/// chance of damage out, any size (multiples of 16).
+const SCRATCHES: [Asset; 1] = [Asset {
+    url: "https://huggingface.co/artiva-ai/modelos/resolve/main/rasgunos_old_photos.onnx",
+    sha256: "7fde08b6af282f5b577ae1ef296a0614d7f3541637051df1a552da12bf78ec6f",
+    size: 150_605_103,
+    file: "scratches.onnx",
 }];
 
 /// SAM 2.1 tiny: the graphs keep their weights in `.onnx_data` files, found by name next

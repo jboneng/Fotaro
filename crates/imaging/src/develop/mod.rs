@@ -25,7 +25,8 @@ mod tests;
 pub use curve::{CurveChannel, CurveFns, DEFAULT_SPLITS, POINT_PRESETS, Spline, ToneCurve};
 pub use detail::{Detail, DetailParam, SharpenView};
 pub use dust::{
-    DustLayer, DustSource, IrPass, detect_both, detect_dust, detect_ir, detect_picture, dust_lightness, fill_masked,
+    DustLayer, DustPolarity, DustSource, IrPass, detect_both, detect_dust, detect_ir, detect_picture, detect_picture_as,
+    dust_from_map, dust_lightness, fill_masked,
     find_sensor_dust, mask_at, render_dust_overlay, sensor_dust_spots,
 };
 pub use effects::{EffectParam, Effects, VignetteStyle};
@@ -36,7 +37,7 @@ pub use heal::{
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use masks::{
     CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke, save_fill_picture,
-    save_mask_picture, set_mask_store,
+    mask_picture, save_mask_picture, set_mask_store,
 };
 pub use pipeline::{
     Region, auto_tone, render_linear16, render_mask, render_region_srgb8, render_region_srgb8_view,

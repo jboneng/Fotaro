@@ -122,13 +122,21 @@ pub fn save_mask_picture(id: &str, picture: &image::GrayImage) -> anyhow::Result
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no catalog to keep the mask in"))?;
     std::fs::create_dir_all(&dir)?;
-    picture.save(dir.join(format!("{id}.png")))?;
+    // Fast compression: full-size masks (Dust & Scratches) are tens of megapixels, and
+    // mostly one value, which compresses well anyway.
+    let file = std::io::BufWriter::new(std::fs::File::create(dir.join(format!("{id}.png")))?);
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        file,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    );
+    picture.write_with_encoder(encoder)?;
     MASK_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).push((id.to_owned(), Arc::new(picture.clone())));
     Ok(())
 }
 
 /// An AI mask's picture, from memory or the mask store; `None` if it is missing.
-pub(super) fn mask_picture(id: &str) -> Option<Arc<image::GrayImage>> {
+pub fn mask_picture(id: &str) -> Option<Arc<image::GrayImage>> {
     let mut cache = MASK_PICTURES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, p)) = cache.iter().find(|(k, _)| k == id) {
         return Some(p.clone());

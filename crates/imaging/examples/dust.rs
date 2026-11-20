@@ -11,7 +11,10 @@ use std::time::Instant;
 
 use image::{Rgb, RgbImage};
 use imaging::SourceKind;
-use imaging::develop::{WorkingImage, detect_both, detect_ir, detect_picture, fill_masked, find_sensor_dust};
+use imaging::develop::{
+    DustLayer, DustPolarity, WorkingImage, detect_both, detect_ir, detect_picture_as, dust_lightness, fill_masked,
+    find_sensor_dust,
+};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,15 +34,75 @@ fn main() -> anyhow::Result<()> {
     let (img, _) = WorkingImage::load(&photo, kind, None)?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     println!("{} {w}×{h}, loaded in {:.1?}", photo.display(), t.elapsed());
+    // PL_SENSOR_TEST: sensor dust's recall on synthetic blobs over this photo at the app's
+    // proxy size (soft, round, a few % darker), and what else it finds.
+    if std::env::var_os("PL_SENSOR_TEST").is_some() {
+        let small = img.downscaled(2048);
+        let (sw, sh) = (small.width() as usize, small.height() as usize);
+        let clean = dust_lightness(&small);
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as f32 / (1u64 << 31) as f32
+        };
+        let blobs: Vec<(f32, f32, f32, f32)> =
+            (0..40).map(|_| (rnd() * sw as f32, rnd() * sh as f32, 3.0 + rnd() * 9.0, 0.02 + rnd() * 0.04)).collect();
+        let mut lum = clean.clone();
+        for &(cx, cy, r, depth) in &blobs {
+            for y in 0..sh {
+                for x in 0..sw {
+                    let d2 = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)) / (r * r);
+                    if d2 < 9.0 {
+                        // Darker by `depth` in linear light: lightness is its square root.
+                        let i = y * sw + x;
+                        lum[i] *= (1.0 - depth * (-d2).exp()).sqrt();
+                    }
+                }
+            }
+        }
+        for sens in [30.0, 50.0, 70.0, 90.0] {
+            let found = find_sensor_dust(&lum, sw, sh, sens);
+            let before = find_sensor_dust(&clean, sw, sh, sens).len();
+            let hit = blobs
+                .iter()
+                .filter(|(cx, cy, r, _)| {
+                    found.iter().any(|(c, _)| (c[0] * sw as f32 - cx).hypot(c[1] * sh as f32 - cy) < r.max(4.0))
+                })
+                .count();
+            println!("sensitivity {sens}: {hit}/40 blobs found, {} finds in all, {before} on the clean photo", found.len());
+        }
+        return Ok(());
+    }
     let px = img.pixels.as_raw();
-    let lum: Vec<f32> =
-        px.chunks(3).map(|p| (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).clamp(0.0, 1.0).sqrt()).collect();
+    let lum = dust_lightness(&img);
     let stem = photo.file_stem().map_or("photo".into(), |s| s.to_string_lossy().into_owned());
 
     let mut masks: Vec<(&str, Vec<u8>)> = Vec::new();
     let t = Instant::now();
-    let pic = detect_picture(&lum, w, h, sens, size);
+    let polarity = match std::env::var("PL_DUST_POL").as_deref() {
+        Ok("dark") => DustPolarity::Dark,
+        Ok("both") => DustPolarity::Both,
+        _ => DustPolarity::Light,
+    };
+    let pic = detect_picture_as(&lum, w, h, sens, size, polarity);
     println!("picture: {:.1?}, {} px", t.elapsed(), pic.iter().filter(|v| **v > 0).count());
+    // PL_DUST_MASK: only the masks, as `<stem>.picture.png` (and `<stem>.ir.png` with an
+    // IR pass), for measuring.
+    if std::env::var_os("PL_DUST_MASK").is_some() {
+        let save = |mask: Vec<u8>, name: &str| -> anyhow::Result<()> {
+            image::GrayImage::from_raw(w as u32, h as u32, mask)
+                .ok_or_else(|| anyhow::anyhow!("mask size"))?
+                .save(out.join(format!("{stem}.{name}.png")))?;
+            Ok(())
+        };
+        save(pic, "picture")?;
+        if let Some(ir) = &ir {
+            let irimg = image::open(ir)?.to_luma32f();
+            let valid = valid_mask(ir).filter(|v| v.len() == w * h);
+            save(detect_ir(irimg.as_raw(), &lum, valid.as_deref(), w, h, sens, size), "ir")?;
+        }
+        return Ok(());
+    }
     masks.push(("picture", pic.clone()));
     if let Some(ir) = &ir {
         let t = Instant::now();
@@ -54,7 +117,14 @@ fn main() -> anyhow::Result<()> {
             if valid.is_some() { " (with the valid mask)" } else { "" }
         );
         let t = Instant::now();
-        let both = detect_both(&lum, irimg.as_raw(), valid.as_deref(), w, h, sens, size);
+        let both = detect_both(
+            &lum,
+            irimg.as_raw(),
+            valid.as_deref(),
+            w,
+            h,
+            &DustLayer { sensitivity: sens, max_size: size, polarity, ..Default::default() },
+        );
         println!("both:    {:.1?}, {} px", t.elapsed(), both.iter().filter(|v| **v > 0).count());
         masks.push(("ir", ird));
         masks.push(("both", both));
