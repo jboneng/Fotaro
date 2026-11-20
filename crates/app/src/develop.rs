@@ -713,6 +713,14 @@ enum Request {
     FindPeople { photo_id: i64, job: AiJob, settings: DevelopSettings, rotation: u8, gpu: bool },
 }
 
+/// Remove: the fills made one after another (Remove People makes many at once).
+pub struct FillBatch {
+    /// Shared by each fill in turn; its progress reads "Removing 3 of 12…".
+    pub job: AiJob,
+    pub done: usize,
+    pub total: usize,
+}
+
 /// A person found by Distractions → People: their outline (in the mask store), how sure
 /// the detector is, and whether they are to be removed.
 #[derive(Debug, Clone, PartialEq)]
@@ -1354,6 +1362,9 @@ pub struct DevelopState {
     /// Remove: the fill being made (and the spot shape it is for), shapes that failed
     /// (not tried again), and whether the user agreed to (or declined) the download.
     pub fill_job: Option<(AiJob, u64)>,
+    /// Remove: the fills made one after another until none is left (one progress for
+    /// them all, so the panel doesn't flash a message per spot).
+    pub fill_batch: Option<FillBatch>,
     fill_failed: Vec<u64>,
     pub fill_allowed: bool,
     pub fill_declined: bool,
@@ -1378,6 +1389,10 @@ pub struct DevelopState {
     pub people_job: Option<AiJob>,
     pub people: Vec<FoundPerson>,
     pub people_searched: bool,
+    /// The found people's tints on the photo (by mask id), and the one the pointer is
+    /// over in the panel's list (outlined boldly on the photo).
+    pub people_tex: Vec<(String, egui::TextureHandle)>,
+    pub people_hover: Option<usize>,
     /// Sensor dust: Find is running; what it last found (shown in the panel).
     pub sensor_finding: bool,
     pub sensor_result: Option<String>,
@@ -1475,6 +1490,7 @@ impl DevelopState {
             ai_job: None,
             ai_consent: None,
             fill_job: None,
+            fill_batch: None,
             fill_failed: Vec::new(),
             fill_allowed: false,
             fill_declined: false,
@@ -1489,6 +1505,8 @@ impl DevelopState {
             people_job: None,
             people: Vec::new(),
             people_searched: false,
+            people_tex: Vec::new(),
+            people_hover: None,
             sensor_finding: false,
             sensor_result: None,
             object_rect: false,
@@ -1527,6 +1545,7 @@ impl DevelopState {
         self.ai_job = None;
         self.ai_consent = None;
         self.fill_job = None;
+        self.fill_batch = None;
         self.fill_failed.clear();
         self.dust_job = None;
         self.dust_failed.clear();
@@ -1535,6 +1554,7 @@ impl DevelopState {
         self.people_job = None;
         self.people.clear();
         self.people_searched = false;
+        self.people_tex.clear();
         self.ir_pass = find_ir_pass(catalog, photo);
         self.info = None;
         self.textures.clear();
@@ -1769,6 +1789,9 @@ impl DevelopState {
                 Reply::Filled { photo_id, key, result } if Some(photo_id) == self.photo => {
                     if self.fill_job.as_ref().is_some_and(|(_, k)| *k == key) {
                         self.fill_job = None;
+                        if let Some(b) = &mut self.fill_batch {
+                            b.done += 1;
+                        }
                     }
                     match result {
                         Ok(fill) => changed = changed.or(self.add_fill(catalog, key, fill)?),
@@ -1871,17 +1894,23 @@ impl DevelopState {
     /// asking before the model's first download.
     fn request_fills(&mut self) {
         let Some(photo_id) = self.photo else { return };
-        if self.fill_job.is_some() || self.ai_consent.is_some() || self.fill_declined {
+        if self.fill_job.is_some() {
             return;
         }
-        let Some((index, key)) = self
+        if self.ai_consent.is_some() || self.fill_declined {
+            self.fill_batch = None;
+            return;
+        }
+        let pending: Vec<(usize, u64)> = self
             .settings
             .spots
             .iter()
             .enumerate()
-            .find(|(_, s)| s.needs_fill() && !self.fill_failed.contains(&s.shape_key()))
+            .filter(|(_, s)| s.needs_fill() && !self.fill_failed.contains(&s.shape_key()))
             .map(|(i, s)| (i, s.shape_key()))
-        else {
+            .collect();
+        let Some(&(index, key)) = pending.first() else {
+            self.fill_batch = None;
             return;
         };
         let model = if self.remove_best { segment::AiModel::RemoveBest } else { segment::AiModel::Remove };
@@ -1891,13 +1920,21 @@ impl DevelopState {
                 Some(AiConsent { kind: AiKind::Remove, target: ToolTarget::NewMask, prompt: None, bytes });
             return;
         }
-        let job = AiJob {
-            kind: AiKind::Remove,
-            target: ToolTarget::NewMask,
-            prompt: None,
-            progress: Default::default(),
+        // One job for the whole batch: its progress is how many are done.
+        let batch = self.fill_batch.get_or_insert_with(|| FillBatch {
+            job: AiJob { kind: AiKind::Remove, target: ToolTarget::NewMask, prompt: None, progress: Default::default() },
+            done: 0,
+            total: 0,
+        });
+        batch.total = batch.done + pending.len();
+        let quality = if self.remove_best { " (best quality)" } else { "" };
+        *batch.job.progress.lock().unwrap_or_else(|e| e.into_inner()) = if batch.total > 1 {
+            let share = batch.done as f32 / batch.total as f32;
+            (share, format!("Removing {} of {}{quality}…", batch.done + 1, batch.total))
+        } else {
+            (-1.0, format!("Removing{quality}…"))
         };
-        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Removing…".into());
+        let job = batch.job.clone();
         let settings = self.settings.clone();
         let (gpu, best) = (self.ai_gpu, self.remove_best);
         let _ = self.tx.send(Request::Fill { photo_id, job: job.clone(), index, key, settings, gpu, best });
@@ -2395,6 +2432,8 @@ fn run_fill(
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
         ctx.request_repaint();
     };
+    // What the batch shows (which fill of how many), back after a download.
+    let (batch_share, batch_what) = job.progress();
     let model = if best { segment::AiModel::RemoveBest } else { segment::AiModel::Remove };
     if !segment::ready(&[model]) {
         let mut last = std::time::Instant::now();
@@ -2405,7 +2444,7 @@ fn run_fill(
             }
         })?;
     }
-    set(-1.0, if best { "Removing (best quality)…".into() } else { "Removing…".into() });
+    set(batch_share, batch_what);
     let started = std::time::Instant::now();
     let s = segment::inpaint::SIZE;
     let img = resize(&input.image, s, s, FilterType::Lanczos3);

@@ -204,6 +204,61 @@ fn person_spot(f: &crate::develop::FoundPerson) -> Spot {
     Spot { points: vec![[(l + r) / 2.0, (t + b) / 2.0]], area: Some(f.area.clone()), feather: 0.0, ..Spot::default() }
 }
 
+/// A found person's mask picture as a texture (white, its coverage as alpha), made once.
+fn person_texture(
+    ctx: &egui::Context,
+    cache: &mut Vec<(String, egui::TextureHandle)>,
+    id: &str,
+) -> Option<egui::TextureHandle> {
+    if let Some((_, t)) = cache.iter().find(|(k, _)| k == id) {
+        return Some(t.clone());
+    }
+    let pic = imaging::develop::mask_picture(id)?;
+    let (w, h) = pic.dimensions();
+    // A tint needn't be sharper than the screen.
+    let scale = (1024.0 / w.max(h) as f32).min(1.0);
+    let pic = if scale < 1.0 {
+        let (sw, sh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
+        image::imageops::resize(&*pic, sw, sh, image::imageops::FilterType::Triangle)
+    } else {
+        (*pic).clone()
+    };
+    let rgba: Vec<u8> = pic.as_raw().iter().flat_map(|&v| [v, v, v, v]).collect();
+    let img = egui::ColorImage::from_rgba_premultiplied([pic.width() as usize, pic.height() as usize], &rgba);
+    let tex = ctx.load_texture(format!("person-{id}"), img, egui::TextureOptions::LINEAR);
+    cache.push((id.to_string(), tex.clone()));
+    Some(tex)
+}
+
+/// Paint a person's mask texture over `rect` (0..1 of the photo) in `tint`: a grid of
+/// points through the canvas, so rotation and the photo's geometry follow.
+fn paint_person(painter: &egui::Painter, c: &Canvas, tex: &egui::TextureHandle, rect: [f32; 4], tint: Color32) {
+    const N: usize = 8;
+    let [l, t, r, b] = rect;
+    let mut at = Vec::with_capacity((N + 1) * (N + 1));
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    for j in 0..=N {
+        for i in 0..=N {
+            let (u, v) = (i as f32 / N as f32, j as f32 / N as f32);
+            let pos = c.screen([l + (r - l) * u, t + (b - t) * v]);
+            at.push(pos.is_some());
+            let pos = pos.unwrap_or(Pos2::ZERO);
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv: egui::pos2(u, v), color: tint });
+        }
+    }
+    for j in 0..N {
+        for i in 0..N {
+            let a = j * (N + 1) + i;
+            let (b, c, d) = (a + 1, a + N + 1, a + N + 2);
+            if [a, b, c, d].iter().all(|&k| at[k]) {
+                mesh.add_triangle(a as u32, b as u32, d as u32);
+                mesh.add_triangle(a as u32, d as u32, c as u32);
+            }
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// The centre of a spot (its pin), 0..1.
 fn centre(spot: &Spot) -> [f32; 2] {
     let n = spot.points.len().max(1) as f32;
@@ -422,14 +477,29 @@ pub(super) fn canvas(
         }
     }
 
-    // Found people: picked ones outlined in orange (to be removed), the rest faintly; the
-    // one under the pointer bolder.
+    // Found people: the ones to remove tinted orange and outlined, the rest outlined
+    // faintly; the one under the pointer (here or in the panel's list) brighter.
     let hovered = resp.hover_pos().filter(|p| img_rect.contains(*p)).and_then(person_at);
+    let lit = hovered.or(d.people_hover);
+    d.people_tex.retain(|(id, _)| d.people.iter().any(|f| f.area.id == *id));
+    let people_painter = painter.with_clip_rect(img_rect.intersect(painter.clip_rect()));
     for (i, f) in d.people.iter().enumerate() {
+        let on = lit == Some(i);
+        let tint = match (f.picked, on) {
+            (true, false) => Some(Color32::from_rgba_unmultiplied(255, 140, 30, 90)),
+            (true, true) => Some(Color32::from_rgba_unmultiplied(255, 140, 30, 140)),
+            (false, true) => Some(Color32::from_white_alpha(40)),
+            (false, false) => None,
+        };
+        if let Some(tint) = tint
+            && let Some(tex) = person_texture(ui.ctx(), &mut d.people_tex, &f.area.id)
+        {
+            paint_person(&people_painter, &c, &tex, f.area.rect, tint);
+        }
         let segs = outline(&c, &person_spot(f), [0.0, 0.0]);
-        let width = if hovered == Some(i) { 2.6 } else { 1.6 };
+        let width = if on { 2.6 } else { 1.6 };
         let color = if f.picked { Color32::from_rgb(255, 150, 40) } else { Color32::from_white_alpha(110) };
-        draw_outline(&painter.with_clip_rect(img_rect.intersect(painter.clip_rect())), &segs, Stroke::new(width, color));
+        draw_outline(&people_painter, &segs, Stroke::new(width, color));
     }
     if hovered.is_some() && tool.drag.is_none() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -691,7 +761,8 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 }
             });
         });
-        if let Some((job, _)) = &d.fill_job {
+        // Filling: one progress for all the spots waiting (kept between them).
+        if let Some(job) = d.fill_batch.as_ref().map(|b| &b.job).or(d.fill_job.as_ref().map(|(j, _)| j)) {
             ui.add_space(6.0);
             super::masking::ai_progress(ui, job);
         }
@@ -762,7 +833,8 @@ struct DistractionAsks {
 }
 
 /// The Remove panel's Distractions: Sensor Dust (Find makes spots) and Dust & Scratches
-/// (film defects found from the infrared pass or the picture, filled as one layer).
+/// (film defects found from the infrared pass or the picture, filled as one layer), then
+/// People in a section of its own (found, picked, made into Remove spots).
 fn distractions(
     ui: &mut egui::Ui,
     d: &mut DevelopState,
@@ -825,60 +897,6 @@ fn distractions(
                     *done = Some(Some("Clear Sensor Dust".into()));
                 }
             });
-        });
-    }
-
-    // People: find them, pick on the photo, remove.
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        row_label(ui, "People");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let tip = "Find the people in the photo (AI models, on this computer). They are \
-                       outlined on the photo: click one to leave it in, then Remove";
-            let busy = d.people_job.is_some();
-            if ui.add_enabled_ui(!busy, |ui| pill(ui, "Find", false)).inner.on_hover_text(tip).clicked() {
-                asks.find_people = true;
-            }
-        });
-    });
-    if let Some(job) = &d.people_job {
-        ui.add_space(4.0);
-        super::masking::ai_progress(ui, job);
-    } else if !d.people.is_empty() {
-        let n = d.people.len();
-        let picked = d.people.iter().filter(|p| p.picked).count();
-        ui.horizontal(|ui| {
-            ui.add_space(super::develop::LABEL_W - 40.0);
-            ui.label(weak(format!("{n} found, {picked} to remove")).size(12.0));
-        });
-        ui.horizontal(|ui| {
-            ui.add_space(super::develop::LABEL_W - 40.0);
-            if pill(ui, "All", false).on_hover_text("Remove everyone found").clicked() {
-                d.people.iter_mut().for_each(|p| p.picked = true);
-            }
-            if pill(ui, "None", false).on_hover_text("Leave everyone in").clicked() {
-                d.people.iter_mut().for_each(|p| p.picked = false);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let tip = "Remove the people outlined in orange: each becomes a Remove spot";
-                if ui
-                    .add_enabled_ui(picked > 0, |ui| pill(ui, &format!("Remove ({picked})"), false))
-                    .inner
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    asks.remove_people = true;
-                }
-            });
-        });
-        ui.label(
-            weak("Orange: to be removed. Click a person on the photo to leave them in (or add them back). The faint ones the finder was less sure of.")
-                .size(11.5),
-        );
-    } else if d.people_searched {
-        ui.horizontal(|ui| {
-            ui.add_space(super::develop::LABEL_W - 40.0);
-            ui.label(weak("No people found").size(12.0));
         });
     }
 
@@ -1013,6 +1031,74 @@ fn distractions(
     if layer != st.dust {
         st.dust = layer;
     }
+
+    // People, a section of its own: find them, pick on the photo or in the list, remove.
+    ui.add_space(12.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("People").size(13.5).strong().color(theme::TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let tip = "Find the people in the photo (AI models, on this computer). The ones to \
+                       remove are shown in orange: click one on the photo, or untick it in the \
+                       list, to leave it in. Then Remove";
+            let busy = d.people_job.is_some();
+            let label = if d.people.is_empty() { "Find" } else { "Find Again" };
+            if ui.add_enabled_ui(!busy, |ui| pill(ui, label, false)).inner.on_hover_text(tip).clicked() {
+                asks.find_people = true;
+            }
+        });
+    });
+    ui.add_space(4.0);
+    let mut hover = None;
+    if let Some(job) = &d.people_job {
+        super::masking::ai_progress(ui, job);
+    } else if !d.people.is_empty() {
+        let n = d.people.len();
+        let picked = d.people.iter().filter(|p| p.picked).count();
+        ui.horizontal(|ui| {
+            ui.label(weak(format!("{n} found, {picked} to remove")).size(12.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if pill(ui, "None", false).on_hover_text("Leave everyone in").clicked() {
+                    d.people.iter_mut().for_each(|p| p.picked = false);
+                }
+                if pill(ui, "All", false).on_hover_text("Remove everyone found").clicked() {
+                    d.people.iter_mut().for_each(|p| p.picked = true);
+                }
+            });
+        });
+        // Each person: ticked to remove; hovering one shows it on the photo.
+        egui::ScrollArea::vertical().id_salt("found-people").max_height(170.0).show(ui, |ui| {
+            for (i, p) in d.people.iter_mut().enumerate() {
+                let text = format!("Person {}  ·  {:.0}% sure", i + 1, p.score * 100.0);
+                let r = ui.checkbox(&mut p.picked, RichText::new(text).size(12.0));
+                if r.hovered() {
+                    hover = Some(i);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let tip = "Remove the people shown in orange: each becomes a Remove spot you can \
+                           still edit or delete";
+                if ui
+                    .add_enabled_ui(picked > 0, |ui| pill(ui, &format!("Remove ({picked})"), false))
+                    .inner
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    asks.remove_people = true;
+                }
+            });
+        });
+        ui.label(
+            weak("Orange: to be removed. Click a person on the photo, or untick them here, to leave them in. Those the finder was less sure of start unticked.")
+                .size(11.5),
+        );
+    } else if d.people_searched {
+        ui.label(weak("No people found").size(12.0));
+    }
+    d.people_hover = hover;
 }
 
 /// Open or close the Remove tool (Q); the crop tool and masking close.
