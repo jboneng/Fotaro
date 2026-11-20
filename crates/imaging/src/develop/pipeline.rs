@@ -181,6 +181,8 @@ struct Prepared {
     glow: Option<Glow>,
     /// Profile: a 3D LUT after the base tone, when set (and its file is there).
     lut: Option<super::lut::PreparedLut>,
+    /// Lens Corrections' Defringe, when on.
+    fringe: Option<super::lens::Defringe>,
 }
 
 impl Prepared {
@@ -232,7 +234,14 @@ impl Prepared {
             locals: field.map(|field| Locals::new(field, &s.masks)),
             glow: None,
             lut: s.profile.as_ref().and_then(super::lut::PreparedLut::new),
+            fringe: None,
         };
+        if s.transform.lens.defringes() {
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            let scale = img.width() as f32 / img.full_size.0.max(1) as f32;
+            let lum = |x: usize, y: usize| prep.luminance(prep.linear(input_at(img, x, y)));
+            prep.fringe = super::lens::Defringe::new(&s.transform.lens, w, h, region, scale, lum);
+        }
         // Masks' Dehaze, Clarity and Texture need the same maps as the global ones.
         let local = |f: fn(&LocalParams) -> f32| {
             prep.locals.as_ref().is_some_and(|l| l.params.iter().any(|p| f(p) != 0.0))
@@ -425,6 +434,10 @@ impl Prepared {
         ];
         if let Some((l, ms)) = masks {
             d = l.tone(d, ms, &self.luma);
+        }
+        // Defringe: purple / green fringes at high-contrast edges lose their colour.
+        if let Some(f) = &self.fringe {
+            d = f.apply(d, x, y);
         }
         // Profile: the LUT's look on the base tone; the colour panels adjust on top.
         if let Some(lut) = &self.lut {

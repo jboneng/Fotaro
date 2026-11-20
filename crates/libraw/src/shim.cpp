@@ -71,10 +71,14 @@ void pl_get_info(void *raw, pl_info *out) {
                                : std::snprintf(out->lens, sizeof(out->lens), "%.1f-%.1f mm", lo, hi);
             if (n > 0 && ap > 0 && static_cast<size_t>(n) < sizeof(out->lens)) {
                 if (ap2 > 0 && ap2 != ap)
-                    std::snprintf(out->lens + n, sizeof(out->lens) - n, " f/%.1f-%.1f", ap, ap2);
+                    n += std::snprintf(out->lens + n, sizeof(out->lens) - n, " f/%.1f-%.1f", ap, ap2);
                 else
-                    std::snprintf(out->lens + n, sizeof(out->lens) - n, " f/%.1f", ap);
+                    n += std::snprintf(out->lens + n, sizeof(out->lens) - n, " f/%.1f", ap);
             }
+            // Nikon's lens type from the maker notes ("G", "D", "E", "G VR"): tells lenses
+            // of the same focal length and aperture apart (an AF-D from an AF-S G).
+            if (n > 0 && m.LensFeatures_suf[0] && static_cast<size_t>(n) < sizeof(out->lens))
+                std::snprintf(out->lens + n, sizeof(out->lens) - n, " %s", m.LensFeatures_suf);
         }
     }
     out->iso = d.other.iso_speed;

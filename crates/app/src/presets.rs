@@ -394,7 +394,7 @@ mod tests {
         std::fs::write(
             src.join("Film Pack").join("Warm.lrtemplate"),
             "s = { title = \"Warm\", value = { settings = { Exposure2012 = 0.3, IncrementalTemperature = 10, \
-             WhiteBalance = \"Custom\", LensProfileEnable = 1 } } }",
+             WhiteBalance = \"Custom\", LensProfileEnable = 1, ShadowTint = 4 } } }",
         )
         .unwrap();
         std::fs::write(
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!((report.imported, report.partial, report.skipped.len()), (2, 1, 1));
         let warm = store.presets.iter().find(|p| p.name() == "Warm").unwrap();
         assert_eq!(warm.folder, "Film Pack");
-        assert_eq!(warm.file.unsupported, vec!["Lens Corrections".to_string()]);
+        assert_eq!(warm.file.unsupported, vec!["Calibration".to_string()]);
         let out = warm.file.apply(&DevelopSettings::default(), false);
         assert_eq!((out.exposure, out.temp), (0.3, 10.0));
         let cool = store.presets.iter().find(|p| p.name() == "Cool").unwrap();

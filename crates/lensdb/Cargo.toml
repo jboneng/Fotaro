@@ -1,0 +1,22 @@
+[package]
+name = "lensdb"
+description = "The Lensfun lens database: read, match a photo's camera and lens, resolve its corrections"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+imaging.workspace = true
+quick-xml = "0.37"
+ureq = "3"
+bzip2 = "0.6"
+tar = "0.4"
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

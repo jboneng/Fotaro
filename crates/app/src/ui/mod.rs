@@ -14,6 +14,7 @@ mod filter_bar;
 mod icons;
 mod import;
 mod keywords;
+mod lens;
 pub mod layout;
 pub mod panels;
 pub mod presets;

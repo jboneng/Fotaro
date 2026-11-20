@@ -1211,6 +1211,7 @@ impl PhotoLibraryApp {
         });
         if let Some(data) = &data {
             imaging::develop::set_lut_store(data.join("LUTs"));
+            crate::lens::set_dir(data.join("lensfun"));
         }
         app.presets = crate::presets::PresetStore::load(data.map(|d| d.join("Develop Presets")));
         if let Some(dir) = args.catalog {

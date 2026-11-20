@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/catalog", "crates/imaging", "crates/libraw", "crates/segment", "crates/xmp"]
+members = ["crates/app", "crates/catalog", "crates/imaging", "crates/lensdb", "crates/libraw", "crates/segment", "crates/xmp"]
 resolver = "3"
 
 [workspace.package]
@@ -21,6 +21,7 @@ dunce = "1.0.5"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp", "gif", "bmp", "rayon"] }
 
 catalog = { path = "crates/catalog" }
+lensdb = { path = "crates/lensdb" }
 libraw = { path = "crates/libraw" }
 imaging = { path = "crates/imaging" }
 xmp = { path = "crates/xmp" }

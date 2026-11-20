@@ -10,6 +10,7 @@ mod grading;
 mod groups;
 mod heal;
 mod hsl;
+mod lens;
 mod lightroom;
 mod local;
 mod lut;
@@ -38,6 +39,9 @@ pub use groups::{SettingsGroup, changed_groups, copy_groups};
 pub use heal::{
     Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input,
     find_source,
+};
+pub use lens::{
+    Distortion, LensCorrections, LensProfile, LensSetup, Tca, Vignetting, lens_correction_at, measure_ca,
 };
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use lightroom::{LrPreset, LrSummary, LrValue, apply_lightroom, lightroom_summary, lr_values_from_xmp, read_lrtemplate};

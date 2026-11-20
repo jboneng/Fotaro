@@ -29,7 +29,7 @@ use crate::app::{Command, PhotoLibraryApp};
 use crate::develop::{DevelopState, GuideDrag, RegionTarget, Slot};
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
-const PLANNED_RIGHT: &[&str] = &["Lens Corrections"];
+const PLANNED_RIGHT: &[&str] = &[];
 const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
@@ -177,6 +177,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
                 stack.section(ui, Side::Right, "HSL / Color", RIGHT, false, |ui| hsl_panel(app, ui));
                 stack.section(ui, Side::Right, "Color Grading", RIGHT, false, |ui| color_grading(app, ui));
                 stack.section(ui, Side::Right, "Detail", RIGHT, false, |ui| detail_panel(app, ui));
+                stack.section(ui, Side::Right, "Lens Corrections", RIGHT, false, |ui| super::lens::lens_panel(app, ui));
                 for title in PLANNED_RIGHT {
                     stack.section(ui, Side::Right, title, RIGHT, false, |ui| {
                         ui.label(weak("Comes in a later version."));

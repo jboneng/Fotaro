@@ -367,6 +367,13 @@ const ABOUT: &[&str] = &[
     "GlowStyle",
     "GlowDirection",
     "GlowDirectionalSoftness",
+    // Which profile Lightroom used: found here for each photo instead.
+    "LensProfileName",
+    "LensProfileFilename",
+    "LensProfileDigest",
+    "LensProfileSetup",
+    "LensProfileIsEmbedded",
+    "LensProfileChromaticAberrationScale",
 ];
 
 /// What kind of setting an unmapped key is.
@@ -574,6 +581,33 @@ pub fn apply_lightroom(values: &[(String, LrValue)], s: &mut DevelopSettings, ra
                 mono = true;
                 done = false;
             }
+            // Lens Corrections: the profile itself is found for each photo (from its lens).
+            "LensProfileEnable" => {
+                if let Some(b) = v.truth() {
+                    let l = &mut s.transform.lens;
+                    l.profile_enable = b;
+                    l.setup = super::lens::LensSetup::Auto;
+                    l.profile = None;
+                    set(G::LensProfile);
+                }
+            }
+            "LensProfileDistortionScale" => slider!(G::LensProfile, s.transform.lens.distortion_amount),
+            "LensProfileVignettingScale" => slider!(G::LensProfile, s.transform.lens.vignetting_amount),
+            "AutoLateralCA" => {
+                if let Some(b) = v.truth() {
+                    (s.transform.lens.remove_ca, s.transform.lens.ca) = (b, None);
+                    set(G::ChromaticAberration);
+                }
+            }
+            "DefringePurpleAmount" => slider!(G::ChromaticAberration, s.transform.lens.purple_amount),
+            "DefringePurpleHueLo" => slider!(G::ChromaticAberration, s.transform.lens.purple_hue[0]),
+            "DefringePurpleHueHi" => slider!(G::ChromaticAberration, s.transform.lens.purple_hue[1]),
+            "DefringeGreenAmount" => slider!(G::ChromaticAberration, s.transform.lens.green_amount),
+            "DefringeGreenHueLo" => slider!(G::ChromaticAberration, s.transform.lens.green_hue[0]),
+            "DefringeGreenHueHi" => slider!(G::ChromaticAberration, s.transform.lens.green_hue[1]),
+            "LensManualDistortionAmount" => slider!(G::LensManual, s.transform.lens.distortion),
+            "VignetteAmount" => slider!(G::LensManual, s.transform.lens.vignette_amount),
+            "VignetteMidpoint" => slider!(G::LensManual, s.transform.lens.vignette_midpoint),
             "GrainAmount" => slider!(G::Grain, s.effects.grain_amount),
             "GrainSize" => slider!(G::Grain, s.effects.grain_size),
             "GrainFrequency" => slider!(G::Grain, s.effects.grain_roughness),
@@ -764,10 +798,11 @@ mod tests {
         use SettingsGroup as G;
         assert_eq!(
             sum.groups,
-            vec![G::Treatment, G::WhiteBalance, G::BasicTone, G::ToneCurve, G::Hsl, G::ColorGrading, G::Vignette, G::Grain]
+            vec![G::Treatment, G::WhiteBalance, G::BasicTone, G::ToneCurve, G::Hsl, G::ColorGrading, G::Vignette, G::Grain, G::LensProfile]
         );
-        // The lens profile and the camera profile can't come; Red Hue 0 is no loss.
-        assert_eq!(sum.unsupported, vec!["Lens Corrections".to_string(), "Profile".to_string()]);
+        // The lens profile is found for each photo; the camera profile can't come; Red Hue 0 is no loss.
+        assert!(s.transform.lens.profile_enable);
+        assert_eq!(sum.unsupported, vec!["Profile".to_string()]);
         // On a RAW photo it has no Temperature: the white balance stays.
         let mut r = DevelopSettings::default();
         let sum = apply_lightroom(&p.values, &mut r, true);

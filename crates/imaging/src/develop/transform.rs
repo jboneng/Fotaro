@@ -16,6 +16,7 @@ use image::{ImageBuffer, Rgb32FImage};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::lens::{LensCorrections, LensMap};
 use super::matrix::Mat3;
 use super::source::WorkingImage;
 
@@ -178,6 +179,8 @@ pub struct Transform {
     pub y_offset: f32,
     /// Crop & Straighten: applied last (see [`Crop`]).
     pub crop: Crop,
+    /// Lens Corrections (its own panel): applied first, in the same warp.
+    pub lens: LensCorrections,
 }
 
 impl Default for Transform {
@@ -195,6 +198,7 @@ impl Default for Transform {
             x_offset: 0.0,
             y_offset: 0.0,
             crop: Crop::default(),
+            lens: LensCorrections::default(),
         }
     }
 }
@@ -325,8 +329,10 @@ pub(super) fn turned(rot: &Mat3, p: [f64; 2]) -> Option<[f64; 2]> {
 /// Maps points of the output to points of the source, in pixels, for a `w × h` source.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Mapping {
-    /// Output pixel → source pixel, a homography (homogeneous coordinates).
+    /// Output pixel → corrected-photo pixel, a homography (homogeneous coordinates).
     h: Mat3,
+    /// Corrected-photo pixel → source pixel: the lens corrections, when on.
+    lens: Option<LensMap>,
     /// The output's size (smaller than the source with Constrain Crop).
     pub(super) out: (u32, u32),
 }
@@ -353,22 +359,28 @@ impl Mapping {
             [a.sin(), a.cos(), cy - a.sin() * cx - a.cos() * cy],
             [0.0, 0.0, 1.0],
         ];
-        Mapping { h: mul(&base.h, &mul(&turn, &place)), out }
+        Mapping { h: mul(&base.h, &mul(&turn, &place)), lens: base.lens, out }
     }
 
     /// The Transform alone (with Constrain Crop), before Crop & Straighten.
     fn uncropped(t: &Transform, w: u32, h: u32) -> Mapping {
         let uncropped = Self::frame(t, w, h);
+        let lens = LensMap::new(&t.lens, w, h);
         let (fw, fh) = (f64::from(w.max(1)), f64::from(h.max(1)));
+        // Lens distortion bends the frame's edges: test points along them, not only corners.
+        let found = match &lens {
+            Some(l) if t.lens.moves_pixels() => inscribed_through(&uncropped, l, fw, fh),
+            _ => inscribed(&uncropped, fw, fh),
+        };
         if t.constrain_crop
-            && let Some((x0, y0, s)) = inscribed(&uncropped, fw, fh)
+            && let Some((x0, y0, s)) = found
         {
             let out = (((fw * s).round() as u32).max(1), ((fh * s).round() as u32).max(1));
             let crop: Mat3 =
                 [[fw * s / f64::from(out.0), 0.0, x0], [0.0, fh * s / f64::from(out.1), y0], [0.0, 0.0, 1.0]];
-            return Mapping { h: mul(&uncropped, &crop), out };
+            return Mapping { h: mul(&uncropped, &crop), lens, out };
         }
-        Mapping { h: uncropped, out: (w.max(1), h.max(1)) }
+        Mapping { h: uncropped, lens, out: (w.max(1), h.max(1)) }
     }
 
     /// Output pixel → source pixel over the whole frame (no crop).
@@ -413,11 +425,30 @@ impl Mapping {
     /// of the camera.
     #[inline]
     pub(super) fn source(&self, x: f64, y: f64) -> Option<(f64, f64)> {
-        apply(&self.h, x, y)
+        let (u, v) = apply(&self.h, x, y)?;
+        Some(match &self.lens {
+            Some(l) => l.source(u, v),
+            None => (u, v),
+        })
+    }
+
+    /// The source points of red, green and blue shown at output point (x, y) (they differ
+    /// with lateral chromatic aberration corrected).
+    #[inline]
+    fn source_rgb(&self, x: f64, y: f64) -> Option<[(f64, f64); 3]> {
+        let (u, v) = apply(&self.h, x, y)?;
+        Some(match &self.lens {
+            Some(l) => l.source_rgb(u, v),
+            None => [(u, v); 3],
+        })
     }
 
     /// Where source point (u, v) (pixels) is shown in the output (pixels).
     pub(super) fn output(&self, u: f64, v: f64) -> Option<(f64, f64)> {
+        let (u, v) = match &self.lens {
+            Some(l) => l.corrected(u, v)?,
+            None => (u, v),
+        };
         apply(&inverse(&self.h), u, v)
     }
 }
@@ -446,6 +477,36 @@ fn inscribed(frame: &Mat3, w: f64, h: f64) -> Option<(f64, f64, f64)> {
             .iter()
             .all(|&(x, y)| x >= -1e-6 && y >= -1e-6 && x <= w + 1e-6 && y <= h + 1e-6 && inside(x, y))
     };
+    largest_inside(w, h, fits)
+}
+
+/// [`inscribed`] with the lens corrections after the homography: the photo's edges are
+/// curves, so points along the rectangle's edges must all show the photo.
+fn inscribed_through(frame: &Mat3, lens: &LensMap, w: f64, h: f64) -> Option<(f64, f64, f64)> {
+    const STEPS: usize = 16;
+    let shows = |x: f64, y: f64| {
+        apply(frame, x, y).is_some_and(|(u, v)| {
+            let (u, v) = lens.source(u, v);
+            (-1e-3..=w + 1e-3).contains(&u) && (-1e-3..=h + 1e-3).contains(&v)
+        })
+    };
+    let fits = |cx: f64, cy: f64, s: f64| {
+        let (x0, y0, x1, y1) = (cx - s * w / 2.0, cy - s * h / 2.0, cx + s * w / 2.0, cy + s * h / 2.0);
+        if x0 < -1e-6 || y0 < -1e-6 || x1 > w + 1e-6 || y1 > h + 1e-6 {
+            return false;
+        }
+        (0..=STEPS).all(|i| {
+            let t = i as f64 / STEPS as f64;
+            let (x, y) = (x0 + t * (x1 - x0), y0 + t * (y1 - y0));
+            shows(x, y0) && shows(x, y1) && shows(x0, y) && shows(x1, y)
+        })
+    };
+    largest_inside(w, h, fits)
+}
+
+/// The largest rectangle of the frame's shape for which `fits(cx, cy, share)` holds, as
+/// (left, top, share).
+fn largest_inside(w: f64, h: f64, fits: impl Fn(f64, f64, f64) -> bool) -> Option<(f64, f64, f64)> {
     let largest = |cx: f64, cy: f64| {
         let (mut lo, mut hi) = (0.0, 1.0);
         if fits(cx, cy, hi) {
@@ -481,7 +542,8 @@ impl Transform {
     /// True when the photo's geometry is unchanged (Constrain Crop then keeps it all).
     pub fn is_identity(&self) -> bool {
         let d = Transform::default();
-        self.upright_angles == [0.0; 3]
+        !self.lens.moves_pixels()
+            && self.upright_angles == [0.0; 3]
             && (self.vertical, self.horizontal, self.rotate, self.aspect, self.scale)
                 == (d.vertical, d.horizontal, d.rotate, d.aspect, d.scale)
             && (self.x_offset, self.y_offset) == (d.x_offset, d.y_offset)
@@ -550,7 +612,7 @@ impl std::ops::Deref for Geometry<'_> {
 
 /// `img` with `t` applied (cached until `t` changes).
 pub(super) fn transformed<'a>(img: &'a WorkingImage, t: &Transform) -> Geometry<'a> {
-    if t.is_identity() {
+    if t.is_identity() && !t.lens.warps() && !t.lens.defringes() {
         return Geometry::Same(img);
     }
     let mut cache = img.transform_cache.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -575,33 +637,36 @@ fn warp(img: &WorkingImage, t: &Transform) -> WorkingImage {
     let (ow, oh) = (map.out.0 as usize, map.out.1 as usize);
     let mut pixels = vec![0.0f32; 3 * ow * oh];
     let mut coverage = vec![0.0f32; ow * oh];
+    // Bilinear sample of channel `k` at (u, v) (pixel centres at +0.5), clamped to the photo.
+    let sample = |u: f64, v: f64, k: usize| {
+        let u = (u - 0.5).clamp(0.0, (wu - 1) as f64);
+        let v = (v - 0.5).clamp(0.0, (hu - 1) as f64);
+        let (x0, y0) = (u as usize, v as usize);
+        let (x1, y1) = ((x0 + 1).min(wu - 1), (y0 + 1).min(hu - 1));
+        let (fx, fy) = ((u - x0 as f64) as f32, (v - y0 as f64) as f32);
+        let at = |xx: usize, yy: usize| src[3 * (yy * wu + xx) + k];
+        let top = at(x0, y0) + fx * (at(x1, y0) - at(x0, y0));
+        let bottom = at(x0, y1) + fx * (at(x1, y1) - at(x0, y1));
+        top + fy * (bottom - top)
+    };
+    let gain = map.lens.filter(LensMap::has_gain);
     pixels.par_chunks_mut(3 * ow).zip(coverage.par_chunks_mut(ow)).enumerate().for_each(|(y, (row, cov))| {
         for (x, (o, c)) in row.as_chunks_mut::<3>().0.iter_mut().zip(cov.iter_mut()).enumerate() {
-            let Some((u, v)) = map.source(x as f64 + 0.5, y as f64 + 0.5) else {
+            let Some(points) = map.source_rgb(x as f64 + 0.5, y as f64 + 0.5) else {
                 *o = [0.0; 3];
                 *c = 0.0;
                 continue;
             };
-            // Pixel centres at +0.5; how far outside the photo, in pixels, for a soft edge.
-            let (u, v) = (u - 0.5, v - 0.5);
+            // How far outside the photo green's point is, in pixels, for a soft edge.
+            let (u, v) = (points[1].0 - 0.5, points[1].1 - 0.5);
             let out_x = (-0.5 - u).max(u - (wu as f64 - 0.5)).max(0.0);
             let out_y = (-0.5 - v).max(v - (hu as f64 - 0.5)).max(0.0);
             *c = (1.0 - out_x.max(out_y)).clamp(0.0, 1.0) as f32;
-            let u = u.clamp(0.0, (wu - 1) as f64);
-            let v = v.clamp(0.0, (hu - 1) as f64);
-            let (x0, y0) = (u as usize, v as usize);
-            let (x1, y1) = ((x0 + 1).min(wu - 1), (y0 + 1).min(hu - 1));
-            let (fx, fy) = ((u - x0 as f64) as f32, (v - y0 as f64) as f32);
-            let at = |xx: usize, yy: usize| {
-                let i = 3 * (yy * wu + xx);
-                [src[i], src[i + 1], src[i + 2]]
-            };
-            let (a, b, cc, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
-            *o = std::array::from_fn(|k| {
-                let top = a[k] + fx * (b[k] - a[k]);
-                let bottom = cc[k] + fx * (d[k] - cc[k]);
-                top + fy * (bottom - top)
-            });
+            *o = std::array::from_fn(|k| sample(points[k].0, points[k].1, k));
+            if let Some(l) = &gain {
+                let g = l.gain(points[1].0, points[1].1);
+                *o = o.map(|v| v * g);
+            }
         }
     });
     let pixels: Rgb32FImage = ImageBuffer::from_raw(map.out.0, map.out.1, pixels).expect("buffer size");

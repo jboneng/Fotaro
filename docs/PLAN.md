@@ -1018,3 +1018,55 @@ are a Profile in Basic, with an Amount, applied after the base tone.
 - [ ] Later: Lightroom creative
       profiles (their `crs:RGBTable` look tables) as LUTs; presets from Library (Quick
       Develop, Import's Develop Settings).
+
+## Develop: Lens Corrections (2026-11-20)
+
+Decided with the user: the Lensfun database (lensfun.github.io, data CC BY-SA 3.0),
+downloaded on first use with an Update button; Profile corrections, Remove Chromatic
+Aberration, Manual (Distortion, Lens Vignetting) and Defringe.
+
+- [x] **`lensdb` crate**: reads Lensfun's XML (database versions 1 and 2: `real-focal`
+      either form; calibration sets with their own crop and aspect), finds the camera
+      (maker / model words, "NIKON D750" = "Nikon D750" = "D750") and lenses (Lensfun's
+      fuzzy word match, ported, plus the focal range and widest aperture read from the
+      names, so LibRaw's "60.0 mm f/2.8" finds its lens; mount and crop factor must fit;
+      rectilinear lenses with data only), resolves a lens for a photo as Lensfun does
+      (calibration set by crop ratio ≥ 0.96; distortion and TCA on Hermite splines of the
+      terms × focal; vignetting by inverse distance weighting, p 3.5, over focal, 4/aperture,
+      0.1/distance), and downloads `version_2.tar.bz2` (versions.json, two locations; only
+      XML files by name; replaced only once the new one reads).
+- [x] **Engine** (`imaging::develop::lens`): Hugin units as Lensfun 0.3 (r = 1 at half the
+      calibration frame's short side for distortion / TCA, at its corner for vignetting),
+      scaled by the crop factors. Applied in the Transform's warp before the perspective:
+      distortion × Amount + Manual Distortion; red and blue sampled at their own radii (TCA
+      and the measured CA); the vignetting gain on the sampled linear pixel (profile ×
+      Amount, and Manual Lens Vignetting). The inverse (Newton) keeps the canvases and the
+      White Balance Selector lined up; Constrain Crop tests points along the curved edges.
+      Settings keep the resolved terms (`transform.lens`), so a photo looks the same without
+      the database. Measured against Lensfun 0.3.4 itself (lensfunpy, its own database):
+      distortion within 0.05 px at calibrated focal lengths (after taking out its (w−1)
+      frame scale, 0.2 %), TCA within 0.002 px, vignetting within 1.6 %; poly3 lenses and
+      focal lengths between calibration points follow current Lensfun (rescaled terms,
+      1/f-scaled splines), which 0.3.4 doesn't.
+- [x] **Remove Chromatic Aberration**: measured once per photo (worker `Adjust`, ~0.2–0.8 s
+      on the proxy): at strong edges towards the corners, green = κ·channel + δ·green's slope
+      solved across the edge for the shift δ; δ / r fitted as s + q·r² per channel, three
+      rounds. On the D750 web sample the corners' fringes go from ~1 px to 0.2 px; on a
+      synthetic 0.2 % / −0.15 % it finds both within 0.0003. A pasted or preset Remove CA is
+      measured again for the photo it lands on.
+- [x] **Defringe**: in the pixel pass after the tone tables: local contrast (stops, the
+      brightest against the darkest within 1..7 full-size px by Amount), purple (Oklab hue
+      240°..360° on the 0..100 slider) and green (90°..240°) ranges, desaturated by Amount
+      where the contrast is above 1.5–3 stops.
+- [x] **Panel**: Profile tab (Remove CA, Enable Profile Corrections, Setup Auto / Custom,
+      how the lens was found, Make / Model menus with the photo's candidates first, focal
+      length and aperture when the photo doesn't say — film scans —, Amount Distortion /
+      Vignetting, the database's date and Update, the download) and Manual tab (Distortion,
+      Constrain Crop, Defringe, Lens Vignetting). Auto re-resolves for each photo (paste,
+      presets, photo change). New settings groups: Lens Profile, Chromatic Aberration, Lens
+      Manual; Lightroom presets' LensProfileEnable, AutoLateralCA, Defringe*, Lens Manual
+      sliders and profile scales now carry over.
+- [x] LibRaw's generic Nikon lens names get the lens type from the maker notes ("60.0 mm
+      f/2.8 G"), telling an AF-S G from an AF-D of the same focal length. Existing photos
+      get it when their metadata is read again.
+- [ ] Later: fisheye lenses (projection change); the profile's crop; Lensfun's ACM models.

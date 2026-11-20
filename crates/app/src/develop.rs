@@ -776,6 +776,8 @@ enum Adjust {
     SensorDust {
         sensitivity: f32,
     },
+    /// Lens Corrections: measure the photo's chromatic aberration (Remove CA).
+    MeasureCa,
 }
 
 impl Adjust {
@@ -788,6 +790,7 @@ impl Adjust {
             Adjust::FindSource { other: true, .. } => "Remove: New Source".into(),
             Adjust::FindSource { .. } => "Remove: Spot".into(),
             Adjust::SensorDust { .. } => "Find Sensor Dust".into(),
+            Adjust::MeasureCa => "Remove Chromatic Aberration: On".into(),
         }
     }
 }
@@ -1059,6 +1062,13 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: egui::Context) {
                     img.picked_multipliers(x, y).map(|m| img.settings_with_multipliers(&settings, m))
                 }
                 Adjust::AutoTone => Some(auto_tone(img, &settings)),
+                Adjust::MeasureCa => {
+                    let mut s = settings.clone();
+                    let ca = imaging::develop::measure_ca(img, &s.transform.lens);
+                    log::info!("Remove CA: measured {ca:?}");
+                    s.transform.lens.ca = Some(ca);
+                    Some(s)
+                }
                 Adjust::Upright(mode) => Some(apply_upright(img, &settings, mode)),
                 Adjust::SensorDust { sensitivity } => {
                     // Found spots are found again (edited ones aren't marked found any more).
@@ -1409,6 +1419,8 @@ pub struct DevelopState {
     pub clipboard: Option<(DevelopSettings, Vec<imaging::develop::SettingsGroup>)>,
     /// The photo's Snapshots (named settings), by name.
     pub snapshots: Vec<catalog::Snapshot>,
+    /// Lens Corrections: the lens database and what the photo says about its lens.
+    pub lens: crate::lens::LensState,
     /// The settings of the preset or snapshot under the pointer: the Navigator shows them.
     pub preview: Option<DevelopSettings>,
     /// Tone Curve panel: point curve (else parametric), the channel edited, and the
@@ -1529,6 +1541,7 @@ impl DevelopState {
             changed_at: std::time::Instant::now(),
             clipboard: None,
             snapshots: Vec::new(),
+            lens: Default::default(),
             preview: None,
             curve_point_mode: false,
             curve_channel: imaging::develop::CurveChannel::Rgb,
@@ -1594,6 +1607,7 @@ impl DevelopState {
         self.picking_wb = false;
         self.redo.clear();
         self.preview = None;
+        self.lens.show(crate::lens::PhotoOptics::from_metadata(catalog.metadata(photo.id).ok().flatten()));
         // Load first: the renders asked for next need the photo.
         if photo.missing {
             self.error = Some("The file could not be found.".into());
@@ -1782,6 +1796,10 @@ impl DevelopState {
     /// right away.
     pub fn poll(&mut self, ctx: &egui::Context, catalog: &mut Catalog) -> Result<Changed> {
         let mut changed = None;
+        self.lens.poll();
+        if let Some(label) = self.refresh_lens(ctx) {
+            changed = changed.or(self.commit(catalog, Some(label))?);
+        }
         for reply in self.rx.try_iter().collect::<Vec<_>>() {
             match reply {
                 Reply::Loaded { photo_id, info } if Some(photo_id) == self.photo => self.info = Some(info),
@@ -1822,6 +1840,16 @@ impl DevelopState {
                             self.set_live(s);
                             let label = format!("Sensor Dust: {n} spot{}", if n == 1 { "" } else { "s" });
                             changed = changed.or(self.commit(catalog, Some(label))?);
+                        }
+                        Some(s) if matches!(op, Adjust::MeasureCa) => {
+                            self.lens.measuring = false;
+                            // Only if Remove CA is still on (it may have been turned off since).
+                            if self.settings.transform.lens.remove_ca {
+                                let mut st = self.settings.clone();
+                                st.transform.lens.ca = s.transform.lens.ca;
+                                self.set_live(st);
+                                changed = changed.or(self.commit(catalog, Some(op.label()))?);
+                            }
                         }
                         Some(s) => {
                             self.set_live(s);
@@ -2401,6 +2429,56 @@ impl DevelopState {
     }
 
     /// Auto (Tone), from the photo's pixels; saved when the worker answers.
+    /// Remove Chromatic Aberration: measure the photo (the answer is saved when it comes).
+    pub fn measure_ca(&mut self) {
+        let Some(photo_id) = self.photo else { return };
+        self.lens.measuring = true;
+        let op = Adjust::MeasureCa;
+        let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
+    }
+
+    /// Lens Corrections that follow the photo: the profile (Auto: the photo's lens, at its
+    /// focal length; Custom: the chosen lens at the photo's focal length) and the measured
+    /// chromatic aberration, after a photo change, a paste or a preset. Returns the label
+    /// to save under when the settings changed.
+    fn refresh_lens(&mut self, ctx: &egui::Context) -> Option<String> {
+        let id = self.photo?;
+        let l = self.settings.transform.lens.clone();
+        if self.settings != self.saved || self.info.is_none() {
+            return None;
+        }
+        // Remove CA without a measurement (pasted, or from a preset): measure this photo.
+        if l.remove_ca && l.ca.is_none() && !self.lens.measuring {
+            self.measure_ca();
+        }
+        if !l.profile_enable {
+            return None;
+        }
+        if self.lens.checked.as_ref() == Some(&(id, l.clone())) {
+            return None;
+        }
+        let Some(db) = self.lens.db.clone() else {
+            self.lens.load(ctx);
+            if !self.lens.available() {
+                self.lens.status = "Download the lens database to use profiles".into();
+            }
+            return None;
+        };
+        let want = self.lens.wanted(&db, &l);
+        let mut st = self.settings.clone();
+        st.transform.lens.profile = want;
+        self.lens.checked = Some((id, st.transform.lens.clone()));
+        if st == self.settings {
+            return None;
+        }
+        let label = match &st.transform.lens.profile {
+            Some(p) => format!("Lens Profile: {}", p.lens),
+            None => "Lens Profile: None".into(),
+        };
+        self.set_live(st);
+        Some(label)
+    }
+
     pub fn auto_tone(&mut self) {
         let Some(photo_id) = self.photo else { return };
         let op = Adjust::AutoTone;

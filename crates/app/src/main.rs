@@ -8,6 +8,7 @@ mod export;
 mod filter;
 mod import;
 mod jobs;
+mod lens;
 mod perf;
 mod platform;
 mod presets;

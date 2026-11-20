@@ -24,6 +24,9 @@ pub enum SettingsGroup {
     Vignette,
     Grain,
     Glow,
+    LensProfile,
+    ChromaticAberration,
+    LensManual,
     Transform,
     Crop,
     Masks,
@@ -33,7 +36,7 @@ pub enum SettingsGroup {
 
 impl SettingsGroup {
     /// In panel order.
-    pub const ALL: [SettingsGroup; 19] = [
+    pub const ALL: [SettingsGroup; 22] = [
         Self::Treatment,
         Self::WhiteBalance,
         Self::BasicTone,
@@ -48,6 +51,9 @@ impl SettingsGroup {
         Self::Vignette,
         Self::Grain,
         Self::Glow,
+        Self::LensProfile,
+        Self::ChromaticAberration,
+        Self::LensManual,
         Self::Transform,
         Self::Crop,
         Self::Masks,
@@ -71,6 +77,9 @@ impl SettingsGroup {
             Self::Vignette => "Post-Crop Vignetting",
             Self::Grain => "Grain",
             Self::Glow => "Glow",
+            Self::LensProfile => "Lens Profile Corrections",
+            Self::ChromaticAberration => "Chromatic Aberration",
+            Self::LensManual => "Lens Distortion & Vignetting",
             Self::Transform => "Transform",
             Self::Crop => "Crop",
             Self::Masks => "Masks",
@@ -86,6 +95,7 @@ impl SettingsGroup {
             Self::ToneCurve | Self::Hsl | Self::BwMix | Self::ColorGrading => "Color",
             Self::Sharpening | Self::NoiseReduction => "Detail",
             Self::Vignette | Self::Grain | Self::Glow => "Effects",
+            Self::LensProfile | Self::ChromaticAberration | Self::LensManual => "Lens Corrections",
             Self::Transform | Self::Crop => "Geometry",
             Self::Masks | Self::Spots | Self::Dust => "Local",
         }
@@ -152,10 +162,26 @@ fn copy_group(f: &DevelopSettings, t: &mut DevelopSettings, g: SettingsGroup) {
         }
         G::Transform => {
             // Everything of the Transform panel but the crop.
-            let crop = t.transform.crop;
-            t.transform = Transform { crop, ..f.transform.clone() };
+            let (crop, lens) = (t.transform.crop, t.transform.lens.clone());
+            t.transform = Transform { crop, lens, ..f.transform.clone() };
         }
         G::Crop => t.transform.crop = f.transform.crop,
+        G::LensProfile => {
+            let (l, s) = (&mut t.transform.lens, &f.transform.lens);
+            (l.profile_enable, l.setup, l.profile) = (s.profile_enable, s.setup, s.profile.clone());
+            (l.distortion_amount, l.vignetting_amount) = (s.distortion_amount, s.vignetting_amount);
+        }
+        G::ChromaticAberration => {
+            let (l, s) = (&mut t.transform.lens, &f.transform.lens);
+            // The measurement belongs to its photo: measured again for this one.
+            (l.remove_ca, l.ca) = (s.remove_ca, None);
+            (l.purple_amount, l.purple_hue, l.green_amount, l.green_hue) =
+                (s.purple_amount, s.purple_hue, s.green_amount, s.green_hue);
+        }
+        G::LensManual => {
+            let (l, s) = (&mut t.transform.lens, &f.transform.lens);
+            (l.distortion, l.vignette_amount, l.vignette_midpoint) = (s.distortion, s.vignette_amount, s.vignette_midpoint);
+        }
         G::Masks => t.masks = f.masks.clone(),
         G::Spots => t.spots = f.spots.clone(),
         G::Dust => t.dust = f.dust.clone(),
@@ -274,6 +300,22 @@ pub(super) fn every_field_changed() -> DevelopSettings {
             x_offset: 3.0,
             y_offset: 4.0,
             crop: Crop { left: 0.1, top: 0.1, right: 0.9, bottom: 0.9, angle: 2.0 },
+            lens: super::lens::LensCorrections {
+                profile_enable: true,
+                setup: super::lens::LensSetup::Custom,
+                profile: Some(super::lens::LensProfile { lens: "Test".into(), ..Default::default() }),
+                distortion_amount: 80.0,
+                vignetting_amount: 90.0,
+                remove_ca: true,
+                ca: Some([0.001, 0.0, -0.001, 0.0]),
+                distortion: 10.0,
+                vignette_amount: 5.0,
+                vignette_midpoint: 40.0,
+                purple_amount: 3.0,
+                purple_hue: [35.0, 65.0],
+                green_amount: 2.0,
+                green_hue: [45.0, 55.0],
+            },
         },
         masks: vec![super::masks::Mask::default()],
         spots: vec![super::heal::Spot::default()],
@@ -292,6 +334,9 @@ mod tests {
         for raw in [false, true] {
             let mut t = DevelopSettings::default_for(raw);
             copy_groups(&all, &mut t, &SettingsGroup::ALL);
+            // (Remove CA's measurement is made again for each photo.)
+            assert_eq!(t.transform.lens.ca, None);
+            t.transform.lens.ca = all.transform.lens.ca;
             assert_eq!(t, all);
         }
     }
@@ -318,6 +363,8 @@ mod tests {
         assert_eq!(t.transform.crop, Crop::default());
         assert_eq!(t.transform.vertical, 5.0);
         copy_groups(&all, &mut t, &[SettingsGroup::Crop]);
-        assert_eq!(t.transform, all.transform);
+        // The lens corrections are groups of their own.
+        assert_eq!(t.transform.lens, Default::default());
+        assert_eq!(Transform { lens: Default::default(), ..t.transform }, Transform { lens: Default::default(), ..all.transform });
     }
 }
