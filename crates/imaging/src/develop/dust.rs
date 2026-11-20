@@ -85,6 +85,8 @@ pub struct DustLayer {
     /// The model's map of the photo (probabilities as a picture in the mask store), made
     /// once: Sensitivity and the rest only threshold it.
     pub ai_map: Option<String>,
+    /// Painted out of what was found (the Subtract brush): kept whatever is found again.
+    pub erase: Vec<super::SpotStroke>,
     pub picture: Option<String>,
     pub made_for: u64,
 }
@@ -99,6 +101,7 @@ impl Default for DustLayer {
             polarity: DustPolarity::Light,
             ai: false,
             ai_map: None,
+            erase: Vec::new(),
             picture: None,
             made_for: 0,
         }
@@ -124,6 +127,15 @@ impl DustLayer {
     /// Found with the AI model: asked for, and looking at the picture alone.
     pub fn uses_ai(&self) -> bool {
         self.ai && self.source == DustSource::Picture
+    }
+
+    /// The mask to fill with at `w × h` (any scale of the photo): what was found, less what
+    /// was painted out. `None` when off, not found yet, or its picture is missing.
+    pub fn mask_at_size(&self, w: usize, h: usize) -> Option<Vec<u8>> {
+        let picture = super::masks::mask_picture(self.current()?)?;
+        let mut mask = mask_at(&picture, w, h);
+        erase_strokes(&mut mask, w, h, &self.erase);
+        Some(mask)
     }
 
     /// The mask to fill with, if on and made for these settings.
@@ -932,6 +944,37 @@ pub fn mask_at(picture: &image::GrayImage, w: usize, h: usize) -> Vec<u8> {
         .collect()
 }
 
+/// Clear `mask` (`w × h`) under `strokes`: paths in 0..1 of the photo, their radius in
+/// half long sides (as spots'), round ends.
+pub fn erase_strokes(mask: &mut [u8], w: usize, h: usize, strokes: &[super::SpotStroke]) {
+    let half = w.max(h) as f32 / 2.0;
+    for stroke in strokes {
+        let r = (stroke.size * half).max(0.5);
+        let pts: Vec<(f32, f32)> = stroke.points.iter().map(|p| (p[0] * w as f32, p[1] * h as f32)).collect();
+        let segs: Vec<((f32, f32), (f32, f32))> = match pts.as_slice() {
+            [] => continue,
+            [p] => vec![(*p, *p)],
+            _ => pts.windows(2).map(|s| (s[0], s[1])).collect(),
+        };
+        for (a, b) in segs {
+            let (x0, x1) = ((a.0.min(b.0) - r).floor().max(0.0) as usize, ((a.0.max(b.0) + r).ceil() as usize).min(w));
+            let (y0, y1) = ((a.1.min(b.1) - r).floor().max(0.0) as usize, ((a.1.max(b.1) + r).ceil() as usize).min(h));
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len2 = (dx * dx + dy * dy).max(1e-6);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let t = (((px - a.0) * dx + (py - a.1) * dy) / len2).clamp(0.0, 1.0);
+                    let (qx, qy) = (a.0 + t * dx, a.1 + t * dy);
+                    if (px - qx).hypot(py - qy) <= r {
+                        mask[y * w + x] = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// What the detectors look at: the photo's perceptual lightness (0..1), file orientation.
 pub fn dust_lightness(img: &WorkingImage) -> Vec<f32> {
     img.pixels
@@ -1005,10 +1048,8 @@ pub fn sensor_dust_spots(img: &WorkingImage, sensitivity: f32, feather: f32) -> 
 /// Dust & Scratches' found defects over the photo as shown (after the Transform and
 /// crop), at `img`'s scale: 255 at defects. `None` while there is no current mask.
 pub fn render_dust_overlay(img: &WorkingImage, s: &super::DevelopSettings) -> Option<image::GrayImage> {
-    let id = s.dust.as_ref()?.current()?;
-    let picture = super::masks::mask_picture(id)?;
     let (w, h) = (img.width(), img.height());
-    let at = mask_at(&picture, w as usize, h as usize);
+    let at = s.dust.as_ref()?.mask_at_size(w as usize, h as usize)?;
     if s.transform.is_identity() {
         return image::GrayImage::from_raw(w, h, at);
     }
@@ -1182,6 +1223,26 @@ mod tests {
         assert_eq!((m[40 * w + 30], m[40 * w + 70]), (255, 0), "light only");
         let m = dust_from_map(&map, &lum, w, h, &layer(10.0, DustPolarity::Both));
         assert_eq!((m[40 * w + 30], m[40 * w + 70]), (0, 255), "only the surest at low sensitivity");
+    }
+
+    #[test]
+    fn subtracted_strokes_clear_the_mask_under_them_only() {
+        let (w, h) = (100, 50);
+        let mut mask = vec![255u8; w * h];
+        // A horizontal stroke along y = 0.5 from x = 0.2 to 0.6, radius 0.04 half long sides
+        // (2 px), and a dab at (0.9, 0.2).
+        let strokes = [
+            super::super::SpotStroke { points: vec![[0.2, 0.5], [0.6, 0.5]], size: 0.04, erase: true },
+            super::super::SpotStroke { points: vec![[0.9, 0.2]], size: 0.04, erase: true },
+        ];
+        erase_strokes(&mut mask, w, h, &strokes);
+        assert_eq!(mask[25 * w + 40], 0, "under the stroke");
+        assert_eq!(mask[10 * w + 90], 0, "under the dab");
+        assert_eq!(mask[25 * w + 70], 255, "past the stroke's end");
+        assert_eq!(mask[20 * w + 40], 255, "beside the stroke");
+        // Not part of what finding depends on: no detection again.
+        let layer = DustLayer { erase: strokes.to_vec(), ..Default::default() };
+        assert_eq!(layer.key(), DustLayer::default().key());
     }
 
     #[test]

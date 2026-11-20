@@ -78,6 +78,8 @@ pub enum RemoveDrag {
         index: usize,
         original: imaging::develop::Spot,
     },
+    /// Painting out of Dust & Scratches' found defects (the Subtract brush).
+    Subtract(Vec<[f32; 2]>),
 }
 
 /// The Remove tool (Q): the selected spot and the drag in progress.
@@ -88,6 +90,8 @@ pub struct RemoveTool {
     /// Editing the selected spot's area: painting adds to it (`Some(false)`) or takes away
     /// (`Some(true)`). Shift+drag and Ctrl+drag do the same for one stroke.
     pub area: Option<bool>,
+    /// Dust & Scratches' Subtract brush: drags paint out of what was found.
+    pub subtract: bool,
 }
 
 /// What a drag on the photo does with the crop tool.
@@ -1510,7 +1514,7 @@ impl DevelopState {
         // The mask overlay (masking with O on, or a mask hovered in the Masks panel), or
         // Dust & Scratches' found defects (the Remove tool with Show found on).
         let dust_overlay = self.removing.is_some()
-            && self.show_dust
+            && (self.show_dust || self.removing.as_ref().is_some_and(|t| t.subtract))
             && !self.before
             && self.settings.dust.as_ref().is_some_and(|l| l.current().is_some());
         match self.masking.as_ref().and_then(Masking::overlay_mask).filter(|_| !self.before) {

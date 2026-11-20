@@ -512,8 +512,9 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
 #[derive(Debug, Default)]
 pub(super) struct HealCache(Mutex<Option<HealKey>>);
 
-/// The spots and the dust mask (its id) a cached healed copy was made with.
-type HealKey = ((Vec<Spot>, Option<String>), Arc<WorkingImage>);
+/// The spots and the dust mask (its id, and what was painted out of it) a cached healed
+/// copy was made with.
+type HealKey = ((Vec<Spot>, Option<(String, Vec<SpotStroke>)>), Arc<WorkingImage>);
 
 impl Clone for HealCache {
     /// A copy starts without the cache (it is only a cache).
@@ -530,9 +531,9 @@ pub(super) fn healed<'a>(
 ) -> super::transform::Geometry<'a> {
     use super::transform::Geometry;
     // Dust & Scratches: its mask, if on and made for these settings.
-    let dust_id = dust.and_then(|d| d.current()).map(str::to_owned);
-    let dust = dust_id.as_deref().and_then(super::masks::mask_picture);
-    if spots.is_empty() && dust.is_none() {
+    let dust_id = dust.and_then(|d| Some((d.current()?.to_owned(), d.erase.clone())));
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if spots.is_empty() && dust_id.is_none() {
         return Geometry::Same(img);
     }
     let mut cache = img.heal_cache.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -543,12 +544,11 @@ pub(super) fn healed<'a>(
         return Geometry::Transformed(out.clone());
     }
     let mut out = img.clone();
-    let (w, h) = (img.width() as usize, img.height() as usize);
     let f = Frame::of(img);
     let mut px = std::mem::take(&mut out.pixels).into_raw();
     // Film dust first (the spots go over it).
-    if let Some(pic) = &dust {
-        super::dust::fill_masked(&mut px, w, h, &super::dust::mask_at(pic, w, h));
+    if let Some(mask) = dust.and_then(|d| d.mask_at_size(w, h)) {
+        super::dust::fill_masked(&mut px, w, h, &mask);
     }
     for spot in spots {
         apply_spot(&mut px, w, h, spot, f);

@@ -243,13 +243,15 @@ pub(super) fn canvas(
 
     // Painting into the selected spot: area mode on, or Shift (add) / Ctrl (subtract) held.
     let mods = ui.input(|i| i.modifiers);
-    let extending = tool.selected.filter(|_| tool.area.is_some() || mods.shift || mods.ctrl);
+    // Dust & Scratches' Subtract brush: drags and clicks paint out of what was found.
+    let subtracting = tool.subtract && st.dust.as_ref().is_some_and(|l| l.enabled);
+    let extending = tool.selected.filter(|_| !subtracting && (tool.area.is_some() || mods.shift || mods.ctrl));
     let erasing = mods.ctrl || (tool.area == Some(true) && !mods.shift);
     // The wheel sizes new spots (or the selected one; the brush while editing an area).
     if resp.hover_pos().is_some_and(|p| img_rect.contains(p)) {
         let dy = ui.input(|i| i.smooth_scroll_delta.y);
         if dy != 0.0 {
-            match tool.selected.filter(|_| extending.is_none()) {
+            match tool.selected.filter(|_| extending.is_none() && !subtracting) {
                 Some(i) => {
                     let s = &mut st.spots[i];
                     s.size = spot_radius((spot_size(s.size) * (dy / 300.0).exp2()).clamp(1.0, 100.0));
@@ -260,6 +262,11 @@ pub(super) fn canvas(
     }
 
     if resp.drag_started()
+        && subtracting
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+    {
+        tool.drag = Some(RemoveDrag::Subtract(vec![c.photo(origin)]));
+    } else if resp.drag_started()
         && let Some(origin) = ui.input(|i| i.pointer.press_origin())
     {
         tool.drag = Some(
@@ -284,7 +291,7 @@ pub(super) fn canvas(
     if let Some(q) = pointer {
         let at = c.photo(q);
         match &mut tool.drag {
-            Some(RemoveDrag::Paint(path) | RemoveDrag::Extend { path, .. }) => {
+            Some(RemoveDrag::Paint(path) | RemoveDrag::Extend { path, .. } | RemoveDrag::Subtract(path)) => {
                 let step = (spot_radius(settings.size) * c.half() / 4.0).max(1.0);
                 if path.last().is_none_or(|last| (c.px(at) - c.px(*last)).length() >= step) {
                     path.push(at);
@@ -327,6 +334,12 @@ pub(super) fn canvas(
                 s.found = false;
                 done = true;
             }
+            RemoveDrag::Subtract(path) => {
+                if let Some(l) = st.dust.as_mut() {
+                    l.erase.push(SpotStroke { points: path, size: spot_radius(settings.size), erase: true });
+                }
+                done = true;
+            }
             RemoveDrag::Spot { index, original, .. }
             | RemoveDrag::Source { index, original, .. }
             | RemoveDrag::Resize { index, original } => {
@@ -352,7 +365,13 @@ pub(super) fn canvas(
             }
             _ => None,
         };
-        if let (Some(_), Some(index)) = (extending, other) {
+        if subtracting {
+            // A dab of the Subtract brush.
+            if let Some(l) = st.dust.as_mut() {
+                l.erase.push(SpotStroke { points: vec![c.photo(p)], size: spot_radius(settings.size), erase: true });
+            }
+            done = true;
+        } else if let (Some(_), Some(index)) = (extending, other) {
             // Another spot: select it (and edit its area next).
             tool.selected = Some(index);
         } else if let Some(index) = extending {
@@ -381,7 +400,7 @@ pub(super) fn canvas(
 
     // Dust & Scratches' found defects (Show found), under the spots.
     let painter = painter.with_clip_rect(img_rect.intersect(painter.clip_rect()));
-    if d.show_dust
+    if (d.show_dust || subtracting)
         && let Some(t) = &d.overlay
     {
         super::views::paint_image(&painter, t, img_rect, rotation, Color32::WHITE);
@@ -440,8 +459,12 @@ pub(super) fn canvas(
         let color = if *erase { Color32::from_rgb(255, 90, 90) } else { Color32::from_rgb(120, 220, 120) };
         draw_outline(&painter, &outline(&c, &preview, [0.0, 0.0]), Stroke::new(1.5, color));
     }
+    if let Some(RemoveDrag::Subtract(path)) = &tool.drag {
+        let preview = Spot { points: path.clone(), ..new_spot(Vec::new()) };
+        draw_outline(&painter, &outline(&c, &preview, [0.0, 0.0]), Stroke::new(1.5, Color32::from_rgb(90, 200, 255)));
+    }
     if let Some(p) = resp.hover_pos().filter(|p| img_rect.contains(*p)) {
-        let under = if extending.is_some() { None } else { hit(&c, &st.spots, tool.selected, p) };
+        let under = if extending.is_some() || subtracting { None } else { hit(&c, &st.spots, tool.selected, p) };
         match (&tool.drag, under) {
             (None, None) => {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
@@ -449,9 +472,9 @@ pub(super) fn canvas(
                 let r = spot_radius(d.remove.size) * c.half() * screen_scale(&c, at);
                 painter.circle_stroke(p, r.max(2.0), Stroke::new(3.0, Color32::from_black_alpha(110)));
                 painter.circle_stroke(p, r.max(2.0), Stroke::new(1.3, Color32::WHITE));
-                // Editing an area: + adds, − takes away.
-                if extending.is_some() {
-                    let sign = if erasing { "−" } else { "+" };
+                // Editing an area: + adds, − takes away (the Subtract brush too).
+                if extending.is_some() || subtracting {
+                    let sign = if erasing || subtracting { "−" } else { "+" };
                     painter.text(
                         p,
                         egui::Align2::CENTER_CENTER,
@@ -465,7 +488,7 @@ pub(super) fn canvas(
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal)
             }
             (None, Some(_)) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grab),
-            (Some(RemoveDrag::Paint(_) | RemoveDrag::Extend { .. }), _) => {
+            (Some(RemoveDrag::Paint(_) | RemoveDrag::Extend { .. } | RemoveDrag::Subtract(_)), _) => {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair)
             }
             (Some(_), _) => ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing),
@@ -853,6 +876,29 @@ fn distractions(
             let tip = "Show what was found in red";
             if ui.checkbox(&mut d.show_dust, "Show found").on_hover_text(tip).changed() {
                 asks.show_changed = true;
+            }
+        });
+        // The Subtract brush: paint out what was found but isn't dust (the picture's own
+        // detail). Kept when the defects are found again.
+        ui.horizontal(|ui| {
+            ui.add_space(super::develop::LABEL_W - 40.0);
+            row_label(ui, "Brush");
+            let tip = "Paint over found areas that aren't dust to leave them as they are (they \
+                       show in red while the brush is on). The wheel or [ ] sets its size";
+            if mode_button(ui, "Subtract", tool.subtract).on_hover_text(tip).clicked() {
+                tool.subtract = !tool.subtract;
+                if tool.subtract {
+                    (tool.selected, tool.area) = (None, None);
+                }
+                asks.show_changed = true;
+            }
+            if !l.erase.is_empty() {
+                let n = l.erase.len();
+                let tip = format!("Remove the {n} subtracted stroke{}", if n == 1 { "" } else { "s" });
+                if pill(ui, &format!("Clear ({n})"), false).on_hover_text(tip).clicked() {
+                    l.erase.clear();
+                    asks.dust_changed = true;
+                }
             }
         });
         if !has_ir && l.source == DustSource::Picture {
