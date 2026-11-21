@@ -10,7 +10,7 @@ license.workspace = true
 anyhow.workspace = true
 image.workspace = true
 log.workspace = true
-# ONNX Runtime is loaded at run time (Microsoft's DirectML build, shipped next to the app):
+# ONNX Runtime is loaded at run time (Microsoft's builds, downloaded on first use):
 # no static linking, so no dependence on the C++ toolset it was built with.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "directml", "api-24", "half"] }
 
@@ -18,10 +18,11 @@ directories = "6.0.0"
 sha2 = "0.10"
 half = "2.7"
 ureq = "3"
+# ONNX Runtime comes as NuGet packages (zip files).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Graphics_Dxgi"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 imaging.workspace = true

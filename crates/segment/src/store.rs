@@ -1,5 +1,5 @@
 //! Where the AI files live and how they get there: ONNX Runtime (with DirectML on
-//! Windows) and the models, downloaded on first use into the user's local app data,
+//! Windows, the CPU build elsewhere) and the models, downloaded on first use into the user's local app data,
 //! each checked against its SHA-256 before it is used.
 
 use std::fs;
@@ -187,6 +187,33 @@ const RUNTIME: [(Asset, &[(&str, &str)]); 2] = [
     ),
 ];
 
+/// Microsoft's CPU build of ONNX Runtime (a NuGet package holding the libraries for
+/// every platform; the one for this system is taken out). Linux distributions rarely
+/// package it, and Microsoft's own download page for it is gone.
+#[cfg(not(windows))]
+const ORT_CPU: Asset = Asset {
+    url: "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.24.4/microsoft.ml.onnxruntime.1.24.4.nupkg",
+    sha256: "4b978d5065b85e7004b6c6f60ca494bd978fbe6836cbf0a0b52d82b61ab99638",
+    size: 125_194_303,
+    file: "onnxruntime.nupkg",
+};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const RUNTIME: [(Asset, &[(&str, &str)]); 1] =
+    [(ORT_CPU, &[("runtimes/linux-x64/native/libonnxruntime.so", RUNTIME_LIB)])];
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const RUNTIME: [(Asset, &[(&str, &str)]); 1] =
+    [(ORT_CPU, &[("runtimes/linux-arm64/native/libonnxruntime.so", RUNTIME_LIB)])];
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const RUNTIME: [(Asset, &[(&str, &str)]); 1] =
+    [(ORT_CPU, &[("runtimes/osx-arm64/native/libonnxruntime.dylib", RUNTIME_LIB)])];
+/// No build of ONNX Runtime to download for this system: it must be installed by hand.
+#[cfg(not(any(
+    windows,
+    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(target_os = "macos", target_arch = "aarch64"),
+)))]
+const RUNTIME: [(Asset, &[(&str, &str)]); 0] = [];
+
 /// ONNX Runtime's library file name on this system.
 #[cfg(windows)]
 const RUNTIME_LIB: &str = "onnxruntime.dll";
@@ -228,7 +255,6 @@ pub fn ready(models: &[AiModel]) -> bool {
 pub fn download_size(models: &[AiModel]) -> u64 {
     let dir = data_dir();
     let mut total = 0;
-    #[cfg(windows)]
     if !runtime_ready() {
         total += RUNTIME.iter().map(|(a, _)| a.size).sum::<u64>();
     }
@@ -250,24 +276,22 @@ pub fn ensure(models: &[AiModel], progress: &mut dyn FnMut(f32, &str)) -> Result
     let dir = data_dir();
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     if !runtime_ready() {
-        #[cfg(windows)]
-        {
-            let runtime = dir.join("runtime");
-            fs::create_dir_all(&runtime)?;
-            for (asset, files) in &RUNTIME {
-                let package = dir.join(asset.file);
-                let what = "ONNX Runtime and DirectML";
-                download(asset, &package, &mut |n| progress(((done + n) as f64 / total) as f32, what))?;
-                done += asset.size;
-                extract(&package, files, &runtime)?;
-                let _ = fs::remove_file(&package);
-            }
+        if RUNTIME.is_empty() {
+            bail!(
+                "AI masks need ONNX Runtime ({RUNTIME_LIB}) next to the program or in {}",
+                dir.join("runtime").display()
+            );
         }
-        #[cfg(not(windows))]
-        bail!(
-            "AI masks need ONNX Runtime ({RUNTIME_LIB}) next to the program or in {}",
-            dir.join("runtime").display()
-        );
+        let runtime = dir.join("runtime");
+        fs::create_dir_all(&runtime)?;
+        let what = if cfg!(windows) { "ONNX Runtime and DirectML" } else { "ONNX Runtime" };
+        for (asset, files) in &RUNTIME {
+            let package = dir.join(asset.file);
+            download(asset, &package, &mut |n| progress(((done + n) as f64 / total) as f32, what))?;
+            done += asset.size;
+            extract(&package, files, &runtime)?;
+            let _ = fs::remove_file(&package);
+        }
     }
     for m in models {
         for asset in m.assets() {
@@ -317,7 +341,6 @@ fn download(asset: &Asset, to: &Path, progress: &mut dyn FnMut(u64)) -> Result<(
 }
 
 /// Take `files` (path in the zip, file name) out of a NuGet package into `dir`.
-#[cfg(windows)]
 fn extract(package: &Path, files: &[(&str, &str)], dir: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(fs::File::open(package)?).context("reading a NuGet package")?;
     for (inner, name) in files {

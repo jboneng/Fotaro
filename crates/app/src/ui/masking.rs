@@ -779,10 +779,10 @@ pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
             "AI tools run on this computer. The first time, they need {:.0} MB downloaded: \
              {what}{}. Nothing about your photos is sent anywhere.",
             bytes as f64 / 1e6,
-            if cfg!(windows) && !segment::ready(&[]) {
-                ", and ONNX Runtime with DirectML to run it"
-            } else {
-                ""
+            match (segment::ready(&[]), cfg!(windows)) {
+                (true, _) => "",
+                (false, true) => ", and ONNX Runtime with DirectML to run it",
+                (false, false) => ", and ONNX Runtime to run it",
             },
         ));
         ui.add_space(4.0);
