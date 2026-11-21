@@ -189,7 +189,10 @@ mod tests {
         let p = |name, existing, taken: &mut HashSet<PathBuf>| export_path(d, name, "jpg", existing, taken);
         assert_eq!(p("a", ExistingFiles::NewName, &mut taken), Some(d.join("a-2.jpg")));
         assert_eq!(p("a", ExistingFiles::NewName, &mut taken), Some(d.join("a-3.jpg")), "same export");
-        assert_eq!(p("A", ExistingFiles::Skip, &mut taken), None, "case-insensitive clash on disk");
+        // A.jpg is a.jpg on Windows and macOS; on Linux it is a different (free) name.
+        let case_insensitive = d.join("A.jpg").exists();
+        let other_case = if case_insensitive { None } else { Some(d.join("A.jpg")) };
+        assert_eq!(p("A", ExistingFiles::Skip, &mut taken), other_case, "a clash in another case");
         assert_eq!(p("b", ExistingFiles::Skip, &mut taken), Some(d.join("b.jpg")));
         assert_eq!(p("b", ExistingFiles::Skip, &mut taken), Some(d.join("b-2.jpg")), "own files are renamed");
 

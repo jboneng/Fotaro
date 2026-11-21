@@ -676,6 +676,11 @@ mod tests {
 
     #[test]
     fn shortcuts_doc_is_up_to_date() {
+        // The doc names the keys as Windows and Linux do (Ctrl, Alt); macOS names them
+        // differently (Cmd, Option), so it is checked on the others.
+        if cfg!(target_os = "macos") {
+            return;
+        }
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/SHORTCUTS.md");
         let expected = markdown();
         if std::env::var_os("UPDATE_DOCS").is_some() {
