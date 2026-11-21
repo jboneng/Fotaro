@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "catalog"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "dunce",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "fotaro"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "catalog",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "imaging"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2431,7 +2431,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lensdb"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "bzip2",
@@ -2503,7 +2503,7 @@ dependencies = [
 
 [[package]]
 name = "libraw"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cc",
  "libz-sys",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "segment"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -5730,7 +5730,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xmp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "quick-xml 0.37.5",
