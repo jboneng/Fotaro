@@ -128,6 +128,8 @@ fn installed_version() -> Option<String> {
 }
 
 /// Where Luminar Neo installs.
+// What goes in depends on the system (nothing on Linux).
+#[allow(unused_mut, clippy::vec_init_then_push)]
 fn candidates() -> Vec<PathBuf> {
     let mut v = Vec::new();
     #[cfg(windows)]

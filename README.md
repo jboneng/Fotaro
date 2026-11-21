@@ -88,13 +88,23 @@ Download `Fotaro-<version>-windows-x86_64-setup.exe` from the
 your user account only, so it doesn't need administrator rights. The installer isn't signed yet,
 so Windows may warn you about an unrecognised app: choose **More info ▸ Run anyway**.
 
+### macOS and Linux (untested)
+
+These builds are made automatically but haven't been tried on a real Mac or Linux PC yet.
+
+- **macOS** (Apple silicon): download `Fotaro-<version>-macos-aarch64.dmg`, open it and drag
+  Fotaro to Applications. It isn't notarised by Apple yet, so the first time, right-click Fotaro
+  and choose **Open**.
+- **Linux** (x86-64): download `Fotaro-<version>-linux-x86_64.AppImage`, make it executable
+  (`chmod +x Fotaro-*.AppImage`) and run it.
+
 ### Updates
 
 Fotaro checks for a new release when it starts, and once a day while it runs. When there is one, a
 small **Fotaro x.y available** button appears at the right end of the menu bar. Hover over it to
 see what's new, and click it to download the update. When the download has finished, the button
 reads **Restart to Update**: click it, and Fotaro closes, installs the new version and starts
-again. Right-click the button to skip that version. **Help ▸ Check for Updates** checks straight
+again. (On macOS the new disk image opens instead, for you to drag Fotaro to Applications.) Right-click the button to skip that version. **Help ▸ Check for Updates** checks straight
 away, and you can turn the automatic check off in the same menu.
 
 ### Build from source
@@ -162,8 +172,8 @@ cargo run -p imaging --example renderbench --release -- <file>   # Develop rende
 If you cloned without `--recurse-submodules`, run `git submodule update --init` to fetch LibRaw.
 
 **Releasing:** set the new `version` in the workspace `Cargo.toml`, commit, then push a tag
-`v<version>`. The Release workflow builds the Windows installer and publishes it on a GitHub
-release, where the updater in older versions finds it. To build the installer locally, run
+`v<version>`. The Release workflow builds the installers (Windows, macOS, Linux) and publishes
+them on a GitHub release, where the updater in older versions finds them. To build the installer locally, run
 `installer\build.ps1` (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)); it lands in
 `target\installer\`.
 

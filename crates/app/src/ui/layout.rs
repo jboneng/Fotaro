@@ -391,7 +391,7 @@ fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
             );
         }
         State::Ready(release, _) => {
-            let silent = crate::update::installed();
+            let silent = crate::update::updates_in_place();
             let text =
                 if silent { "⟳ Restart to Update".to_owned() } else { "Install Update…".to_owned() };
             let hover = if silent {

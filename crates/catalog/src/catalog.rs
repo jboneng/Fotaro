@@ -967,7 +967,8 @@ mod gps_tests {
         cat.conn.execute("UPDATE exif SET gps_read = 0, gps_lat = NULL, gps_lon = NULL", []).unwrap();
         let unread = cat.gps_unread(10).unwrap();
         assert_eq!(unread.iter().map(|u| u.0).collect::<Vec<_>>(), vec![a, b], "virtual copies follow");
-        assert_eq!(unread[1].1, dir.join("b.jpg"));
+        // The catalog keeps the full path (a temp folder may be given in its short 8.3 form).
+        assert_eq!(unread[1].1, dunce::canonicalize(&dir).unwrap().join("b.jpg"));
         cat.set_gps(&[(a, None), (b, Some((1.5, 2.5, None)))]).unwrap();
         assert!(cat.gps_unread(10).unwrap().is_empty());
         let c = cat.metadata(copy).unwrap().unwrap();

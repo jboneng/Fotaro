@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag like v0.6.0 (the version in Cargo.toml) to publish a release with the Windows
-# installer. Fotaro's updater offers it to everyone on an older version.
+# Push a tag like v0.6.0 (the version in Cargo.toml) to publish a release with installers
+# for Windows, macOS and Linux. Fotaro's updater offers it to everyone on an older version.
 on:
   push:
     tags: ["v*"]
@@ -20,9 +20,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Inno Setup
@@ -45,17 +43,83 @@ jobs:
             throw "The tag ($tag) is not the version in Cargo.toml (${{ steps.build.outputs.version }})"
           }
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ${{ steps.build.outputs.installer }}
+          if-no-files-found: error
+
+  macos:
+    name: macOS disk image
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release -p fotaro
+
+      - name: Package
+        id: build
+        run: bash installer/macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: ${{ steps.build.outputs.installer }}
+          if-no-files-found: error
+
+  linux:
+    name: Linux AppImage
+    # The oldest supported Ubuntu: an AppImage runs on systems as new or newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev libgtk-3-dev libfuse2
+
+      - run: cargo build --release -p fotaro
+
+      - name: Package
+        id: build
+        run: bash installer/linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ${{ steps.build.outputs.installer }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
       - name: Publish
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          $tag = '${{ github.ref_name }}'
-          $installer = '${{ steps.build.outputs.installer }}'
-          # A release already written by hand (with its notes) gets the installer added.
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $installer --clobber
-          } else {
-            gh release create $tag $installer --title "Fotaro ${{ steps.build.outputs.version }}" --generate-notes
-          }
+          ls -l installers
+          # A release already written by hand (with its notes) gets the installers added.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" installers/* --clobber
+          else
+            gh release create "$TAG" installers/* --title "Fotaro ${TAG#v}" --generate-notes
+          fi

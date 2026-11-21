@@ -170,6 +170,8 @@ fn installed_version() -> Option<String> {
 }
 
 /// Where darktable installs.
+// What goes in depends on the system.
+#[allow(clippy::vec_init_then_push)]
 fn candidates() -> Vec<PathBuf> {
     let mut v = Vec::new();
     #[cfg(windows)]

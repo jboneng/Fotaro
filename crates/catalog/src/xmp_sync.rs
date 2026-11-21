@@ -344,7 +344,8 @@ mod tests {
         // The camera rotated this file a quarter turn already: the sidecar gets the total.
         let file_rotated: OrientationReader = &|_, _| Some(3);
         let sidecar = cat.write_xmp(id, file_rotated).unwrap().unwrap();
-        assert_eq!(sidecar, dir.join("IMG_1.xmp"));
+        // The catalog keeps the full path (a temp folder may be given in its short 8.3 form).
+        assert_eq!(sidecar, dunce::canonicalize(&dir).unwrap().join("IMG_1.xmp"));
         assert!(cat.dirty_photo_ids().unwrap().is_empty());
         let on_disk = xmp::read_sidecar(&dir.join("IMG_1.NEF"), true).unwrap().unwrap().data;
         assert_eq!(on_disk.orientation, Some(1), "file 270° + our 90° = upright");

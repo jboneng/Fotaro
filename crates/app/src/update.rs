@@ -216,9 +216,17 @@ pub fn installed() -> bool {
             == Some(true)
 }
 
+/// Can an update replace this Fotaro and start it again (Windows, installed; Linux, run
+/// as an AppImage)? Otherwise the downloaded installer is opened for the user.
+pub fn updates_in_place() -> bool {
+    installed() || (cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some())
+}
+
 /// How an update was started.
 pub enum Started {
     /// The installer runs once Fotaro has closed, and starts the new Fotaro: close now.
+    /// (Not on macOS, where the disk image is opened for the user.)
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     AfterClose,
     /// The installer (or the downloaded file) was opened; Fotaro keeps running.
     Opened,
@@ -257,6 +265,21 @@ fn start_install(installer: &Path) -> Result<Started> {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
+        // Run as an AppImage: put the new one in its place, and start it once this closes.
+        if let Some(current) = std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file()) {
+            use std::os::unix::fs::PermissionsExt;
+            let next = current.with_extension("new");
+            std::fs::copy(installer, &next).context("copying the new AppImage")?;
+            std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o755))?;
+            std::fs::rename(&next, &current).context("replacing the AppImage")?;
+            std::process::Command::new("sh")
+                .args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.5; done; exec \"$2\"", "sh"])
+                .arg(std::process::id().to_string())
+                .arg(&current)
+                .spawn()
+                .context("restarting Fotaro")?;
+            return Ok(Started::AfterClose);
+        }
         crate::platform::reveal(installer);
         Ok(Started::Opened)
     }
