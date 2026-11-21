@@ -103,7 +103,11 @@ fn words(s: &str) -> Vec<String> {
                 i += 1;
             }
         }
-        if i - start == 1 && (c.is_ascii_punctuation() || c.eq_ignore_ascii_case(&'f')) && c != '*' && c != '+' {
+        if i - start == 1
+            && (c.is_ascii_punctuation() || c.eq_ignore_ascii_case(&'f'))
+            && c != '*'
+            && c != '+'
+        {
             continue;
         }
         out.push(chars[start..i - strip].iter().collect::<String>().to_lowercase());
@@ -181,13 +185,13 @@ impl Database {
         };
         self.cameras.iter().find(|c| {
             let cm = alnum_words(&c.maker);
-            let same_maker = cm.first().is_some_and(|f| pm.contains(f)) || pm.first().is_some_and(|f| cm.contains(f));
+            let same_maker =
+                cm.first().is_some_and(|f| pm.contains(f)) || pm.first().is_some_and(|f| cm.contains(f));
             if !same_maker {
                 return false;
             }
             let want = strip(model, &cm);
-            !want.is_empty()
-                && std::iter::once(&c.model).chain(&c.names).any(|n| strip(n, &cm) == want)
+            !want.is_empty() && std::iter::once(&c.model).chain(&c.names).any(|n| strip(n, &cm) == want)
         })
     }
 
@@ -207,7 +211,8 @@ impl Database {
             .filter(|(_, l)| mounts.as_ref().is_none_or(|m| l.mounts.iter().any(|x| m.contains(x))))
             .filter(|(_, l)| camera.is_none_or(|c| l.crop <= c.crop * 1.01))
             .filter_map(|(i, l)| {
-                let name = std::iter::once(&l.model).chain(&l.names).map(|n| fuzzy_score(&photo.lens, n)).max();
+                let name =
+                    std::iter::once(&l.model).chain(&l.names).map(|n| fuzzy_score(&photo.lens, n)).max();
                 let mut score = name.unwrap_or(0) as i32;
                 let mut numbers = false;
                 if let Some(p) = params {
@@ -231,7 +236,10 @@ impl Database {
                     return None;
                 }
                 let lens_maker = alnum_words(&l.maker);
-                if lens_maker.iter().any(|w| maker_words.contains(w) || photo.lens.to_lowercase().contains(w.as_str())) {
+                if lens_maker
+                    .iter()
+                    .any(|w| maker_words.contains(w) || photo.lens.to_lowercase().contains(w.as_str()))
+                {
                     score += 10;
                 }
                 let sure = name.unwrap_or(0) >= 60 || numbers;
@@ -280,8 +288,14 @@ mod tests {
     #[test]
     fn cameras_and_lenses_are_found() {
         let db = crate::Database::from_xml(FIXTURE).unwrap();
-        for (maker, model) in [("NIKON CORPORATION", "NIKON D750"), ("Nikon", "D750"), ("Nikon Corporation", "Nikon D750")] {
-            assert_eq!(db.find_camera(maker, model).map(|c| c.model.as_str()), Some("Nikon D750"), "{maker} {model}");
+        for (maker, model) in
+            [("NIKON CORPORATION", "NIKON D750"), ("Nikon", "D750"), ("Nikon Corporation", "Nikon D750")]
+        {
+            assert_eq!(
+                db.find_camera(maker, model).map(|c| c.model.as_str()),
+                Some("Nikon D750"),
+                "{maker} {model}"
+            );
         }
         assert!(db.find_camera("Canon", "D750").is_none());
         assert!(db.find_camera("Nikon", "D75").is_none());

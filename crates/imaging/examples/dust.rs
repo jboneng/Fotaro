@@ -12,8 +12,8 @@ use std::time::Instant;
 use image::{Rgb, RgbImage};
 use imaging::SourceKind;
 use imaging::develop::{
-    DustLayer, DustPolarity, WorkingImage, detect_both, detect_ir, detect_picture_as, dust_lightness, fill_masked,
-    find_sensor_dust,
+    DustLayer, DustPolarity, WorkingImage, detect_both, detect_ir, detect_picture_as, dust_lightness,
+    fill_masked, find_sensor_dust,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -45,8 +45,9 @@ fn main() -> anyhow::Result<()> {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (seed >> 33) as f32 / (1u64 << 31) as f32
         };
-        let blobs: Vec<(f32, f32, f32, f32)> =
-            (0..40).map(|_| (rnd() * sw as f32, rnd() * sh as f32, 3.0 + rnd() * 9.0, 0.02 + rnd() * 0.04)).collect();
+        let blobs: Vec<(f32, f32, f32, f32)> = (0..40)
+            .map(|_| (rnd() * sw as f32, rnd() * sh as f32, 3.0 + rnd() * 9.0, 0.02 + rnd() * 0.04))
+            .collect();
         let mut lum = clean.clone();
         for &(cx, cy, r, depth) in &blobs {
             for y in 0..sh {
@@ -66,10 +67,15 @@ fn main() -> anyhow::Result<()> {
             let hit = blobs
                 .iter()
                 .filter(|(cx, cy, r, _)| {
-                    found.iter().any(|(c, _)| (c[0] * sw as f32 - cx).hypot(c[1] * sh as f32 - cy) < r.max(4.0))
+                    found
+                        .iter()
+                        .any(|(c, _)| (c[0] * sw as f32 - cx).hypot(c[1] * sh as f32 - cy) < r.max(4.0))
                 })
                 .count();
-            println!("sensitivity {sens}: {hit}/40 blobs found, {} finds in all, {before} on the clean photo", found.len());
+            println!(
+                "sensitivity {sens}: {hit}/40 blobs found, {} finds in all, {before} on the clean photo",
+                found.len()
+            );
         }
         return Ok(());
     }
@@ -107,7 +113,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(ir) = &ir {
         let t = Instant::now();
         let irimg = image::open(ir)?.to_luma32f();
-        anyhow::ensure!(irimg.width() as usize == w && irimg.height() as usize == h, "the IR pass is another size");
+        anyhow::ensure!(
+            irimg.width() as usize == w && irimg.height() as usize == h,
+            "the IR pass is another size"
+        );
         let valid = valid_mask(ir).filter(|v| v.len() == w * h);
         let ird = detect_ir(irimg.as_raw(), &lum, valid.as_deref(), w, h, sens, size);
         println!(
@@ -173,7 +182,11 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        let show = |v: [f32; 3]| Rgb(std::array::from_fn(|ch| (((v[ch] - lo[ch]) / (hi[ch] - lo[ch]).max(1e-6)).sqrt() * 255.0) as u8));
+        let show = |v: [f32; 3]| {
+            Rgb(std::array::from_fn(|ch| {
+                (((v[ch] - lo[ch]) / (hi[ch] - lo[ch]).max(1e-6)).sqrt() * 255.0) as u8
+            }))
+        };
         let mut sheet = RgbImage::new(c as u32 * (1 + 2 * masks.len() as u32), c as u32);
         for y in 0..c {
             for x in 0..c {
@@ -193,13 +206,20 @@ fn main() -> anyhow::Result<()> {
                     }
                     sheet.put_pixel(((1 + 2 * m) * c + x) as u32, y as u32, p);
                     let j = 3 * (y * c + x);
-                    sheet.put_pixel(((2 + 2 * m) * c + x) as u32, y as u32, show([region[j], region[j + 1], region[j + 2]]));
+                    sheet.put_pixel(
+                        ((2 + 2 * m) * c + x) as u32,
+                        y as u32,
+                        show([region[j], region[j + 1], region[j + 2]]),
+                    );
                 }
             }
         }
         let name = format!("{stem}.crop{k}.png");
         sheet.save(out.join(&name))?;
-        println!("{name}: original | {}", masks.iter().map(|(n, _)| format!("{n} found | {n} filled")).collect::<Vec<_>>().join(" | "));
+        println!(
+            "{name}: original | {}",
+            masks.iter().map(|(n, _)| format!("{n} found | {n} filled")).collect::<Vec<_>>().join(" | ")
+        );
     }
 
     // Sensor dust.

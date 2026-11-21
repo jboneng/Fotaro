@@ -22,9 +22,21 @@ fn main() -> anyhow::Result<()> {
     })?;
     eprintln!();
     println!("{} people in {:.1?}", people.len(), started.elapsed());
-    let mut small = image::imageops::resize(&img, img.width() / 4, img.height() / 4, image::imageops::FilterType::Triangle);
+    let mut small = image::imageops::resize(
+        &img,
+        img.width() / 4,
+        img.height() / 4,
+        image::imageops::FilterType::Triangle,
+    );
     for p in &people {
-        println!("  {:.2}  {},{} {}x{}", p.score, p.rect[0], p.rect[1], p.rect[2] - p.rect[0], p.rect[3] - p.rect[1]);
+        println!(
+            "  {:.2}  {},{} {}x{}",
+            p.score,
+            p.rect[0],
+            p.rect[1],
+            p.rect[2] - p.rect[0],
+            p.rect[3] - p.rect[1]
+        );
         for (x, y, v) in p.mask.enumerate_pixels() {
             if v[0] > 0 {
                 let (sx, sy) = ((p.rect[0] + x) / 4, (p.rect[1] + y) / 4);

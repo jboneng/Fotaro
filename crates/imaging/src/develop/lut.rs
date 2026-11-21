@@ -284,7 +284,8 @@ pub fn import_lut(path: &Path) -> Result<StoredLut, String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let safe: String =
             name.chars().map(|c| if c.is_alphanumeric() || " -_().".contains(c) { c } else { '_' }).collect();
-        std::fs::write(dir.join(format!("{hash}-{}.cube", safe.trim())), &bytes).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(format!("{hash}-{}.cube", safe.trim())), &bytes)
+            .map_err(|e| e.to_string())?;
     }
     Ok(StoredLut { name, hash })
 }
@@ -375,18 +376,28 @@ mod tests {
         // Swapping red and blue, and inverting, are linear: exact between grid points.
         let swap = parse_cube(&cube(5, |c| [c[2], c[1], c[0]])).unwrap();
         let o = swap.apply([0.9, 0.3, 0.12]);
-        assert!((o[0] - 0.12).abs() < 1e-5 && (o[1] - 0.3).abs() < 1e-5 && (o[2] - 0.9).abs() < 1e-5, "{o:?}");
+        assert!(
+            (o[0] - 0.12).abs() < 1e-5 && (o[1] - 0.3).abs() < 1e-5 && (o[2] - 0.9).abs() < 1e-5,
+            "{o:?}"
+        );
         let inv = parse_cube(&cube(3, |c| c.map(|v| 1.0 - v))).unwrap();
         let o = inv.apply([0.25, 0.6, 0.9]);
-        assert!((o[0] - 0.75).abs() < 1e-5 && (o[1] - 0.4).abs() < 1e-5 && (o[2] - 0.1).abs() < 1e-5, "{o:?}");
+        assert!(
+            (o[0] - 0.75).abs() < 1e-5 && (o[1] - 0.4).abs() < 1e-5 && (o[2] - 0.1).abs() < 1e-5,
+            "{o:?}"
+        );
     }
 
     #[test]
     fn domains_and_shapers_are_followed() {
         // A domain of 0..2: the input is halved before the lookup.
-        let text = cube(2, |c| c).replace("LUT_3D_SIZE 2", "LUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 2 2 2");
+        let text =
+            cube(2, |c| c).replace("LUT_3D_SIZE 2", "LUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 2 2 2");
         let o = parse_cube(&text).unwrap().apply([1.0, 0.5, 2.0]);
-        assert!((o[0] - 0.5).abs() < 1e-5 && (o[1] - 0.25).abs() < 1e-5 && (o[2] - 1.0).abs() < 1e-5, "{o:?}");
+        assert!(
+            (o[0] - 0.5).abs() < 1e-5 && (o[1] - 0.25).abs() < 1e-5 && (o[2] - 1.0).abs() < 1e-5,
+            "{o:?}"
+        );
         // A 1D shaper squaring, before an identity cube.
         let mut s = String::from("LUT_1D_SIZE 3\nLUT_3D_SIZE 2\n0 0 0\n0.25 0.25 0.25\n1 1 1\n");
         s += cube(2, |c| c).split_once("LUT_3D_SIZE 2\n").unwrap().1;
@@ -401,7 +412,8 @@ mod tests {
         let darker = parse_cube(&cube(9, |c| c.map(|v| v * 0.5))).unwrap();
         cache_lut("00000000000000d1", darker);
         let at = |amount: f32| {
-            let p = PreparedLut::new(&LutProfile { name: "d".into(), hash: "00000000000000d1".into(), amount });
+            let p =
+                PreparedLut::new(&LutProfile { name: "d".into(), hash: "00000000000000d1".into(), amount });
             p.map_or(0.18, |p| p.apply([0.18, 0.18, 0.18])[1])
         };
         let (none, half, full, more) = (at(0.0), at(50.0), at(100.0), at(200.0));
@@ -409,8 +421,12 @@ mod tests {
         assert!(full < half && half < none && more < full, "{none} {half} {full} {more}");
         // Grey stays grey, and an identity round trip keeps the colour.
         cache_lut("00000000000000e0", parse_cube(&cube(17, |c| c)).unwrap());
-        let id = PreparedLut::new(&LutProfile { name: "i".into(), hash: "00000000000000e0".into(), amount: 100.0 })
-            .unwrap();
+        let id = PreparedLut::new(&LutProfile {
+            name: "i".into(),
+            hash: "00000000000000e0".into(),
+            amount: 100.0,
+        })
+        .unwrap();
         let c = [0.3, 0.2, 0.1];
         let o = id.apply(c);
         assert!((0..3).all(|k| (o[k] - c[k]).abs() < 2e-3), "{o:?}");

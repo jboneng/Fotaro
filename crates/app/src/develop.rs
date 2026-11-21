@@ -767,7 +767,8 @@ fn person_tint(mask: &image::GrayImage) -> egui::ColorImage {
     let scale = (1024.0 / w.max(h) as f32).min(1.0);
     let small;
     let pic = if scale < 1.0 {
-        let (sw, sh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
+        let (sw, sh) =
+            (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
         small = image::imageops::resize(mask, sw, sh, image::imageops::FilterType::Triangle);
         &small
     } else {

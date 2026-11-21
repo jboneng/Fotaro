@@ -43,7 +43,8 @@ pub fn published() -> Result<(i64, String)> {
         match ureq::get(&url).call().and_then(|mut r| r.body_mut().read_to_string()) {
             Ok(body) => {
                 let v: serde_json::Value = serde_json::from_str(&body).context("versions.json")?;
-                let ts = v.get(0).and_then(serde_json::Value::as_i64).context("versions.json: no timestamp")?;
+                let ts =
+                    v.get(0).and_then(serde_json::Value::as_i64).context("versions.json: no timestamp")?;
                 let has = v
                     .get(1)
                     .and_then(serde_json::Value::as_array)
@@ -140,11 +141,17 @@ mod tests {
         add("readme.txt", b"x");
         let raw = tar.into_inner().unwrap();
         let mut bz = Vec::new();
-        std::io::Read::read_to_end(&mut bzip2::read::BzEncoder::new(&raw[..], bzip2::Compression::fast()), &mut bz)
-            .unwrap();
+        std::io::Read::read_to_end(
+            &mut bzip2::read::BzEncoder::new(&raw[..], bzip2::Compression::fast()),
+            &mut bz,
+        )
+        .unwrap();
         unpack(&bz, tmp.path()).unwrap();
-        let mut names: Vec<String> =
-            std::fs::read_dir(tmp.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into()).collect();
+        let mut names: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into())
+            .collect();
         names.sort();
         assert_eq!(names, ["compact.xml", "slr-nikon.xml"]);
         let db = Database::load(tmp.path()).unwrap();

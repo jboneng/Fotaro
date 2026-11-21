@@ -7,7 +7,7 @@ use imaging::PreviewSize;
 use super::shortcuts::Action;
 use super::sidebars::{format_capture_time, format_shutter};
 use super::{icons, theme};
-use crate::app::{Command, GridStyle, FotaroApp, Session, View};
+use crate::app::{Command, FotaroApp, GridStyle, Session, View};
 
 const UV: Rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
@@ -428,12 +428,7 @@ fn photo_context_menu(resp: &egui::Response, app: &mut FotaroApp, photo: &PhotoR
 }
 
 /// Handle a click on a photo (cell or filmstrip frame).
-fn handle_click(
-    app: &mut FotaroApp,
-    resp: &egui::Response,
-    photo: &PhotoRow,
-    open_loupe_on_double: bool,
-) {
+fn handle_click(app: &mut FotaroApp, resp: &egui::Response, photo: &PhotoRow, open_loupe_on_double: bool) {
     if resp.clicked() || resp.secondary_clicked() {
         let mods = resp.ctx.input(|i| i.modifiers);
         if let Some(s) = &mut app.session {
@@ -1189,13 +1184,7 @@ pub fn member_label(photo: &PhotoRow) -> String {
 
 /// Compare with Original: a picture's original (left) and the member that was shown
 /// (right), zoom and position linked. Esc or G leaves.
-fn member_compare(
-    app: &mut FotaroApp,
-    ui: &mut egui::Ui,
-    rect: Rect,
-    original: &PhotoRow,
-    other: &PhotoRow,
-) {
+fn member_compare(app: &mut FotaroApp, ui: &mut egui::Ui, rect: Rect, original: &PhotoRow, other: &PhotoRow) {
     let gap = 6.0;
     let half = (rect.width() - gap) / 2.0;
     let panes = [

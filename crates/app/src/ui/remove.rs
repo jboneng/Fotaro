@@ -4,7 +4,9 @@
 //! Heal matches the source to the spot's surroundings, Clone copies it.
 
 use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Stroke};
-use imaging::develop::{DevelopSettings, DustLayer, DustPolarity, DustSource, Slider, Spot, SpotArea, SpotMode, SpotStroke};
+use imaging::develop::{
+    DevelopSettings, DustLayer, DustPolarity, DustSource, Slider, Spot, SpotArea, SpotMode, SpotStroke,
+};
 
 use super::develop::{Spec, slider_row_as, weak};
 use super::masking::{Canvas, header, pill};
@@ -258,7 +260,12 @@ fn spinner(painter: &egui::Painter, at: Pos2, time: f64) {
 /// A found person as a spot (for outlining and hit testing).
 fn person_spot(f: &crate::develop::FoundPerson) -> Spot {
     let [l, t, r, b] = f.area.rect;
-    Spot { points: vec![[(l + r) / 2.0, (t + b) / 2.0]], area: Some(f.area.clone()), feather: 0.0, ..Spot::default() }
+    Spot {
+        points: vec![[(l + r) / 2.0, (t + b) / 2.0]],
+        area: Some(f.area.clone()),
+        feather: 0.0,
+        ..Spot::default()
+    }
 }
 
 /// A found person's tint as a texture (their picture white, its coverage as alpha), made
@@ -280,7 +287,13 @@ fn person_texture(
 
 /// Paint a person's mask texture over `rect` (0..1 of the photo) in `tint`: a grid of
 /// points through the canvas, so rotation and the photo's geometry follow.
-fn paint_person(painter: &egui::Painter, c: &Canvas, tex: &egui::TextureHandle, rect: [f32; 4], tint: Color32) {
+fn paint_person(
+    painter: &egui::Painter,
+    c: &Canvas,
+    tex: &egui::TextureHandle,
+    rect: [f32; 4],
+    tint: Color32,
+) {
     const N: usize = 8;
     let [l, t, r, b] = rect;
     let mut at = Vec::with_capacity((N + 1) * (N + 1));
@@ -355,7 +368,8 @@ pub(super) fn canvas(
     let mods = ui.input(|i| i.modifiers);
     // Dust & Scratches' Subtract brush: drags and clicks paint out of what was found.
     let subtracting = tool.subtract && st.dust.as_ref().is_some_and(|l| l.enabled);
-    let extending = tool.selected.filter(|_| !subtracting && (tool.area.is_some() || mods.shift || mods.ctrl));
+    let extending =
+        tool.selected.filter(|_| !subtracting && (tool.area.is_some() || mods.shift || mods.ctrl));
     let erasing = mods.ctrl || (tool.area == Some(true) && !mods.shift);
     // The wheel sizes new spots (or the selected one; the brush while editing an area).
     if resp.hover_pos().is_some_and(|p| img_rect.contains(p)) {
@@ -495,7 +509,11 @@ pub(super) fn canvas(
         if subtracting {
             // A dab of the Subtract brush.
             if let Some(l) = st.dust.as_mut() {
-                l.erase.push(SpotStroke { points: vec![c.photo(p)], size: spot_radius(settings.size), erase: true });
+                l.erase.push(SpotStroke {
+                    points: vec![c.photo(p)],
+                    size: spot_radius(settings.size),
+                    erase: true,
+                });
             }
             done = true;
         } else if let (Some(_), Some(index)) = (extending, other) {
@@ -618,10 +636,15 @@ pub(super) fn canvas(
     }
     if let Some(RemoveDrag::Subtract(path)) = &tool.drag {
         let preview = Spot { points: path.clone(), ..new_spot(Vec::new()) };
-        draw_outline(&painter, &outline(&c, &preview, [0.0, 0.0]), Stroke::new(1.5, Color32::from_rgb(90, 200, 255)));
+        draw_outline(
+            &painter,
+            &outline(&c, &preview, [0.0, 0.0]),
+            Stroke::new(1.5, Color32::from_rgb(90, 200, 255)),
+        );
     }
     if let Some(p) = resp.hover_pos().filter(|p| img_rect.contains(*p)) {
-        let under = if extending.is_some() || subtracting { None } else { hit(&c, &st.spots, tool.selected, p) };
+        let under =
+            if extending.is_some() || subtracting { None } else { hit(&c, &st.spots, tool.selected, p) };
         match (&tool.drag, under) {
             (None, None) => {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
@@ -939,7 +962,10 @@ fn distractions(
             ui.add_space(super::develop::LABEL_W - 40.0);
             ui.label(weak(format!("{found} found")).size(12.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if pill(ui, "Clear Found", false).on_hover_text("Delete the found spots you haven't changed").clicked() {
+                if pill(ui, "Clear Found", false)
+                    .on_hover_text("Delete the found spots you haven't changed")
+                    .clicked()
+                {
                     st.spots.retain(|s| !s.found);
                     tool.selected = None;
                     *done = Some(Some("Clear Sensor Dust".into()));
@@ -972,7 +998,12 @@ fn distractions(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let tip = "Find the dust and scratches again with these settings";
                 let busy = d.dust_job.is_some();
-                if ui.add_enabled_ui(!busy, |ui| pill(ui, "Recalculate", false)).inner.on_hover_text(tip).clicked() {
+                if ui
+                    .add_enabled_ui(!busy, |ui| pill(ui, "Recalculate", false))
+                    .inner
+                    .on_hover_text(tip)
+                    .clicked()
+                {
                     asks.recalculate = true;
                 }
             });

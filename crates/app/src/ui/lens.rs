@@ -93,7 +93,11 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             let rows: [(u8, &str, (f32, f32), f32); 2] =
                 [(203, "Purple Amount", (0.0, 20.0), 0.0), (204, "Green Amount", (0.0, 20.0), 0.0)];
             for (k, (id, name, range, default)) in rows.into_iter().enumerate() {
-                let (amount, hue) = if k == 0 { (&mut l.purple_amount, &mut l.purple_hue) } else { (&mut l.green_amount, &mut l.green_hue) };
+                let (amount, hue) = if k == 0 {
+                    (&mut l.purple_amount, &mut l.purple_hue)
+                } else {
+                    (&mut l.green_amount, &mut l.green_hue)
+                };
                 if slider_row_as(ui, &spec(id, range, default), name, amount).done {
                     done = Some(None);
                 }
@@ -116,7 +120,9 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 done = Some(None);
             }
             ui.add_enabled_ui(l.vignette_amount != 0.0, |ui| {
-                if slider_row_as(ui, &spec(206, (0.0, 100.0), 50.0), "Midpoint", &mut l.vignette_midpoint).done {
+                if slider_row_as(ui, &spec(206, (0.0, 100.0), 50.0), "Midpoint", &mut l.vignette_midpoint)
+                    .done
+                {
                     done = Some(None);
                 }
             });
@@ -177,7 +183,8 @@ fn profile_box(
     }
     // Make and Model: the photo's candidates first; any lens of a maker by hand.
     let current = l.profile.clone();
-    let camera = d.lens.photo.as_ref().and_then(|p| db.find_camera(&p.lens.camera_maker, &p.lens.camera_model));
+    let camera =
+        d.lens.photo.as_ref().and_then(|p| db.find_camera(&p.lens.camera_maker, &p.lens.camera_model));
     let mounts = camera.map(|c| db.compatible_mounts(&c.mount));
     let fits = |x: &lensdb::Lens| {
         x.kind == lensdb::LensType::Rectilinear
@@ -194,7 +201,8 @@ fn profile_box(
             .width(150.0)
             .height(400.0)
             .show_ui(ui, |ui| {
-                let mut makers: Vec<&str> = db.lenses.iter().filter(|x| fits(x)).map(|x| x.maker.as_str()).collect();
+                let mut makers: Vec<&str> =
+                    db.lenses.iter().filter(|x| fits(x)).map(|x| x.maker.as_str()).collect();
                 makers.sort_by_key(|m| m.to_lowercase());
                 makers.dedup();
                 for m in makers {
@@ -225,8 +233,9 @@ fn profile_box(
                     ui.separator();
                 }
                 if let Some(mk) = &maker {
-                    let mut all: Vec<usize> =
-                        (0..db.lenses.len()).filter(|&i| db.lenses[i].maker == *mk && fits(&db.lenses[i])).collect();
+                    let mut all: Vec<usize> = (0..db.lenses.len())
+                        .filter(|&i| db.lenses[i].maker == *mk && fits(&db.lenses[i]))
+                        .collect();
                     all.sort_by_key(|&i| db.lenses[i].model.to_lowercase());
                     for i in all {
                         let x = &db.lenses[i];
@@ -262,13 +271,17 @@ fn profile_box(
             if photo.lens.focal.is_none() && lens.is_zoom() {
                 ui.label(weak("Focal length:"));
                 let r = ui.add(
-                    egui::DragValue::new(&mut focal).range(lens.min_focal..=lens.max_focal).speed(0.5).suffix(" mm"),
+                    egui::DragValue::new(&mut focal)
+                        .range(lens.min_focal..=lens.max_focal)
+                        .speed(0.5)
+                        .suffix(" mm"),
                 );
                 changed |= r.changed() && !r.dragged() || r.drag_stopped();
             }
             if photo.aperture.is_none() {
                 ui.label(weak("Aperture:"));
-                let r = ui.add(egui::DragValue::new(&mut aperture).range(1.0..=32.0).speed(0.05).prefix("f/"));
+                let r =
+                    ui.add(egui::DragValue::new(&mut aperture).range(1.0..=32.0).speed(0.05).prefix("f/"));
                 changed |= r.changed() && !r.dragged() || r.drag_stopped();
             }
         });
@@ -286,7 +299,10 @@ fn profile_box(
         .into_iter()
         .flatten()
         .collect();
-        ui.label(weak(format!("Corrects {} at {:.0} mm, f/{:.1}", what.join(", "), p.focal, p.aperture)).size(11.0));
+        ui.label(
+            weak(format!("Corrects {} at {:.0} mm, f/{:.1}", what.join(", "), p.focal, p.aperture))
+                .size(11.0),
+        );
     }
     sub_header(ui, "Amount", |_| {});
     ui.add_enabled_ui(l.profile.as_ref().is_some_and(|p| p.distortion.is_some()), |ui| {
@@ -305,11 +321,19 @@ fn profile_box(
 fn database_line(ui: &mut egui::Ui, d: &mut crate::develop::DevelopState, ctx: &egui::Context) {
     if let Some(p) = &d.lens.downloading {
         let f = *p.lock().unwrap_or_else(|e| e.into_inner());
-        ui.add(egui::ProgressBar::new(f).desired_height(6.0).text(RichText::new("Downloading the lens database").size(10.5)));
+        ui.add(
+            egui::ProgressBar::new(f)
+                .desired_height(6.0)
+                .text(RichText::new("Downloading the lens database").size(10.5)),
+        );
         return;
     }
     if let Some(e) = &d.lens.error {
-        ui.label(RichText::new(format!("Lens database: {e}")).size(11.0).color(egui::Color32::from_rgb(230, 120, 90)));
+        ui.label(
+            RichText::new(format!("Lens database: {e}"))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(230, 120, 90)),
+        );
     }
     if !d.lens.available() {
         ui.label(weak("Lens profiles come from the Lensfun database (about 0.5 MB to download).").size(11.0));

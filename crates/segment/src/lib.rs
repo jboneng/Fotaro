@@ -340,7 +340,11 @@ pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, D
         let result = match model {
             AiModel::Subject => subject_rmbg(session, img),
             AiModel::Sky => sky(session, img),
-            AiModel::Object | AiModel::Remove | AiModel::RemoveBest | AiModel::Scratches | AiModel::People => {
+            AiModel::Object
+            | AiModel::Remove
+            | AiModel::RemoveBest
+            | AiModel::Scratches
+            | AiModel::People => {
                 bail!("{} isn't a selection", model.label())
             }
         };
@@ -563,7 +567,12 @@ pub struct Person {
 /// Anything on crops around each person (several close people share one), on the CPU
 /// (faster there than DirectML for its image encoder). `progress` hears the share done and
 /// what is happening.
-pub fn find_people(img: &RgbImage, threshold: f32, gpu: bool, progress: &dyn Fn(f32, &str)) -> Result<Vec<Person>> {
+pub fn find_people(
+    img: &RgbImage,
+    threshold: f32,
+    gpu: bool,
+    progress: &dyn Fn(f32, &str),
+) -> Result<Vec<Person>> {
     const TILE: u32 = 1280;
     const SIDE: u32 = 640;
     let (w, h) = img.dimensions();
@@ -604,7 +613,10 @@ pub fn find_people(img: &RgbImage, threshold: f32, gpu: bool, progress: &dyn Fn(
             let classes = shape[shape.len() - 1] as usize;
             for q in 0..logits.len() / classes {
                 let row = &logits[q * classes..(q + 1) * classes];
-                let (c, best) = row.iter().enumerate().fold((0, f32::MIN), |m, (i, v)| if *v > m.1 { (i, *v) } else { m });
+                let (c, best) = row
+                    .iter()
+                    .enumerate()
+                    .fold((0, f32::MIN), |m, (i, v)| if *v > m.1 { (i, *v) } else { m });
                 let score = sigmoid(best);
                 if score < threshold || (c != 0 && !BELONGINGS.contains(&c)) {
                     continue;
@@ -795,7 +807,8 @@ pub fn scratches(
     const PAD: usize = 32;
     let full: ImageBuffer<Luma<f32>, Vec<f32>> =
         ImageBuffer::from_raw(w as u32, h as u32, gray.to_vec()).context("the photo's size")?;
-    let (sw, sh) = (((w as f32 * scale).round() as usize).max(1), ((h as f32 * scale).round() as usize).max(1));
+    let (sw, sh) =
+        (((w as f32 * scale).round() as usize).max(1), ((h as f32 * scale).round() as usize).max(1));
     let small = imageops::resize(&full, sw as u32, sh as u32, imageops::FilterType::Triangle);
     let px = small.as_raw();
     // Reflected at the borders, so every tile is the same size (DirectML compiles once).
@@ -817,7 +830,10 @@ pub fn scratches(
             let mut input = vec![0.0f32; TILE * TILE];
             for ty in 0..TILE {
                 for tx in 0..TILE {
-                    let v = at(x0 as isize + tx as isize - PAD as isize, y0 as isize + ty as isize - PAD as isize);
+                    let v = at(
+                        x0 as isize + tx as isize - PAD as isize,
+                        y0 as isize + ty as isize - PAD as isize,
+                    );
                     input[ty * TILE + tx] = v * 2.0 - 1.0;
                 }
             }

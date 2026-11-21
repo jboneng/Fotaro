@@ -85,8 +85,12 @@ pub fn left(app: &mut FotaroApp, ui: &mut egui::Ui) {
             stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| navigator(app, ui));
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 app.presets_ui.hover = None;
-                stack.section(ui, Side::Left, "Presets", LEFT, true, |ui| super::presets::presets_panel(app, ui));
-                stack.section(ui, Side::Left, "Snapshots", LEFT, false, |ui| super::presets::snapshots_panel(app, ui));
+                stack.section(ui, Side::Left, "Presets", LEFT, true, |ui| {
+                    super::presets::presets_panel(app, ui)
+                });
+                stack.section(ui, Side::Left, "Snapshots", LEFT, false, |ui| {
+                    super::presets::snapshots_panel(app, ui)
+                });
                 stack.section(ui, Side::Left, "History", LEFT, true, |ui| history(app, ui));
                 stack.section(ui, Side::Left, "Collections", LEFT, false, |ui| {
                     super::collections::panel(app, ui)
@@ -179,7 +183,9 @@ pub fn right(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 stack.section(ui, Side::Right, "HSL / Color", RIGHT, false, |ui| hsl_panel(app, ui));
                 stack.section(ui, Side::Right, "Color Grading", RIGHT, false, |ui| color_grading(app, ui));
                 stack.section(ui, Side::Right, "Detail", RIGHT, false, |ui| detail_panel(app, ui));
-                stack.section(ui, Side::Right, "Lens Corrections", RIGHT, false, |ui| super::lens::lens_panel(app, ui));
+                stack.section(ui, Side::Right, "Lens Corrections", RIGHT, false, |ui| {
+                    super::lens::lens_panel(app, ui)
+                });
                 for title in PLANNED_RIGHT {
                     stack.section(ui, Side::Right, title, RIGHT, false, |ui| {
                         ui.label(weak("Comes in a later version."));
@@ -377,33 +383,39 @@ fn profile_row(
         ui.add_sized([LABEL_W, 20.0], egui::Label::new(weak("Profile:")));
         ui.add_space(4.0);
         let shown = st.profile.as_ref().map_or_else(|| "None".to_string(), |p| p.name.clone());
-        egui::ComboBox::from_id_salt("dev_profile").selected_text(shown).width(150.0).show_ui(ui, |ui| {
-            if ui.selectable_label(st.profile.is_none(), "None").clicked() && st.profile.is_some() {
-                st.profile = None;
-                *done = Some(None);
-            }
-            for l in list_luts() {
-                let on = st.profile.as_ref().is_some_and(|p| p.hash == l.hash);
-                if ui.selectable_label(on, &l.name).clicked() && !on {
-                    let amount = st.profile.as_ref().map_or(100.0, |p| p.amount);
-                    st.profile = Some(LutProfile { name: l.name, hash: l.hash, amount });
+        egui::ComboBox::from_id_salt("dev_profile")
+            .selected_text(shown)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(st.profile.is_none(), "None").clicked() && st.profile.is_some() {
+                    st.profile = None;
                     *done = Some(None);
                 }
-            }
-            ui.separator();
-            if ui.button("Import LUT…").on_hover_text("3D LUTs (.cube files)").clicked() {
-                importing = true;
-            }
-        })
-        .response
-        .on_hover_text("A look from a 3D LUT, applied after the basic tone; the other panels adjust on top");
+                for l in list_luts() {
+                    let on = st.profile.as_ref().is_some_and(|p| p.hash == l.hash);
+                    if ui.selectable_label(on, &l.name).clicked() && !on {
+                        let amount = st.profile.as_ref().map_or(100.0, |p| p.amount);
+                        st.profile = Some(LutProfile { name: l.name, hash: l.hash, amount });
+                        *done = Some(None);
+                    }
+                }
+                ui.separator();
+                if ui.button("Import LUT…").on_hover_text("3D LUTs (.cube files)").clicked() {
+                    importing = true;
+                }
+            })
+            .response
+            .on_hover_text(
+                "A look from a 3D LUT, applied after the basic tone; the other panels adjust on top",
+            );
         if st.profile.as_ref().is_some_and(|p| !lut_available(&p.hash)) {
             ui.label(RichText::new("⚠").color(Color32::from_rgb(230, 160, 40)))
                 .on_hover_text("This LUT isn't in the LUT folder: import its .cube file again");
         }
     });
     if importing
-        && let Some(files) = rfd::FileDialog::new().set_title("Import LUT").add_filter("3D LUT", &["cube"]).pick_files()
+        && let Some(files) =
+            rfd::FileDialog::new().set_title("Import LUT").add_filter("3D LUT", &["cube"]).pick_files()
     {
         let mut first = None;
         for f in files {

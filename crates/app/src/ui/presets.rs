@@ -70,7 +70,11 @@ pub fn presets_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 ask = Some(Ask::NewPreset);
             }
             ui.separator();
-            if ui.button("Import Presets…").on_hover_text("Lightroom presets: .xmp and .lrtemplate files").clicked() {
+            if ui
+                .button("Import Presets…")
+                .on_hover_text("Lightroom presets: .xmp and .lrtemplate files")
+                .clicked()
+            {
                 ask = Some(Ask::Import(false));
             }
             if ui.button("Import Folder of Presets…").clicked() {
@@ -94,7 +98,9 @@ pub fn presets_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             .presets
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.folder == folder && (filter.is_empty() || p.name().to_lowercase().contains(&filter)))
+            .filter(|(_, p)| {
+                p.folder == folder && (filter.is_empty() || p.name().to_lowercase().contains(&filter))
+            })
             .map(|(i, _)| i)
             .collect();
         if items.is_empty() && (!filter.is_empty() || folder != USER) {
@@ -102,7 +108,13 @@ pub fn presets_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         let open = !app.presets_ui.closed.contains(&folder) || !filter.is_empty();
         let arrow = if open { "▾" } else { "▸" };
-        let head = super::sidebars::source_row(ui, 2.0, &format!("{arrow} {folder}"), Some(items.len() as i64), false);
+        let head = super::sidebars::source_row(
+            ui,
+            2.0,
+            &format!("{arrow} {folder}"),
+            Some(items.len() as i64),
+            false,
+        );
         if head.clicked() {
             if open {
                 app.presets_ui.closed.insert(folder.clone());
@@ -140,12 +152,16 @@ pub fn presets_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 ask = Some(Ask::Apply(i));
             }
             resp.context_menu(|ui| {
-                if ui.add_enabled(own && has_photo, egui::Button::new("Update with Current Settings")).clicked() {
+                if ui
+                    .add_enabled(own && has_photo, egui::Button::new("Update with Current Settings"))
+                    .clicked()
+                {
                     ask = Some(Ask::Update(i));
                     ui.close();
                 }
                 if ui.add_enabled(own, egui::Button::new("Rename…")).clicked() {
-                    app.presets_ui.rename = Some((RenameTarget::Preset(i), app.presets.presets[i].name().to_string()));
+                    app.presets_ui.rename =
+                        Some((RenameTarget::Preset(i), app.presets.presets[i].name().to_string()));
                     ui.close();
                 }
                 if ui.add_enabled(own, egui::Button::new("Show in Explorer")).clicked() {
@@ -177,7 +193,10 @@ pub fn snapshots_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut ask = None;
     let mut hover = None;
     ui.horizontal(|ui| {
-        ui.label(weak(format!("{} snapshot{}", d.snapshots.len(), if d.snapshots.len() == 1 { "" } else { "s" })).size(12.0));
+        ui.label(
+            weak(format!("{} snapshot{}", d.snapshots.len(), if d.snapshots.len() == 1 { "" } else { "s" }))
+                .size(12.0),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled(d.photo.is_some(), egui::Button::new("+"))
@@ -272,7 +291,11 @@ fn run(app: &mut FotaroApp, ask: Ask) {
         }
         Ask::Import(folder) => {
             let picked: Vec<std::path::PathBuf> = if folder {
-                rfd::FileDialog::new().set_title("Import Folder of Presets").pick_folder().into_iter().collect()
+                rfd::FileDialog::new()
+                    .set_title("Import Folder of Presets")
+                    .pick_folder()
+                    .into_iter()
+                    .collect()
             } else {
                 rfd::FileDialog::new()
                     .set_title("Import Presets")
@@ -293,7 +316,10 @@ fn run(app: &mut FotaroApp, ask: Ask) {
             let name = snapshot_name();
             app.develop_with(|d, c| d.take_snapshot(c, &name));
             // Name it right away (the date stays if left as it is).
-            let id = app.session.as_ref().and_then(|s| s.develop.snapshots.iter().find(|x| x.name == name).map(|x| x.id));
+            let id = app
+                .session
+                .as_ref()
+                .and_then(|s| s.develop.snapshots.iter().find(|x| x.name == name).map(|x| x.id));
             if let Some(id) = id {
                 app.presets_ui.rename = Some((RenameTarget::Snapshot(id), name));
             }
@@ -381,18 +407,21 @@ fn new_preset_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
             ui.label("Group:");
             ui.horizontal(|ui| {
                 let shown = np.new_folder.as_ref().map_or(np.folder.clone(), |_| "New Folder…".into());
-                egui::ComboBox::from_id_salt("preset_folder").selected_text(shown).width(180.0).show_ui(ui, |ui| {
-                    for f in &folders {
-                        if ui.selectable_label(np.new_folder.is_none() && np.folder == *f, f).clicked() {
-                            np.folder = f.clone();
-                            np.new_folder = None;
+                egui::ComboBox::from_id_salt("preset_folder").selected_text(shown).width(180.0).show_ui(
+                    ui,
+                    |ui| {
+                        for f in &folders {
+                            if ui.selectable_label(np.new_folder.is_none() && np.folder == *f, f).clicked() {
+                                np.folder = f.clone();
+                                np.new_folder = None;
+                            }
                         }
-                    }
-                    ui.separator();
-                    if ui.selectable_label(np.new_folder.is_some(), "New Folder…").clicked() {
-                        np.new_folder = Some(String::new());
-                    }
-                });
+                        ui.separator();
+                        if ui.selectable_label(np.new_folder.is_some(), "New Folder…").clicked() {
+                            np.new_folder = Some(String::new());
+                        }
+                    },
+                );
                 if let Some(f) = &mut np.new_folder {
                     ui.add(egui::TextEdit::singleline(f).hint_text("Folder name").desired_width(110.0));
                 }
@@ -419,7 +448,8 @@ fn new_preset_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
         cancel = true;
     }
     if create && !np.name.trim().is_empty() && !np.groups.is_empty() {
-        let folder = np.new_folder.clone().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| np.folder.clone());
+        let folder =
+            np.new_folder.clone().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| np.folder.clone());
         let file = PresetFile {
             name: np.name.trim().to_string(),
             settings: app.session.as_ref().map(|s| s.develop.settings.clone()),

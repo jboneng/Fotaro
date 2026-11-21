@@ -19,7 +19,15 @@ fn main() -> anyhow::Result<()> {
     let found = db.find_lenses(&photo);
     for m in found.iter().take(8) {
         let l = &db.lenses[m.index];
-        println!("  {:3} {} {:45} {}-{}mm f/{}", m.score, if m.sure { "sure" } else { "    " }, l.model, l.min_focal, l.max_focal, l.min_aperture);
+        println!(
+            "  {:3} {} {:45} {}-{}mm f/{}",
+            m.score,
+            if m.sure { "sure" } else { "    " },
+            l.model,
+            l.min_focal,
+            l.max_focal,
+            l.min_aperture
+        );
     }
     if let Some(m) = found.first() {
         let l = &db.lenses[m.index];

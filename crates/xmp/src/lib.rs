@@ -196,9 +196,9 @@ impl XmpDoc {
                     ["Alt", "Seq", "Bag"].iter().any(|k| is_element(&s, &c.name, ns::RDF, k))
                 });
                 // A structure (a nested Description): its simple fields as `Name=value`.
-                let structure = child.elements().find(|c| {
-                    is_element(&with_declarations(&scope, c), &c.name, ns::RDF, "Description")
-                });
+                let structure = child
+                    .elements()
+                    .find(|c| is_element(&with_declarations(&scope, c), &c.name, ns::RDF, "Description"));
                 if container.is_none()
                     && let Some(st) = structure
                 {
@@ -208,9 +208,10 @@ impl XmpDoc {
                         .iter()
                         .filter(|(n, _)| !n.starts_with("xmlns") && !is_attr(&s, n, ns::RDF, split(n).1))
                         .map(|(n, v)| format!("{}={v}", split(n).1));
-                    let elems = st.elements().filter(|c| c.elements().next().is_none()).map(|c| {
-                        format!("{}={}", split(&c.name).1, c.text())
-                    });
+                    let elems = st
+                        .elements()
+                        .filter(|c| c.elements().next().is_none())
+                        .map(|c| format!("{}={}", split(&c.name).1, c.text()));
                     return Some(fields.chain(elems).collect());
                 }
                 return Some(match container {

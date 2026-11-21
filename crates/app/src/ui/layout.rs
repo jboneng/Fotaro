@@ -18,7 +18,7 @@ use eframe::egui::{self, Align, Align2, Color32, Layout, RichText};
 
 use super::shortcuts::{Action, SHORTCUTS, Status};
 use super::{sidebars, theme, views};
-use crate::app::{Command, Dialog, Lights, Module, FotaroApp, View};
+use crate::app::{Command, Dialog, FotaroApp, Lights, Module, View};
 use catalog::Flag;
 
 const TOAST_TIME: Duration = Duration::from_millis(1400);
@@ -348,12 +348,14 @@ fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 if let Some(e) = &app.updater.error {
                     ui.label(RichText::new(format!("The last try failed: {e}")).color(theme::MISSING));
                 }
-                ui.label(RichText::new(if can_install {
-                    "Click to download it. Right-click for more."
-                } else {
-                    "There is no installer for this system yet: click to open the release page."
-                })
-                .color(theme::TEXT_WEAK));
+                ui.label(
+                    RichText::new(if can_install {
+                        "Click to download it. Right-click for more."
+                    } else {
+                        "There is no installer for this system yet: click to open the release page."
+                    })
+                    .color(theme::TEXT_WEAK),
+                );
             });
             if resp.clicked() {
                 if can_install {
@@ -378,14 +380,20 @@ fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
             let p = app.updater.progress();
             ui.add(egui::ProgressBar::new(p).desired_width(90.0).desired_height(6.0));
             ui.label(
-                RichText::new(format!("Downloading {} {} – {:.0}%", crate::APP_NAME, release.version, p * 100.0))
-                    .size(11.5)
-                    .color(theme::TEXT_WEAK),
+                RichText::new(format!(
+                    "Downloading {} {} – {:.0}%",
+                    crate::APP_NAME,
+                    release.version,
+                    p * 100.0
+                ))
+                .size(11.5)
+                .color(theme::TEXT_WEAK),
             );
         }
         State::Ready(release, _) => {
             let silent = crate::update::installed();
-            let text = if silent { "⟳ Restart to Update".to_owned() } else { "Install Update…".to_owned() };
+            let text =
+                if silent { "⟳ Restart to Update".to_owned() } else { "Install Update…".to_owned() };
             let hover = if silent {
                 format!("Close {0}, install {0} {1} and start it again", crate::APP_NAME, release.version)
             } else {

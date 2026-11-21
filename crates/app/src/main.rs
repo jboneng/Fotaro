@@ -85,9 +85,5 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
-        APP_NAME,
-        options,
-        Box::new(move |cc| Ok(Box::new(FotaroApp::new(cc, args)))),
-    )
+    eframe::run_native(APP_NAME, options, Box::new(move |cc| Ok(Box::new(FotaroApp::new(cc, args)))))
 }

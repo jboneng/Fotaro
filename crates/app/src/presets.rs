@@ -145,7 +145,8 @@ impl PresetStore {
             }
         }
         found.sort_by(|a: &Preset, b: &Preset| {
-            (a.folder.to_lowercase(), a.name().to_lowercase()).cmp(&(b.folder.to_lowercase(), b.name().to_lowercase()))
+            (a.folder.to_lowercase(), a.name().to_lowercase())
+                .cmp(&(b.folder.to_lowercase(), b.name().to_lowercase()))
         });
         self.presets = built_in();
         self.presets.extend(found);
@@ -185,7 +186,9 @@ impl PresetStore {
 
     /// Save a new preset in `folder`; replaces one of the same name there.
     pub fn add(&mut self, folder: &str, file: PresetFile) -> anyhow::Result<()> {
-        if let Some(old) = self.presets.iter().find(|p| p.folder == folder && p.name() == file.name && p.path.is_some()) {
+        if let Some(old) =
+            self.presets.iter().find(|p| p.folder == folder && p.name() == file.name && p.path.is_some())
+        {
             write(old.path.as_ref().unwrap(), &file)?;
         } else {
             let path = self.free_path(folder, &file.name)?;
@@ -293,7 +296,10 @@ fn read_preset(path: &Path, folder: &str, out: &mut Vec<Preset>) {
     if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("json")) {
         return;
     }
-    match std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str(&t)?)) {
+    match std::fs::read_to_string(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|t| Ok(serde_json::from_str(&t)?))
+    {
         Ok(file) => out.push(Preset { folder: folder.to_string(), file, path: Some(path.to_path_buf()) }),
         Err(e) => log::warn!("preset {}: {e}", path.display()),
     }

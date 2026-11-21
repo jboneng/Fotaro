@@ -91,7 +91,9 @@ impl SettingsGroup {
     /// The panel a group sits under (for headings in the dialogs).
     pub fn panel(self) -> &'static str {
         match self {
-            Self::Treatment | Self::WhiteBalance | Self::BasicTone | Self::Presence | Self::Profile => "Basic",
+            Self::Treatment | Self::WhiteBalance | Self::BasicTone | Self::Presence | Self::Profile => {
+                "Basic"
+            }
             Self::ToneCurve | Self::Hsl | Self::BwMix | Self::ColorGrading => "Color",
             Self::Sharpening | Self::NoiseReduction => "Detail",
             Self::Vignette | Self::Grain | Self::Glow => "Effects",
@@ -153,7 +155,8 @@ fn copy_group(f: &DevelopSettings, t: &mut DevelopSettings, g: SettingsGroup) {
         }
         G::Grain => {
             let (e, s) = (&mut t.effects, &f.effects);
-            (e.grain_amount, e.grain_size, e.grain_roughness) = (s.grain_amount, s.grain_size, s.grain_roughness);
+            (e.grain_amount, e.grain_size, e.grain_roughness) =
+                (s.grain_amount, s.grain_size, s.grain_roughness);
         }
         G::Glow => {
             let (e, s) = (&mut t.effects, &f.effects);
@@ -180,7 +183,8 @@ fn copy_group(f: &DevelopSettings, t: &mut DevelopSettings, g: SettingsGroup) {
         }
         G::LensManual => {
             let (l, s) = (&mut t.transform.lens, &f.transform.lens);
-            (l.distortion, l.vignette_amount, l.vignette_midpoint) = (s.distortion, s.vignette_amount, s.vignette_midpoint);
+            (l.distortion, l.vignette_amount, l.vignette_midpoint) =
+                (s.distortion, s.vignette_amount, s.vignette_midpoint);
         }
         G::Masks => t.masks = f.masks.clone(),
         G::Spots => t.spots = f.spots.clone(),
@@ -212,13 +216,13 @@ pub fn changed_groups(s: &DevelopSettings, raw: bool) -> Vec<SettingsGroup> {
 #[cfg(test)]
 pub(super) fn every_field_changed() -> DevelopSettings {
     use super::curve::ToneCurve;
-    use super::grading::ColorGrading;
-    use super::hsl::Hsl;
-    use super::transform::Crop;
     use super::detail::Detail;
     use super::effects::{Effects, VignetteStyle};
+    use super::grading::ColorGrading;
     use super::grading::Wheel;
+    use super::hsl::Hsl;
     use super::settings::Treatment;
+    use super::transform::Crop;
     use super::transform::Upright;
     let wheel = Wheel { hue: 30.0, saturation: 20.0, luminance: 5.0 };
     DevelopSettings {
@@ -365,6 +369,9 @@ mod tests {
         copy_groups(&all, &mut t, &[SettingsGroup::Crop]);
         // The lens corrections are groups of their own.
         assert_eq!(t.transform.lens, Default::default());
-        assert_eq!(Transform { lens: Default::default(), ..t.transform }, Transform { lens: Default::default(), ..all.transform });
+        assert_eq!(
+            Transform { lens: Default::default(), ..t.transform },
+            Transform { lens: Default::default(), ..all.transform }
+        );
     }
 }

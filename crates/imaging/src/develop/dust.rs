@@ -480,7 +480,14 @@ fn ir_mask(dip: &[f32], w: usize, h: usize, t: f32, max_size: f32) -> Vec<u8> {
 /// picture's own fine detail (wires, edges, highlights) is left alone while the picture's
 /// sharper view adds small specks the infrared only hints at. `layer` gives the
 /// sensitivity, Max Size and polarity.
-pub fn detect_both(lum: &[f32], ir: &[f32], valid: Option<&[u8]>, w: usize, h: usize, layer: &DustLayer) -> Vec<u8> {
+pub fn detect_both(
+    lum: &[f32],
+    ir: &[f32],
+    valid: Option<&[u8]>,
+    w: usize,
+    h: usize,
+    layer: &DustLayer,
+) -> Vec<u8> {
     let (sensitivity, max_size, polarity) = (layer.sensitivity, layer.max_size, layer.polarity);
     let t = ir_threshold(sensitivity);
     let (dip, mut pic) = rayon::join(
@@ -490,7 +497,9 @@ pub fn detect_both(lum: &[f32], ir: &[f32], valid: Option<&[u8]>, w: usize, h: u
     // Confirmed: the infrared, over the whole of what the picture found, dips by a good
     // part of its threshold (the picture's own detail shows no dip, once its share is
     // taken away; a speck too small to clear the threshold in infrared still does).
-    keep_parts(&mut pic, w, h, |part| part.iter().map(|&i| dip[i]).sum::<f32>() > 0.4 * t * part.len() as f32);
+    keep_parts(&mut pic, w, h, |part| {
+        part.iter().map(|&i| dip[i]).sum::<f32>() > 0.4 * t * part.len() as f32
+    });
     let found = ir_mask(&dip, w, h, t, max_size);
     pic.iter().zip(&found).map(|(a, b)| *a.max(b)).collect()
 }
@@ -661,7 +670,8 @@ fn hair_seeds(lum: &[f32], w: usize, h: usize, s: f32, max_size: f32, polarity: 
             let a = k as f32 * std::f32::consts::PI / 8.0;
             (-L..=L)
                 .map(|t| {
-                    let (dx, dy) = ((t as f32 * a.cos()).round() as isize, (t as f32 * a.sin()).round() as isize);
+                    let (dx, dy) =
+                        ((t as f32 * a.cos()).round() as isize, (t as f32 * a.sin()).round() as isize);
                     dy * hw as isize + dx
                 })
                 .collect()
@@ -689,7 +699,8 @@ fn hair_seeds(lum: &[f32], w: usize, h: usize, s: f32, max_size: f32, polarity: 
     let spread = box_blur_par(&sq, hw, hh, reach);
     let k = lerp(6.0, 3.0, s);
     // Judged at half size, where a hair's hits join up.
-    let z: Vec<f32> = (0..hw * hh).map(|i| (line[i] - level[i] - 1e-3) / spread[i].sqrt().max(1e-6)).collect();
+    let z: Vec<f32> =
+        (0..hw * hh).map(|i| (line[i] - level[i] - 1e-3) / spread[i].sqrt().max(1e-6)).collect();
     let strong: Vec<u8> = z.iter().map(|v| if *v > k { 255 } else { 0 }).collect();
     let weak: Vec<bool> = z.iter().map(|v| *v > lerp(3.5, 2.5, s)).collect();
     let mut hit = flood(&strong, &weak, hw, hh);
@@ -957,8 +968,10 @@ pub fn erase_strokes(mask: &mut [u8], w: usize, h: usize, strokes: &[super::Spot
             _ => pts.windows(2).map(|s| (s[0], s[1])).collect(),
         };
         for (a, b) in segs {
-            let (x0, x1) = ((a.0.min(b.0) - r).floor().max(0.0) as usize, ((a.0.max(b.0) + r).ceil() as usize).min(w));
-            let (y0, y1) = ((a.1.min(b.1) - r).floor().max(0.0) as usize, ((a.1.max(b.1) + r).ceil() as usize).min(h));
+            let (x0, x1) =
+                ((a.0.min(b.0) - r).floor().max(0.0) as usize, ((a.0.max(b.0) + r).ceil() as usize).min(w));
+            let (y0, y1) =
+                ((a.1.min(b.1) - r).floor().max(0.0) as usize, ((a.1.max(b.1) + r).ceil() as usize).min(h));
             let (dx, dy) = (b.0 - a.0, b.1 - a.1);
             let len2 = (dx * dx + dy * dy).max(1e-6);
             for y in y0..y1 {
@@ -1017,9 +1030,7 @@ pub fn detect_dust(lum: &[f32], w: usize, h: usize, layer: &DustLayer, ir: Optio
     let (sens, size) = (layer.sensitivity, layer.max_size);
     match (layer.source, ir) {
         (DustSource::Ir, Some(ir)) => detect_ir(&ir.pixels, lum, ir.valid.as_deref(), w, h, sens, size),
-        (DustSource::Both, Some(ir)) => {
-            detect_both(lum, &ir.pixels, ir.valid.as_deref(), w, h, layer)
-        }
+        (DustSource::Both, Some(ir)) => detect_both(lum, &ir.pixels, ir.valid.as_deref(), w, h, layer),
         _ => detect_picture_as(lum, w, h, sens, size, layer.polarity),
     }
 }
@@ -1201,7 +1212,9 @@ mod tests {
         assert_eq!(light[40 * w + 40], 0, "dark speck left");
         let dark = detect_picture_as(&lum, w, h, 50.0, 10.0, DustPolarity::Dark);
         assert_eq!((dark[40 * w + 40], dark[50 * w + 120]), (255, 0));
-        assert!(detect_picture_as(&grainy(w, h), w, h, 50.0, 10.0, DustPolarity::Light).iter().all(|m| *m == 0));
+        assert!(
+            detect_picture_as(&grainy(w, h), w, h, 50.0, 10.0, DustPolarity::Light).iter().all(|m| *m == 0)
+        );
     }
 
     #[test]

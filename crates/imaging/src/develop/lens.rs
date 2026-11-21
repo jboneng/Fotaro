@@ -207,9 +207,9 @@ impl LensCorrections {
         self.moves_pixels()
             || self.vignette_amount != 0.0
             || self.active_ca().is_some()
-            || self.active_profile().is_some_and(|p| {
-                p.tca.is_some() || (p.vignetting.is_some() && self.vignetting_amount != 0.0)
-            })
+            || self
+                .active_profile()
+                .is_some_and(|p| p.tca.is_some() || (p.vignetting.is_some() && self.vignetting_amount != 0.0))
     }
 
     /// Defringe is on.
@@ -260,7 +260,12 @@ impl LensMap {
         let diag_px = fw.hypot(fh);
         let p = l.active_profile();
         let (crop, calib_crop, calib_aspect, center) = p.map_or((1.0, 1.0, 1.5, [0.0; 2]), |p| {
-            (f64::from(p.crop.max(0.01)), f64::from(p.calib_crop.max(0.01)), f64::from(p.calib_aspect.max(1.0)), p.center)
+            (
+                f64::from(p.crop.max(0.01)),
+                f64::from(p.calib_crop.max(0.01)),
+                f64::from(p.calib_aspect.max(1.0)),
+                p.center,
+            )
         });
         let mm_per_px = full_frame_diagonal() / crop / diag_px;
         let hugin_mm = full_frame_diagonal() / calib_crop / calib_aspect.hypot(1.0) / 2.0;
@@ -359,7 +364,8 @@ impl LensMap {
         let mut g = 1.0;
         if let Some(vg) = &self.vignetting {
             let r2 = (r * self.to_vig).powi(2);
-            let c = 1.0 + f64::from(vg.k1) * r2 + f64::from(vg.k2) * r2 * r2 + f64::from(vg.k3) * r2 * r2 * r2;
+            let c =
+                1.0 + f64::from(vg.k1) * r2 + f64::from(vg.k2) * r2 * r2 + f64::from(vg.k3) * r2 * r2 * r2;
             if c > 1e-3 {
                 g *= (1.0 / c).powf(self.vignetting_amount);
             }
@@ -446,7 +452,10 @@ pub fn measure_ca(img: &super::source::WorkingImage, lens: &LensCorrections) -> 
                     if mean_g < 1e-4 || slope.abs() < 0.03 * f64::from(mean_g) {
                         continue;
                     }
-                    if [-2.0, 0.0, 2.0].iter().any(|&t| (0..3).any(|c| sample(px + ux * t, py + uy * t, c) > 0.92 * peak)) {
+                    if [-2.0, 0.0, 2.0]
+                        .iter()
+                        .any(|&t| (0..3).any(|c| sample(px + ux * t, py + uy * t, c) > 0.92 * peak))
+                    {
                         continue;
                     }
                     for (k, c) in [(0usize, 0usize), (1, 2)] {
@@ -460,7 +469,8 @@ pub fn measure_ca(img: &super::source::WorkingImage, lens: &LensCorrections) -> 
                             let a = f64::from(ch(t));
                             let b = f64::from(g(t + 1.0) - g(t - 1.0)) / 2.0;
                             let yv = f64::from(g(t));
-                            (aa, ab, bb, ay, by) = (aa + a * a, ab + a * b, bb + b * b, ay + a * yv, by + b * yv);
+                            (aa, ab, bb, ay, by) =
+                                (aa + a * a, ab + a * b, bb + b * b, ay + a * yv, by + b * yv);
                         }
                         let det = aa * bb - ab * ab;
                         if det.abs() < 1e-12 * aa * bb.max(1e-12) || aa < 1e-10 {
@@ -483,7 +493,10 @@ pub fn measure_ca(img: &super::source::WorkingImage, lens: &LensCorrections) -> 
                 }
                 s
             })
-            .reduce(|| [[0.0; 5]; 2], |a, b| std::array::from_fn(|k| std::array::from_fn(|i| a[k][i] + b[k][i])));
+            .reduce(
+                || [[0.0; 5]; 2],
+                |a, b| std::array::from_fn(|k| std::array::from_fn(|i| a[k][i] + b[k][i])),
+            );
         for (k, e) in sums.iter().enumerate() {
             let det = e[0] * e[2] - e[1] * e[1];
             if e[0] < 1e-6 || det.abs() < 1e-12 {
@@ -577,11 +590,16 @@ impl Defringe {
                 *o = col_max - col_min;
             }
         });
-        let range = |amount: f32, hue: [f32; 2], f: fn(f32) -> f32| ((amount / 20.0).clamp(0.0, 1.0), f(hue[0]), f(hue[1]));
+        let range = |amount: f32, hue: [f32; 2], f: fn(f32) -> f32| {
+            ((amount / 20.0).clamp(0.0, 1.0), f(hue[0]), f(hue[1]))
+        };
         Some(Defringe {
             contrast,
             region,
-            ranges: [range(l.purple_amount, l.purple_hue, purple_hue), range(l.green_amount, l.green_hue, green_hue)],
+            ranges: [
+                range(l.purple_amount, l.purple_hue, purple_hue),
+                range(l.green_amount, l.green_hue, green_hue),
+            ],
             to_srgb: super::matrix::to_f32(&super::matrix::work_to_srgb()),
             to_work: super::matrix::to_f32(&super::matrix::srgb_to_work()),
         })
@@ -649,7 +667,10 @@ mod tests {
     fn nothing_on_is_no_map() {
         assert!(LensMap::new(&LensCorrections::default(), 300, 200).is_none());
         // A profile without Enable, or measured CA without Remove CA, does nothing.
-        let mut l = with_profile(LensProfile { distortion: Some(Distortion::Poly3 { k1: 0.1 }), ..Default::default() });
+        let mut l = with_profile(LensProfile {
+            distortion: Some(Distortion::Poly3 { k1: 0.1 }),
+            ..Default::default()
+        });
         l.profile_enable = false;
         l.ca = Some([0.001, 0.0, -0.001, 0.0]);
         assert!(LensMap::new(&l, 300, 200).is_none());
@@ -696,7 +717,10 @@ mod tests {
 
     #[test]
     fn tca_moves_red_and_blue_only() {
-        let l = with_profile(LensProfile { tca: Some(Tca::Linear { kr: 1.001, kb: 0.999 }), ..Default::default() });
+        let l = with_profile(LensProfile {
+            tca: Some(Tca::Linear { kr: 1.001, kb: 0.999 }),
+            ..Default::default()
+        });
         let m = LensMap::new(&l, 3000, 2000).unwrap();
         let [r, g, b] = m.source_rgb(100.0, 1000.0);
         assert_eq!(g, (100.0, 1000.0));
@@ -727,7 +751,8 @@ mod tests {
         let img = super::super::source::WorkingImage::for_tests(pixels);
         let ca = measure_ca(&img, &LensCorrections::default());
         // A constant scale: s close to k − 1, little r² term.
-        let (red, blue) = (f64::from(ca[0]) + f64::from(ca[1]) * 0.5, f64::from(ca[2]) + f64::from(ca[3]) * 0.5);
+        let (red, blue) =
+            (f64::from(ca[0]) + f64::from(ca[1]) * 0.5, f64::from(ca[2]) + f64::from(ca[3]) * 0.5);
         assert!((red - 0.002).abs() < 0.0003, "{ca:?}");
         assert!((blue + 0.0015).abs() < 0.0003, "{ca:?}");
         // And applying it lines the channels up: red's source at a corner point is green's
@@ -753,7 +778,10 @@ mod tests {
         let purple = super::super::matrix::apply(&to_work, [0.35, 0.1, 0.5]);
         let chroma = |c: [f32; 3]| {
             let to_srgb = super::super::matrix::to_f32(&super::super::matrix::work_to_srgb());
-            super::super::hsl::hue_chroma(super::super::hsl::srgb_to_oklab(super::super::matrix::apply(&to_srgb, c))).1
+            super::super::hsl::hue_chroma(super::super::hsl::srgb_to_oklab(super::super::matrix::apply(
+                &to_srgb, c,
+            )))
+            .1
         };
         let at_edge = f.apply(purple, 50, 20);
         let flat = f.apply(purple, 10, 20);

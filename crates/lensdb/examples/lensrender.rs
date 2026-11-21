@@ -17,10 +17,15 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("usage: lensrender <db dir> <photo> <out dir> [lens name]");
     };
     let path = Path::new(photo);
-    let raw = path.extension().is_some_and(|e| ["nef", "dng", "cr2", "arw"].iter().any(|x| e.eq_ignore_ascii_case(x)));
+    let raw = path
+        .extension()
+        .is_some_and(|e| ["nef", "dng", "cr2", "arw"].iter().any(|x| e.eq_ignore_ascii_case(x)));
     let kind = if raw { SourceKind::Raw } else { SourceKind::Image };
     let meta = imaging::read_metadata(path, kind)?;
-    println!("camera {:?} {:?}, lens {:?}, {:?} mm f/{:?}", meta.make, meta.model, meta.lens, meta.focal_len, meta.aperture);
+    println!(
+        "camera {:?} {:?}, lens {:?}, {:?} mm f/{:?}",
+        meta.make, meta.model, meta.lens, meta.focal_len, meta.aperture
+    );
     let db = lensdb::Database::load(Path::new(dir))?;
     let photo_lens = lensdb::PhotoLens {
         camera_maker: meta.make.clone().unwrap_or_default(),
@@ -56,7 +61,10 @@ fn main() -> anyhow::Result<()> {
     let t = std::time::Instant::now();
     let ca_before = measure_ca(&img, &LensCorrections::default());
     let ca_after_profile = measure_ca(&img, &prof);
-    println!("CA measured on the photo: {ca_before:?}; left after the profile: {ca_after_profile:?} ({:?})", t.elapsed());
+    println!(
+        "CA measured on the photo: {ca_before:?}; left after the profile: {ca_after_profile:?} ({:?})",
+        t.elapsed()
+    );
     let all = LensCorrections { remove_ca: true, ca: Some(ca_after_profile), ..prof.clone() };
     for (name, l) in [("off", LensCorrections::default()), ("profile", prof), ("all", all)] {
         let t = std::time::Instant::now();
@@ -67,7 +75,13 @@ fn main() -> anyhow::Result<()> {
         let (shown, _) = WorkingImage::load(&p, SourceKind::Image, None)?;
         let c = measure_ca(&shown, &LensCorrections::default());
         let corner = |s: f32, q: f32| (s + q) * 0.5 * (2560f32.hypot(1707.0));
-        println!("{name}: {:?} -> {}; CA left at the corners: red {:+.2} px, blue {:+.2} px", t.elapsed(), p.display(), corner(c[0], c[1]), corner(c[2], c[3]));
+        println!(
+            "{name}: {:?} -> {}; CA left at the corners: red {:+.2} px, blue {:+.2} px",
+            t.elapsed(),
+            p.display(),
+            corner(c[0], c[1]),
+            corner(c[2], c[3])
+        );
     }
     Ok(())
 }

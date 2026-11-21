@@ -165,7 +165,13 @@ impl LensState {
     }
 
     /// `lens` resolved for the photo (focal, aperture from it; else `focal` / `aperture`).
-    pub fn resolve_for(&self, db: &lensdb::Database, lens: &lensdb::Lens, focal: Option<f32>, aperture: Option<f32>) -> LensProfile {
+    pub fn resolve_for(
+        &self,
+        db: &lensdb::Database,
+        lens: &lensdb::Lens,
+        focal: Option<f32>,
+        aperture: Option<f32>,
+    ) -> LensProfile {
         let (crop, camera) = self.camera(db);
         let p = self.photo.clone().unwrap_or_default();
         let focal = p.lens.focal.or(focal).unwrap_or(lens.min_focal);
@@ -181,7 +187,9 @@ impl LensState {
         match l.setup {
             LensSetup::Custom => {
                 let current = l.profile.as_ref()?;
-                let Some(lens) = db.lenses.iter().find(|x| x.model == current.lens && x.maker == current.maker) else {
+                let Some(lens) =
+                    db.lenses.iter().find(|x| x.model == current.lens && x.maker == current.maker)
+                else {
                     self.status = format!("{} (not in this lens database)", current.lens);
                     return l.profile.clone();
                 };

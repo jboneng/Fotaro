@@ -8,8 +8,8 @@ use super::dust::DustLayer;
 use super::effects::{EffectParam, Effects};
 use super::grading::{ColorGrading, GradeParam, GradeWheel};
 use super::heal::Spot;
-use super::lut::LutProfile;
 use super::hsl::{COLORS, Hsl, HslGroup};
+use super::lut::LutProfile;
 use super::masks::{Component, LocalParam, Mask, Shape};
 use super::transform::{Transform, TransformParam};
 
@@ -561,45 +561,47 @@ impl DevelopSettings {
     }
 
     /// A History label for a Lens Corrections change.
-fn describe_lens(l: &super::lens::LensCorrections, o: &super::lens::LensCorrections) -> String {
-    let on = |b: bool| if b { "On" } else { "Off" };
-    if l.profile_enable != o.profile_enable {
-        return format!("Lens Profile Corrections: {}", on(l.profile_enable));
-    }
-    if l.profile != o.profile {
-        return match &l.profile {
-            Some(p) if o.profile.as_ref().is_none_or(|q| q.lens != p.lens) => format!("Lens Profile: {}", p.lens),
-            _ => "Lens Profile".into(),
-        };
-    }
-    if l.remove_ca != o.remove_ca {
-        return format!("Remove Chromatic Aberration: {}", on(l.remove_ca));
-    }
-    let pairs: [(&str, f32, f32); 8] = [
-        ("Lens Profile Distortion", l.distortion_amount, o.distortion_amount),
-        ("Lens Profile Vignetting", l.vignetting_amount, o.vignetting_amount),
-        ("Lens Distortion", l.distortion, o.distortion),
-        ("Lens Vignetting", l.vignette_amount, o.vignette_amount),
-        ("Lens Vignetting Midpoint", l.vignette_midpoint, o.vignette_midpoint),
-        ("Defringe Purple Amount", l.purple_amount, o.purple_amount),
-        ("Defringe Green Amount", l.green_amount, o.green_amount),
-        ("", 0.0, 0.0),
-    ];
-    for (name, a, b) in pairs {
-        if a != b && !name.is_empty() {
-            return format!("{name} {a:+.0}");
+    fn describe_lens(l: &super::lens::LensCorrections, o: &super::lens::LensCorrections) -> String {
+        let on = |b: bool| if b { "On" } else { "Off" };
+        if l.profile_enable != o.profile_enable {
+            return format!("Lens Profile Corrections: {}", on(l.profile_enable));
         }
+        if l.profile != o.profile {
+            return match &l.profile {
+                Some(p) if o.profile.as_ref().is_none_or(|q| q.lens != p.lens) => {
+                    format!("Lens Profile: {}", p.lens)
+                }
+                _ => "Lens Profile".into(),
+            };
+        }
+        if l.remove_ca != o.remove_ca {
+            return format!("Remove Chromatic Aberration: {}", on(l.remove_ca));
+        }
+        let pairs: [(&str, f32, f32); 8] = [
+            ("Lens Profile Distortion", l.distortion_amount, o.distortion_amount),
+            ("Lens Profile Vignetting", l.vignetting_amount, o.vignetting_amount),
+            ("Lens Distortion", l.distortion, o.distortion),
+            ("Lens Vignetting", l.vignette_amount, o.vignette_amount),
+            ("Lens Vignetting Midpoint", l.vignette_midpoint, o.vignette_midpoint),
+            ("Defringe Purple Amount", l.purple_amount, o.purple_amount),
+            ("Defringe Green Amount", l.green_amount, o.green_amount),
+            ("", 0.0, 0.0),
+        ];
+        for (name, a, b) in pairs {
+            if a != b && !name.is_empty() {
+                return format!("{name} {a:+.0}");
+            }
+        }
+        if l.purple_hue != o.purple_hue {
+            return "Defringe Purple Hue".into();
+        }
+        if l.green_hue != o.green_hue {
+            return "Defringe Green Hue".into();
+        }
+        "Lens Corrections".into()
     }
-    if l.purple_hue != o.purple_hue {
-        return "Defringe Purple Hue".into();
-    }
-    if l.green_hue != o.green_hue {
-        return "Defringe Green Hue".into();
-    }
-    "Lens Corrections".into()
-}
 
-/// A History panel label for the change from `old` to `self`, LrC style
+    /// A History panel label for the change from `old` to `self`, LrC style
     /// ("Exposure +0.35", "White Balance: Tungsten", "Treatment: Black & White").
     pub fn describe_change(&self, old: &DevelopSettings, kelvin: bool) -> String {
         if self.treatment != old.treatment {

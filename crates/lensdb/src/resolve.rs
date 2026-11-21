@@ -15,7 +15,10 @@ fn hermite(y1: Option<f64>, y2: f64, y3: f64, y4: Option<f64>, t: f64) -> f64 {
     let tg2 = y1.map_or(y3 - y2, |y1| (y3 - y1) * 0.5);
     let tg3 = y4.map_or(y3 - y2, |y4| (y4 - y2) * 0.5);
     let (t2, t3) = (t * t, t * t * t);
-    (2.0 * t3 - 3.0 * t2 + 1.0) * y2 + (t3 - 2.0 * t2 + t) * tg2 + (-2.0 * t3 + 3.0 * t2) * y3 + (t3 - t2) * tg3
+    (2.0 * t3 - 3.0 * t2 + 1.0) * y2
+        + (t3 - 2.0 * t2 + t) * tg2
+        + (-2.0 * t3 + 3.0 * t2) * y3
+        + (t3 - t2) * tg3
 }
 
 /// Interpolate terms given at focal lengths to `focal`. `scaled[i]`: term i falls off as
@@ -94,7 +97,13 @@ fn calibration(lens: &Lens, crop: f32, has: impl Fn(&Calibration) -> bool) -> Op
         .map(|(_, c)| c)
 }
 
-fn vignetting(lens: &Lens, cal: &Calibration, focal: f32, aperture: f32, distance: f32) -> Option<Vignetting> {
+fn vignetting(
+    lens: &Lens,
+    cal: &Calibration,
+    focal: f32,
+    aperture: f32,
+    distance: f32,
+) -> Option<Vignetting> {
     let span = lens.max_focal - lens.min_focal;
     let norm = |f: f32| if span != 0.0 { (f - lens.min_focal) / span } else { f - lens.min_focal };
     let dist = |v: &crate::VignettingAt| {
@@ -125,7 +134,14 @@ fn vignetting(lens: &Lens, cal: &Calibration, focal: f32, aperture: f32, distanc
 
 /// `lens`'s corrections for a photo of crop factor `crop` taken at `focal` (mm),
 /// `aperture` (f-number) and `distance` (m); `camera` is shown only.
-pub fn resolve(lens: &Lens, camera: &str, crop: f32, focal: f32, aperture: f32, distance: f32) -> LensProfile {
+pub fn resolve(
+    lens: &Lens,
+    camera: &str,
+    crop: f32,
+    focal: f32,
+    aperture: f32,
+    distance: f32,
+) -> LensProfile {
     let focal = focal.clamp(lens.min_focal.min(lens.max_focal), lens.max_focal.max(lens.min_focal));
     let dcal = calibration(lens, crop, |c| !c.distortion.is_empty());
     let distortion = dcal.and_then(|c| {
@@ -192,7 +208,9 @@ mod tests {
     fn between_points_the_terms_interpolate() {
         let db = crate::Database::from_xml(FIXTURE).unwrap();
         let z = &db.lenses[0];
-        let Some(Distortion::Ptlens { a, .. }) = resolve(z, "", 1.0, 30.0, 2.8, 1000.0).distortion else { panic!() };
+        let Some(Distortion::Ptlens { a, .. }) = resolve(z, "", 1.0, 30.0, 2.8, 1000.0).distortion else {
+            panic!()
+        };
         // Between 24 (a·f = 0.345) and 35 (0.366), divided by 30.
         assert!(a > 0.0099 && a < 0.0122, "{a}");
         // Beyond the range: clamped to the lens's focal lengths.

@@ -7,7 +7,7 @@ use imaging::PreviewSize;
 
 use super::panels::Side;
 use super::theme;
-use crate::app::{Command, FieldValue, MetadataPreset, FotaroApp, View, ZoomLevel};
+use crate::app::{Command, FieldValue, FotaroApp, MetadataPreset, View, ZoomLevel};
 use crate::platform;
 use catalog::IptcField;
 

@@ -1460,10 +1460,12 @@ fn a_point_map_maps_like_the_transform() {
     let map = t.point_map(w, h);
     let points: Vec<(f32, f32)> = (0..25).map(|i| ((i % 5) as f32 / 4.0, (i / 5) as f32 / 4.0)).collect();
     let started = std::time::Instant::now();
-    let each: Vec<_> = points.iter().map(|&(x, y)| (t.output_point(x, y, w, h), t.source_point(x, y, w, h))).collect();
+    let each: Vec<_> =
+        points.iter().map(|&(x, y)| (t.output_point(x, y, w, h), t.source_point(x, y, w, h))).collect();
     let one_by_one = started.elapsed();
     let started = std::time::Instant::now();
-    let mapped: Vec<_> = points.iter().map(|&(x, y)| (map.output_point(x, y), map.source_point(x, y))).collect();
+    let mapped: Vec<_> =
+        points.iter().map(|&(x, y)| (map.output_point(x, y), map.source_point(x, y))).collect();
     println!("25 points: {one_by_one:.1?} one by one, {:.1?} through a point map", started.elapsed());
     assert_eq!(each, mapped);
     // Nothing to do: points stay where they are.

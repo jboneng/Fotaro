@@ -93,7 +93,9 @@ pub struct Lens {
 
 impl Lens {
     pub fn has_corrections(&self) -> bool {
-        self.calibrations.iter().any(|c| !c.distortion.is_empty() || !c.tca.is_empty() || !c.vignetting.is_empty())
+        self.calibrations
+            .iter()
+            .any(|c| !c.distortion.is_empty() || !c.tca.is_empty() || !c.vignetting.is_empty())
     }
 
     pub fn is_zoom(&self) -> bool {
@@ -125,7 +127,8 @@ impl Database {
             let text = std::fs::read_to_string(&f)?;
             xml::read_into(&text, &mut db).map_err(|e| anyhow::anyhow!("{}: {e}", f.display()))?;
         }
-        db.timestamp = std::fs::read_to_string(dir.join("timestamp.txt")).ok().and_then(|t| t.trim().parse().ok());
+        db.timestamp =
+            std::fs::read_to_string(dir.join("timestamp.txt")).ok().and_then(|t| t.trim().parse().ok());
         Ok(db)
     }
 

@@ -39,8 +39,8 @@ pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use groups::{SettingsGroup, changed_groups, copy_groups};
 pub use heal::{
-    Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input, prepare_area,
-    find_source,
+    Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input,
+    find_source, prepare_area,
 };
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use lens::{

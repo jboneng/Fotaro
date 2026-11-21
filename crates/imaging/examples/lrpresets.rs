@@ -13,7 +13,10 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
         let p = e.path();
         if p.is_dir() {
             files(&p, out);
-        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xmp") || x.eq_ignore_ascii_case("lrtemplate")) {
+        } else if p
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("xmp") || x.eq_ignore_ascii_case("lrtemplate"))
+        {
             out.push(p);
         }
     }
@@ -73,7 +76,10 @@ fn main() {
             Err(e) => *errors.entry(e).or_default() += 1,
         }
     }
-    println!("\n{} files: {presets} presets ({partial} with unsupported parts), {profiles} profiles", all.len());
+    println!(
+        "\n{} files: {presets} presets ({partial} with unsupported parts), {profiles} profiles",
+        all.len()
+    );
     println!("groups set: {groups:?}");
     println!("unsupported: {kinds:?}");
     println!("errors: {errors:?}");

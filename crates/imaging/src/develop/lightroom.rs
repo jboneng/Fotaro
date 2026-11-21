@@ -67,8 +67,10 @@ impl LrValue {
         if nums.len() < 4 || !nums.len().is_multiple_of(2) {
             return None;
         }
-        let mut pts: Vec<[f32; 2]> =
-            nums.chunks(2).map(|p| [(p[0] / 255.0).clamp(0.0, 1.0), (p[1] / 255.0).clamp(0.0, 1.0)]).collect();
+        let mut pts: Vec<[f32; 2]> = nums
+            .chunks(2)
+            .map(|p| [(p[0] / 255.0).clamp(0.0, 1.0), (p[1] / 255.0).clamp(0.0, 1.0)])
+            .collect();
         pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
         let straight = pts.iter().all(|p| (p[0] - p[1]).abs() < 1e-6);
         Some(if straight { Vec::new() } else { pts })
@@ -131,7 +133,9 @@ pub fn read_lrtemplate(text: &str) -> Result<LrPreset, String> {
     let field = |t: &[(String, LrValue)], k: &str| t.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     let name = field(&top, "title").or_else(|| field(&top, "internalName"));
     let name = name.as_ref().and_then(LrValue::text).map(zstr).unwrap_or_default();
-    let Some(LrValue::Table(value)) = field(&top, "value") else { return Err("no settings in the template".into()) };
+    let Some(LrValue::Table(value)) = field(&top, "value") else {
+        return Err("no settings in the template".into());
+    };
     let Some(LrValue::Table(settings)) = field(&value, "settings") else {
         return Err("not a develop preset (no settings)".into());
     };
@@ -391,9 +395,25 @@ fn kind(key: &str) -> String {
         "PerspectiveUpright",
     ]) {
         "Lens Corrections".into()
-    } else if starts(&["ShadowTint", "RedHue", "RedSaturation", "GreenHue", "GreenSaturation", "BlueHue", "BlueSaturation"]) {
+    } else if starts(&[
+        "ShadowTint",
+        "RedHue",
+        "RedSaturation",
+        "GreenHue",
+        "GreenSaturation",
+        "BlueHue",
+        "BlueSaturation",
+    ]) {
         "Calibration".into()
-    } else if starts(&["MaskGroup", "Gradient", "CircularGradient", "PaintBased", "RetouchInfo", "RedEye", "RetouchAreas"]) {
+    } else if starts(&[
+        "MaskGroup",
+        "Gradient",
+        "CircularGradient",
+        "PaintBased",
+        "RetouchInfo",
+        "RedEye",
+        "RetouchAreas",
+    ]) {
         "Local adjustments".into()
     } else if [
         "Exposure",
@@ -431,7 +451,16 @@ fn kind(key: &str) -> String {
 fn default_profile(key: &str, v: &LrValue) -> bool {
     let default = |s: &str| {
         let n = s.strip_prefix("Name=").unwrap_or(s);
-        matches!(n, "Adobe Color" | "Adobe Standard" | "Embedded" | "Default Color" | "Default Profile" | "Default Monochrome" | "Adobe Monochrome")
+        matches!(
+            n,
+            "Adobe Color"
+                | "Adobe Standard"
+                | "Embedded"
+                | "Default Color"
+                | "Default Profile"
+                | "Default Monochrome"
+                | "Adobe Monochrome"
+        )
     };
     match (key, v) {
         ("CameraProfile" | "ProfileName", LrValue::Str(s)) => default(s),
@@ -450,7 +479,9 @@ fn monochrome(v: &LrValue) -> bool {
     };
     match v {
         LrValue::Str(s) => named(s),
-        LrValue::List(items) => items.iter().any(|i| matches!(i, LrValue::Str(s) if s.starts_with("Name=") && named(s))),
+        LrValue::List(items) => {
+            items.iter().any(|i| matches!(i, LrValue::Str(s) if s.starts_with("Name=") && named(s)))
+        }
         _ => false,
     }
 }
@@ -630,9 +661,8 @@ pub fn apply_lightroom(values: &[(String, LrValue)], s: &mut DevelopSettings, ra
             continue;
         }
         // The 8-colour sliders.
-        let colour = |prefix: &str| {
-            key.strip_prefix(prefix).and_then(|c| COLORS.iter().position(|n| *n == c))
-        };
+        let colour =
+            |prefix: &str| key.strip_prefix(prefix).and_then(|c| COLORS.iter().position(|n| *n == c));
         if let Some(n) = n {
             if let Some(i) = colour("HueAdjustment") {
                 s.hsl.hue[i] = n;
@@ -792,13 +822,26 @@ mod tests {
         assert_eq!(s.effects.vignette_style, VignetteStyle::PaintOverlay);
         assert_eq!(s.effects.vignette_amount, -15.0);
         assert_eq!(s.effects.grain_roughness, 60.0);
-        assert_eq!(s.curve.rgb, vec![[0.0, 20.0 / 255.0], [128.0 / 255.0, 128.0 / 255.0], [1.0, 240.0 / 255.0]]);
+        assert_eq!(
+            s.curve.rgb,
+            vec![[0.0, 20.0 / 255.0], [128.0 / 255.0, 128.0 / 255.0], [1.0, 240.0 / 255.0]]
+        );
         // A straight red curve is no curve.
         assert!(s.curve.red.is_empty());
         use SettingsGroup as G;
         assert_eq!(
             sum.groups,
-            vec![G::Treatment, G::WhiteBalance, G::BasicTone, G::ToneCurve, G::Hsl, G::ColorGrading, G::Vignette, G::Grain, G::LensProfile]
+            vec![
+                G::Treatment,
+                G::WhiteBalance,
+                G::BasicTone,
+                G::ToneCurve,
+                G::Hsl,
+                G::ColorGrading,
+                G::Vignette,
+                G::Grain,
+                G::LensProfile
+            ]
         );
         // The lens profile is found for each photo; the camera profile can't come; Red Hue 0 is no loss.
         assert!(s.transform.lens.profile_enable);
@@ -817,7 +860,10 @@ mod tests {
                 ("ConvertToGrayscale".to_string(), LrValue::Bool(false)),
                 (
                     "Look".to_string(),
-                    LrValue::List(vec![LrValue::Str(format!("Name={name}")), LrValue::Str("Amount=1.2".into())]),
+                    LrValue::List(vec![
+                        LrValue::Str(format!("Name={name}")),
+                        LrValue::Str("Amount=1.2".into()),
+                    ]),
                 ),
                 ("Contrast2012".to_string(), LrValue::Num(10.0)),
             ]
@@ -831,7 +877,8 @@ mod tests {
         let sum = apply_lightroom(&look("Modern 04"), &mut s, true);
         assert_eq!((s.treatment, sum.unsupported.len()), (Treatment::Color, 1));
         let mut s = DevelopSettings::default();
-        let sum = apply_lightroom(&[("CameraProfile".into(), LrValue::Str("Default Color".into()))], &mut s, true);
+        let sum =
+            apply_lightroom(&[("CameraProfile".into(), LrValue::Str("Default Color".into()))], &mut s, true);
         assert!(sum.unsupported.is_empty() && sum.groups.is_empty());
     }
 
@@ -873,7 +920,10 @@ mod tests {
         assert_eq!(s.treatment, Treatment::BlackAndWhite);
         assert_eq!(s.bw_mix[5], -30.0);
         assert_eq!(s.curve.rgb, vec![[0.0, 10.0 / 255.0], [1.0, 250.0 / 255.0]]);
-        assert_eq!(sum.unsupported, vec!["Calibration".to_string(), "Older (2010) process sliders".to_string()]);
+        assert_eq!(
+            sum.unsupported,
+            vec!["Calibration".to_string(), "Older (2010) process sliders".to_string()]
+        );
         assert!(read_lrtemplate("s = { title = \"x\" }").is_err());
         assert!(read_lrtemplate("hello").is_err());
     }

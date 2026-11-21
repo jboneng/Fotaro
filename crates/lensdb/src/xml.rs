@@ -103,7 +103,8 @@ pub(crate) fn read_into(text: &str, db: &mut Database) -> Result<()> {
     let root = doc.kids("lensdatabase").next().context("not a Lensfun database (no <lensdatabase>)")?;
     for m in root.kids("mount") {
         if let Some(name) = m.child_text("name") {
-            db.mounts.push(Mount { name, compat: m.kids("compat").map(|c| c.text.trim().to_string()).collect() });
+            db.mounts
+                .push(Mount { name, compat: m.kids("compat").map(|c| c.text.trim().to_string()).collect() });
         }
     }
     for c in root.kids("camera") {
@@ -144,7 +145,8 @@ fn read_lens(l: &El) -> Option<Lens> {
         Some(t) if t.starts_with("fisheye") => LensType::Fisheye,
         Some(_) => LensType::Other,
     };
-    let center = l.kids("center").next().map_or([0.0; 2], |c| [c.num("x").unwrap_or(0.0), c.num("y").unwrap_or(0.0)]);
+    let center =
+        l.kids("center").next().map_or([0.0; 2], |c| [c.num("x").unwrap_or(0.0), c.num("y").unwrap_or(0.0)]);
     // Focal and aperture ranges: given, else read from the name ("24-70mm f/2.8").
     let parsed = crate::matching::parse_name(&model);
     let (mut min_focal, mut max_focal) = parsed.map_or((0.0, 0.0), |p| (p.min_focal, p.max_focal));
@@ -156,7 +158,8 @@ fn read_lens(l: &El) -> Option<Lens> {
             (min_focal, max_focal) = (a, b);
         }
     }
-    let (mut min_aperture, mut max_aperture) = parsed.map_or((0.0, 0.0), |p| (p.min_aperture, p.max_aperture));
+    let (mut min_aperture, mut max_aperture) =
+        parsed.map_or((0.0, 0.0), |p| (p.min_aperture, p.max_aperture));
     if let Some(a) = l.kids("aperture").next()
         && let Some(v) = a.num("min")
     {
@@ -309,7 +312,10 @@ mod tests {
         assert_eq!(db.mounts.len(), 1);
         assert_eq!(db.compatible_mounts("Nikon F AF"), ["Nikon F AF", "Nikon F", "Nikon F AI"]);
         assert_eq!(db.cameras.len(), 2);
-        assert_eq!((db.cameras[0].maker.as_str(), db.cameras[0].model.as_str()), ("Nikon Corporation", "Nikon D750"));
+        assert_eq!(
+            (db.cameras[0].maker.as_str(), db.cameras[0].model.as_str()),
+            ("Nikon Corporation", "Nikon D750")
+        );
         assert_eq!(db.cameras[0].names, ["D750"]);
         assert_eq!(db.lenses.len(), 4);
         let z = &db.lenses[0];

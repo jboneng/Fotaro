@@ -27,9 +27,12 @@ fn main() -> anyhow::Result<()> {
         eprintln!();
     }
     let started = std::time::Instant::now();
-    let (map, device) = segment::scratches(&gray, w, h, scale, true, &|share| eprint!("\r{:.0}%  ", share * 100.0))?;
+    let (map, device) =
+        segment::scratches(&gray, w, h, scale, true, &|share| eprint!("\r{:.0}%  ", share * 100.0))?;
     eprintln!();
     println!("{w}×{h} at scale {scale} on {} in {:.1?}", device.label(), started.elapsed());
-    image::GrayImage::from_raw(w as u32, h as u32, map).ok_or_else(|| anyhow::anyhow!("map size"))?.save(out)?;
+    image::GrayImage::from_raw(w as u32, h as u32, map)
+        .ok_or_else(|| anyhow::anyhow!("map size"))?
+        .save(out)?;
     Ok(())
 }

@@ -9,7 +9,9 @@ use imaging::develop::{LensCorrections, lens_correction_at};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [dir, reference] = args.as_slice() else { anyhow::bail!("usage: lenscompare <db dir> <reference.json>") };
+    let [dir, reference] = args.as_slice() else {
+        anyhow::bail!("usage: lenscompare <db dir> <reference.json>")
+    };
     let db = lensdb::Database::load(std::path::Path::new(dir))?;
     println!("{} cameras, {} lenses", db.cameras.len(), db.lenses.len());
     let refs: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(reference)?)?;
@@ -41,7 +43,14 @@ fn main() -> anyhow::Result<()> {
             g = g.max((pts[1].0 - 0.5 - gx).abs().max((pts[1].1 - 0.5 - gy).abs()));
             let (tpts, gain) = lens_correction_at(&lc_tca, w, h, x + 0.5, y + 0.5);
             if verbose {
-                println!("  {x},{y}: ours geo ({:.3}, {:.3}) ref ({:.3}, {:.3}); gain {gain:.4} ref {:.4}", pts[1].0 - 0.5, pts[1].1 - 0.5, geo[0], geo[1], p["vig"][1].as_f64().unwrap_or(0.0));
+                println!(
+                    "  {x},{y}: ours geo ({:.3}, {:.3}) ref ({:.3}, {:.3}); gain {gain:.4} ref {:.4}",
+                    pts[1].0 - 0.5,
+                    pts[1].1 - 0.5,
+                    geo[0],
+                    geo[1],
+                    p["vig"][1].as_f64().unwrap_or(0.0)
+                );
             }
             for (c, pt) in tpts.iter().enumerate() {
                 let sx = p["sub"][c][0].as_f64().unwrap_or(0.0);
@@ -59,6 +68,9 @@ fn main() -> anyhow::Result<()> {
         );
         (worst_geo, worst_sub, worst_vig) = (worst_geo.max(g), worst_sub.max(s), worst_vig.max(v));
     }
-    println!("worst: geometry {worst_geo:.3} px, per channel {worst_sub:.3} px, vignetting {:.2} %", worst_vig * 100.0);
+    println!(
+        "worst: geometry {worst_geo:.3} px, per channel {worst_sub:.3} px, vignetting {:.2} %",
+        worst_vig * 100.0
+    );
     Ok(())
 }

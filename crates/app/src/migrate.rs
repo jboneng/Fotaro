@@ -13,7 +13,9 @@ const OLD_SETTINGS_NAME: &str = "Photo Library";
 pub fn move_old_folders() {
     let mut moves = Vec::new();
     // The window's settings (last catalog, panels, preferences), kept by eframe.
-    if let (Some(old), Some(new)) = (eframe::storage_dir(OLD_SETTINGS_NAME), eframe::storage_dir(crate::APP_NAME)) {
+    if let (Some(old), Some(new)) =
+        (eframe::storage_dir(OLD_SETTINGS_NAME), eframe::storage_dir(crate::APP_NAME))
+    {
         moves.push((old, new));
     }
     // Presets, LUTs and the lens database; and the AI models (the local data folder).
@@ -50,7 +52,11 @@ fn move_contents(old: &Path, new: &Path) {
         if std::fs::rename(&from, &to).is_err() {
             match copy_all(&from, &to) {
                 Ok(()) => {
-                    let _ = if from.is_dir() { std::fs::remove_dir_all(&from) } else { std::fs::remove_file(&from) };
+                    let _ = if from.is_dir() {
+                        std::fs::remove_dir_all(&from)
+                    } else {
+                        std::fs::remove_file(&from)
+                    };
                 }
                 Err(e) => log::warn!("can't move {} to {}: {e}", from.display(), to.display()),
             }
