@@ -2538,7 +2538,7 @@ impl FotaroApp {
                 }
             }
             Command::OpenImport(mode) => {
-                let prefs_source = self.ui.import.last_source.clone().filter(|p| p.is_dir());
+                let last_source = self.ui.import.last_source.clone();
                 let Some(s) = &mut self.session else {
                     self.notify("Open or create a catalog first");
                     return;
@@ -2553,12 +2553,9 @@ impl FotaroApp {
                 {
                     self.ui.import.settings.destination = pictures;
                 }
-                s.import = Some(crate::import::ImportDialog::new());
-                // Without a card, start from the last source (the dialog switches to a
-                // card when one shows up in the device list).
-                if let Some(src) = prefs_source {
-                    self.execute(ctx, Command::ImportSource(src));
-                }
+                // The dialog starts from the last source once a background check finds
+                // it still there (see `ui::import::source_panel`).
+                s.import = Some(crate::import::ImportDialog::new(ctx, last_source));
             }
             Command::ImportSource(path) => {
                 let recursive = self.ui.import.include_subfolders;
@@ -2581,12 +2578,14 @@ impl FotaroApp {
                 }
                 self.ui.import.last_source = d.source.clone();
                 let n = chosen.len();
-                s.jobs.submit_normal(Job::Import { chosen, settings: prefs.effective() });
+                s.jobs.drop_import_thumbs();
+                s.jobs.start_import(chosen, prefs.effective());
                 self.notify(format!("Importing {n} photo{}", if n == 1 { "" } else { "s" }));
             }
             Command::CloseImport => {
                 if let Some(s) = &mut self.session {
                     s.import = None;
+                    s.jobs.drop_import_thumbs();
                 }
             }
             Command::CancelImport => {

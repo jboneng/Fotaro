@@ -283,6 +283,17 @@ struct Lanes {
 }
 
 impl Lanes {
+    fn drop_import_thumbs(&mut self) {
+        let Lanes { visible, keys, .. } = self;
+        visible.retain(|job| {
+            let thumb = matches!(job, Job::ImportThumb { .. });
+            if thumb && let Some(k) = job.key() {
+                keys.remove(&k);
+            }
+            !thumb
+        });
+    }
+
     /// Next job for a worker; `background` says whether this worker may take bulk work.
     fn pop(&mut self, background: bool) -> Option<Job> {
         let job = self
@@ -401,6 +412,21 @@ impl JobSystem {
     /// Stop the running export after the photos being written.
     pub fn cancel_export(&self) {
         self.shared.progress.export_cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Start an import. Its progress shows at once, also while it waits for a worker.
+    pub fn start_import(&self, chosen: Vec<catalog::Candidate>, settings: catalog::ImportSettings) {
+        let p = &self.shared.progress;
+        p.import_cancel.store(false, Ordering::Relaxed);
+        *p.import.lock().unwrap() = Some((0, chosen.len()));
+        self.submit(Job::Import { chosen, settings }, Lane::Normal);
+    }
+
+    /// Forget the Import dialog's thumbnails still waiting (the dialog has closed). Each
+    /// can take a second or more on a network share, and they would run before the
+    /// import itself.
+    pub fn drop_import_thumbs(&self) {
+        self.shared.lanes.lock().unwrap().drop_import_thumbs();
     }
 
     pub fn submit_import_thumb(&self, job: Job) {
@@ -662,7 +688,8 @@ fn run(shared: &Shared, cat: &mut Catalog, job: Job) {
         }
         Job::Import { chosen, settings } => {
             let p = &shared.progress;
-            p.import_cancel.store(false, Ordering::Relaxed);
+            // `import_cancel` was cleared by `start_import`: a Stop clicked while the
+            // import waited for a worker still counts.
             *p.import.lock().unwrap() = Some((0, chosen.len()));
             let started = std::time::Instant::now();
             let reader = |path: &std::path::Path, kind: FileKind| {
@@ -1053,6 +1080,22 @@ mod tests {
             })
             .collect();
         assert_eq!(order, ["load3", "load2", "sync", "build1"]);
+    }
+
+    #[test]
+    fn closing_the_import_dialog_drops_its_waiting_thumbnails() {
+        let mut lanes = Lanes::default();
+        let thumb = |key| Job::ImportThumb { key, path: PathBuf::from("x.tif"), kind: FileKind::Image };
+        for job in [thumb(1), Job::Load { photo: photo(2), size: PreviewSize::Thumb }, thumb(3)] {
+            lanes.keys.extend(job.key());
+            lanes.visible.push_back(job);
+        }
+        lanes.normal.push_back(Job::Sync { root: PathBuf::from("x") });
+        lanes.drop_import_thumbs();
+        assert!(matches!(lanes.pop(true), Some(Job::Load { .. })));
+        assert!(matches!(lanes.pop(true), Some(Job::Sync { .. })));
+        assert!(lanes.pop(true).is_none());
+        assert!(lanes.keys.is_empty(), "a dropped thumbnail can be asked for again");
     }
 
     #[test]

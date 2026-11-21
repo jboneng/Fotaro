@@ -124,6 +124,40 @@ pub fn caps_lock_on() -> bool {
     }
 }
 
+/// A folder picker that is open (or has just closed); see [`pick_folder`].
+pub struct FolderPick(std::sync::mpsc::Receiver<Option<PathBuf>>);
+
+impl FolderPick {
+    /// `None` while the picker is still open; then the chosen folder, if any.
+    pub fn poll(&self) -> Option<Option<PathBuf>> {
+        match self.0.try_recv() {
+            Ok(choice) => Some(choice),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+        }
+    }
+}
+
+/// Open the system folder picker without blocking the window. On Linux the picker is a
+/// separate program (the desktop portal), and the window must keep answering the
+/// compositor while it is open: browsing a slow network share can take a while, and a
+/// window that stops answering gets the "close or wait" prompt. Elsewhere the picker
+/// must run on the main thread, so it is modal there as before.
+pub fn pick_folder(ctx: &eframe::egui::Context, title: &str) -> FolderPick {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dialog = rfd::FileDialog::new().set_title(title);
+    if cfg!(target_os = "linux") {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(dialog.pick_folder());
+            ctx.request_repaint();
+        });
+    } else {
+        let _ = tx.send(dialog.pick_folder());
+    }
+    FolderPick(rx)
+}
+
 /// A drive or mounted volume offered as an import source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Volume {

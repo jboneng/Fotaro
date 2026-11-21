@@ -227,8 +227,27 @@ pub(crate) fn decode_for_export(
 }
 
 fn decode_image(path: &Path, max_px: u32) -> Result<(RgbImage, Metadata)> {
-    let (img, icc) = open_image(path)?;
-    let (full_w, full_h) = (img.width(), img.height());
+    // Small sizes of big uncompressed TIFFs (film scans) from a fraction of the rows: a
+    // whole 100 MB scan takes a second or more to read from a network share.
+    let sampled = std::fs::File::open(path)
+        .ok()
+        .and_then(|f| crate::tiff_sample::sample(&mut std::io::BufReader::new(f), max_px));
+    let (img, icc, (full_w, full_h)) = match sampled {
+        Some(s) => {
+            let mut img = s.image;
+            let orientation = image::metadata::Orientation::from_exif(s.orientation)
+                .unwrap_or(image::metadata::Orientation::NoTransforms);
+            img.apply_orientation(orientation);
+            let (w, h) = s.full_size;
+            let turned = matches!(s.orientation, 5..=8);
+            (img, s.icc, if turned { (h, w) } else { (w, h) })
+        }
+        None => {
+            let (img, icc) = open_image(path)?;
+            let size = (img.width(), img.height());
+            (img, icc, size)
+        }
+    };
 
     // Resize while still at full bit depth (16-bit scans), then convert to 8-bit sRGB.
     let img = fit(img, max_px);

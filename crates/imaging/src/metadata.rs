@@ -1,7 +1,7 @@
 //! Camera and exposure metadata (RAW via LibRaw, other images via EXIF).
 
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -101,7 +101,21 @@ pub(crate) fn with_file_time_fallback(mut meta: Metadata, path: &Path) -> Metada
 /// EXIF for JPEG/TIFF/PNG/WebP/HEIF. Files without EXIF yield empty metadata.
 pub(crate) fn read_exif(path: &Path) -> Result<Metadata> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let exif = match exif::Reader::new().read_from_container(&mut BufReader::new(file)) {
+    let mut reader = BufReader::new(file);
+    // The exif crate reads a whole TIFF into memory to find its tags: 100 MB per film
+    // scan, which over a network share takes seconds per photo. Read just the tags.
+    let read = match tiff_tags(&mut reader) {
+        Ok(Some(tags)) => exif::Reader::new().read_raw(tags),
+        Ok(None) => {
+            reader.seek(SeekFrom::Start(0))?;
+            exif::Reader::new().read_from_container(&mut reader)
+        }
+        Err(e) => {
+            log::debug!("no EXIF in {}: {e}", path.display());
+            return Ok(Metadata::default());
+        }
+    };
+    let exif = match read {
         Ok(e) => e,
         Err(exif::Error::NotFound(_)) => return Ok(Metadata::default()),
         Err(e) => {
@@ -147,6 +161,92 @@ pub(crate) fn read_exif(path: &Path) -> Result<Metadata> {
     })
 }
 
+/// The tag data of a classic TIFF (IFD0 and its EXIF, GPS and interoperability IFDs),
+/// read by following the offsets rather than reading the image data. The result is a
+/// copy of the file with only those bytes filled in (the rest stays zero, and the
+/// allocation is only committed where written), ready for `exif::Reader::read_raw`.
+/// `None` when the file is not a classic TIFF (then read it the usual way).
+fn tiff_tags<R: Read + Seek>(r: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::{Error, ErrorKind};
+    /// A tag value this large is image data (strip tables, ICC, XMP blobs): not needed.
+    const MAX_VALUE: u64 = 1 << 20;
+    /// Enough for any real tag layout; protects against loops in a damaged file.
+    const MAX_IFDS: usize = 8;
+    const MAX_ENTRIES: u16 = 4096;
+
+    let mut header = [0u8; 8];
+    if r.read_exact(&mut header).is_err() {
+        return Ok(None);
+    }
+    let little = match &header[..4] {
+        b"II\x2a\x00" => true,
+        b"MM\x00\x2a" => false,
+        _ => return Ok(None), // not TIFF, or BigTIFF (left to the exif crate)
+    };
+    let u16_at =
+        |b: &[u8]| if little { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) };
+    let u32_at = |b: &[u8]| {
+        let b = [b[0], b[1], b[2], b[3]];
+        if little { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) }
+    };
+    let len = r.seek(SeekFrom::End(0))?;
+
+    // (offset, bytes) pieces of the file to copy; IFD0's link to the next IFD is cut,
+    // as only the primary image's tags are used.
+    let mut pieces: Vec<(u64, Vec<u8>)> = vec![(0, header.to_vec())];
+    let mut queue = vec![(u64::from(u32_at(&header[4..])), true)];
+    let mut seen = 0;
+    while let Some((offset, primary)) = queue.pop() {
+        seen += 1;
+        if seen > MAX_IFDS || offset < 8 || offset + 2 > len {
+            continue;
+        }
+        r.seek(SeekFrom::Start(offset))?;
+        let mut count = [0u8; 2];
+        r.read_exact(&mut count)?;
+        let count = u16_at(&count).min(MAX_ENTRIES);
+        let size = 2 + u64::from(count) * 12 + 4;
+        if offset + size > len {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "truncated TIFF directory"));
+        }
+        let mut ifd = vec![0u8; size as usize];
+        r.seek(SeekFrom::Start(offset))?;
+        r.read_exact(&mut ifd)?;
+        for e in ifd[2..2 + count as usize * 12].as_chunks::<12>().0 {
+            let (tag, kind, n) = (u16_at(&e[0..]), u16_at(&e[2..]), u64::from(u32_at(&e[4..])));
+            let unit = match kind {
+                1 | 2 | 6 | 7 => 1,
+                3 | 8 => 2,
+                4 | 9 | 11 | 13 => 4,
+                5 | 10 | 12 => 8,
+                _ => continue,
+            };
+            let bytes = unit * n;
+            let at = u64::from(u32_at(&e[8..]));
+            // Exif, GPS and Interoperability IFD pointers.
+            if matches!(tag, 0x8769 | 0x8825 | 0xa005) {
+                queue.push((at, false));
+            }
+            if bytes > 4 && bytes <= MAX_VALUE && at + bytes <= len {
+                let mut value = vec![0u8; bytes as usize];
+                r.seek(SeekFrom::Start(at))?;
+                r.read_exact(&mut value)?;
+                pieces.push((at, value));
+            }
+        }
+        if primary {
+            ifd[size as usize - 4..].fill(0);
+        }
+        pieces.push((offset, ifd));
+    }
+    let end = pieces.iter().map(|(at, b)| at + b.len() as u64).max().unwrap_or(8);
+    let mut out = vec![0u8; end as usize];
+    for (at, bytes) in pieces {
+        out[at as usize..at as usize + bytes.len()].copy_from_slice(&bytes);
+    }
+    Ok(Some(out))
+}
+
 /// EXIF GPS position (degrees/minutes/seconds rationals plus N/S, E/W references).
 fn read_gps(exif: &exif::Exif) -> Option<Gps> {
     let field = |tag| exif.get_field(tag, In::PRIMARY);
@@ -179,4 +279,90 @@ fn read_gps(exif: &exif::Exif) -> Option<Gps> {
         longitude: if lon_ref == b'W' { -lon } else { lon },
         altitude,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Counts the bytes read, to check the image data is skipped.
+    struct Counting<R> {
+        inner: R,
+        read: u64,
+    }
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+    impl<R: Seek> Seek for Counting<R> {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    /// A little-endian TIFF with `pixels` bytes of image data first and the tags after
+    /// it (as Photoshop and Lightroom write them): IFD0 with Make and an Exif IFD with
+    /// DateTimeOriginal, and IFD0 linking to a second IFD the reader must not need.
+    fn tiff_with_tags_at_end(pixels: usize) -> Vec<u8> {
+        let mut f = b"II\x2a\x00\0\0\0\0".to_vec();
+        f.resize(8 + pixels, 0x55);
+        let entry = |f: &mut Vec<u8>, tag: u16, kind: u16, n: u32, value: u32| {
+            f.extend(tag.to_le_bytes());
+            f.extend(kind.to_le_bytes());
+            f.extend(n.to_le_bytes());
+            f.extend(value.to_le_bytes());
+        };
+        let ifd0 = f.len() as u32;
+        let make_at = ifd0 + 2 + 2 * 12 + 4;
+        let exif_at = make_at + 8;
+        let date_at = exif_at + 2 + 12 + 4;
+        f[4..8].copy_from_slice(&ifd0.to_le_bytes());
+        f.extend(2u16.to_le_bytes());
+        entry(&mut f, 0x010f, 2, 8, make_at); // Make
+        entry(&mut f, 0x8769, 4, 1, exif_at); // Exif IFD
+        f.extend(0xffff_fff0u32.to_le_bytes()); // a next IFD past the end of the file
+        f.extend(b"Hasseld\0");
+        f.extend(1u16.to_le_bytes());
+        entry(&mut f, 0x9003, 2, 20, date_at); // DateTimeOriginal
+        f.extend(0u32.to_le_bytes());
+        f.extend(b"2026:09:24 18:30:00\0");
+        f
+    }
+
+    #[test]
+    fn tiff_tags_skip_the_image_data() {
+        let file = tiff_with_tags_at_end(8 << 20);
+        let mut r = Counting { inner: Cursor::new(&file), read: 0 };
+        let tags = tiff_tags(&mut r).unwrap().expect("a TIFF");
+        assert!(r.read < 4096, "read {} bytes", r.read);
+        let exif = exif::Reader::new().read_raw(tags).unwrap();
+        let text = |tag| exif.get_field(tag, In::PRIMARY).map(|f| f.display_value().to_string());
+        assert_eq!(text(Tag::Make).as_deref(), Some("\"Hasseld\""));
+        assert_eq!(text(Tag::DateTimeOriginal).as_deref(), Some("2026-09-24 18:30:00"));
+    }
+
+    #[test]
+    fn tiff_capture_time_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scan.tif");
+        std::fs::write(&path, tiff_with_tags_at_end(1000)).unwrap();
+        let m = read_exif(&path).unwrap();
+        let expected = chrono::NaiveDate::from_ymd_opt(2026, 9, 24)
+            .unwrap()
+            .and_hms_opt(18, 30, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        assert_eq!(m.capture_time, Some(expected));
+        assert_eq!(m.make.as_deref(), Some("Hasseld"));
+    }
+
+    #[test]
+    fn non_tiff_is_left_to_the_exif_crate() {
+        assert!(tiff_tags(&mut Cursor::new(b"\xff\xd8\xff\xe0 jpeg".to_vec())).unwrap().is_none());
+    }
 }

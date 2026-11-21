@@ -119,6 +119,7 @@ fn source_panel(app: &mut FotaroApp, ui: &mut egui::Ui, commands: &mut Vec<Comma
             if d.source.is_none()
                 && let Some(card) = vols.iter().find(|v| v.card)
             {
+                d.recent_started = true; // the card wins over the last source
                 commands.push(Command::ImportSource(card.path.join("DCIM")));
             }
             if vols.iter().any(|v| v.card) {
@@ -142,12 +143,27 @@ fn source_panel(app: &mut FotaroApp, ui: &mut egui::Ui, commands: &mut Vec<Comma
         }
     }
     ui.add_space(8.0);
-    if ui.button("Choose Folder…").clicked()
-        && let Some(dir) = rfd::FileDialog::new().set_title("Import from Folder").pick_folder()
-    {
-        commands.push(Command::ImportSource(dir));
+    if let Some(choice) = d.picking_source.as_ref().and_then(|p| p.poll()) {
+        d.picking_source = None;
+        if let Some(dir) = choice {
+            commands.push(Command::ImportSource(dir));
+        }
     }
-    if let Some(last) = app.ui.import.last_source.clone().filter(|p| p.is_dir()) {
+    if ui.add_enabled(d.picking_source.is_none(), egui::Button::new("Choose Folder…")).clicked() {
+        d.picking_source = Some(crate::platform::pick_folder(ui.ctx(), "Import from Folder"));
+    }
+    // Checked in the background: `is_dir` on a busy network share can block for seconds.
+    let recent = d.recent.get().cloned().flatten();
+    // Without a card, start from the last source.
+    if !d.recent_started
+        && let Some(last) = &recent
+    {
+        d.recent_started = true;
+        if d.source.is_none() {
+            commands.push(Command::ImportSource(last.clone()));
+        }
+    }
+    if let Some(last) = recent {
         ui.add_space(4.0);
         ui.label(weak("Recent").size(11.0));
         let name =
@@ -294,6 +310,7 @@ fn settings_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         .and_then(|d| d.candidates.as_ref())
         .and_then(|c| c.first().cloned());
     let p = &mut app.ui.import;
+    let picking = app.session.as_mut().and_then(|s| s.import.as_mut()).map(|d| &mut d.picking_destination);
     heading(ui, "File Handling");
     ui.checkbox(&mut p.settings.skip_duplicates, "Don't Import Suspected Duplicates")
         .on_hover_text("Same file name and size as a photo already in the catalog");
@@ -352,10 +369,16 @@ fn settings_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             };
             ui.label(RichText::new(label).color(theme::TEXT_STRONG));
         });
-        if ui.button("Choose…").clicked()
-            && let Some(dir) = rfd::FileDialog::new().set_title("Import To").pick_folder()
-        {
-            *dest = dir;
+        if let Some(slot) = picking {
+            if let Some(choice) = slot.as_ref().and_then(|p| p.poll()) {
+                *slot = None;
+                if let Some(dir) = choice {
+                    *dest = dir;
+                }
+            }
+            if ui.add_enabled(slot.is_none(), egui::Button::new("Choose…")).clicked() {
+                *slot = Some(crate::platform::pick_folder(ui.ctx(), "Import To"));
+            }
         }
         ui.checkbox(&mut p.subfolder_on, "Into Subfolder");
         if p.subfolder_on {
