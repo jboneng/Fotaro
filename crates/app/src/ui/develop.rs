@@ -79,10 +79,12 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             }
         });
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            // The Navigator stays put above the rest (it previews the preset under the
+            // pointer, however far down the list that is).
+            let mut stack = std::mem::take(&mut app.ui.dev_left);
+            stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| navigator(app, ui));
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                let mut stack = std::mem::take(&mut app.ui.dev_left);
                 app.presets_ui.hover = None;
-                stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| navigator(app, ui));
                 stack.section(ui, Side::Left, "Presets", LEFT, true, |ui| super::presets::presets_panel(app, ui));
                 stack.section(ui, Side::Left, "Snapshots", LEFT, false, |ui| super::presets::snapshots_panel(app, ui));
                 stack.section(ui, Side::Left, "History", LEFT, true, |ui| history(app, ui));
@@ -667,6 +669,30 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     // Masking: drags on the photo draw and shape masks.
     let masking = !s.develop.before && developed.is_some() && s.develop.masking.is_some();
     let brushing = masking && super::masking::brush_active(&s.develop);
+    // Space held while zoomed in: a drag moves the photo whatever tool is open (as in LrC).
+    // A button clicked earlier (Select Subject…) keeps the keyboard focus, and Space would
+    // press it again: over the photo, only a text field keeps the focus.
+    let typing = ui.ctx().text_edit_focused();
+    if resp.hovered() && !typing {
+        ui.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
+    }
+    // Pan mode holds through a drag begun while Space was down (or a moment after: a
+    // press may arrive just as the key reads as released).
+    let space_down = !typing && ui.input(|i| i.key_down(egui::Key::Space));
+    let (now, pressed) = ui.input(|i| (i.time, i.pointer.primary_down()));
+    let latch_id = egui::Id::unique("develop_space_pan");
+    let (mut last_space, mut latched): (f64, bool) =
+        ui.data(|d| d.get_temp(latch_id)).unwrap_or((f64::NEG_INFINITY, false));
+    if space_down {
+        last_space = now;
+    }
+    latched = pressed && (latched || now - last_space < 0.4);
+    ui.data_mut(|d| d.insert_temp(latch_id, (last_space, latched)));
+    let space_pan = zoomed && (space_down || latched);
     let view = if zoomed { rect } else { fitted };
     let fit = (view.width() / img_px.x).min(view.height() / img_px.y);
     let fill = (view.width() / img_px.x).max(view.height() / img_px.y);
@@ -677,11 +703,11 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         if let Some((q, offset)) = z.anchor.take() {
             z.center = q - offset / size;
         }
-        if resp.dragged() && !guiding && !masking && !removing {
+        if resp.dragged() && (space_pan || (!guiding && !masking && !removing)) {
             z.center -= resp.drag_delta() / size;
         }
         // The wheel pans, unless the brush is out (then it sizes the brush).
-        if resp.hovered() && !brushing && !removing {
+        if resp.hovered() && (space_pan || (!brushing && !removing)) {
             let scroll = ui.input(|i| i.smooth_scroll_delta);
             if scroll != Vec2::ZERO {
                 z.center -= scroll / size;
@@ -786,6 +812,12 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 
     let over_photo = resp.hover_pos().is_some_and(|p| img_rect.contains(p));
+    if space_pan {
+        // The hand: the open tool gets no clicks or drags meanwhile.
+        let icon = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+        ui.ctx().set_cursor_icon(icon);
+        return;
+    }
     if s.develop.picking_wb {
         // White Balance Selector: click a neutral area.
         if over_photo {
