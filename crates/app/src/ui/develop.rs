@@ -669,7 +669,8 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     // Masking: drags on the photo draw and shape masks.
     let masking = !s.develop.before && developed.is_some() && s.develop.masking.is_some();
     let brushing = masking && super::masking::brush_active(&s.develop);
-    // Space held while zoomed in: a drag moves the photo whatever tool is open (as in LrC).
+    // Space (or Ctrl) held while zoomed in: a drag moves the photo whatever tool is open
+    // (as in LrC).
     // A button clicked earlier (Select Subject…) keeps the keyboard focus, and Space would
     // press it again: over the photo, only a text field keeps the focus.
     let typing = ui.ctx().text_edit_focused();
@@ -682,7 +683,9 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
     // Pan mode holds through a drag begun while Space was down (or a moment after: a
     // press may arrive just as the key reads as released).
-    let space_down = !typing && ui.input(|i| i.key_down(egui::Key::Space));
+    // Ctrl does the same as Space: some laptops' pointing devices (a ThinkPad's TrackPoint
+    // buttons) give no clicks while an ordinary key is held, only with a modifier.
+    let space_down = !typing && ui.input(|i| i.key_down(egui::Key::Space) || i.modifiers.command);
     let (now, pressed) = ui.input(|i| (i.time, i.pointer.primary_down()));
     let latch_id = egui::Id::unique("develop_space_pan");
     let (mut last_space, mut latched): (f64, bool) =
@@ -703,7 +706,9 @@ pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         if let Some((q, offset)) = z.anchor.take() {
             z.center = q - offset / size;
         }
-        if resp.dragged() && (space_pan || (!guiding && !masking && !removing)) {
+        // The middle button always moves the photo.
+        let middle = resp.dragged_by(egui::PointerButton::Middle);
+        if middle || (resp.dragged() && (space_pan || (!guiding && !masking && !removing))) {
             z.center -= resp.drag_delta() / size;
         }
         // The wheel pans, unless the brush is out (then it sizes the brush).
