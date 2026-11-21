@@ -1444,3 +1444,28 @@ fn spots_healed_step_by_step_match_healing_afresh() {
         assert!(render_srgb8(&img, &s) == render_srgb8(&img.clone(), &s), "step {i}");
     }
 }
+
+/// A point map gives what the Transform gives point by point, without making the mapping
+/// again for each (an outline has thousands of points).
+#[test]
+fn a_point_map_maps_like_the_transform() {
+    let mut t = Transform::default();
+    t.crop.angle = 3.0;
+    t.crop.left = 0.1;
+    t.crop.bottom = 0.9;
+    t.vertical = 10.0;
+    t.constrain_crop = true;
+    t.lens.distortion = 20.0;
+    let (w, h) = (6000, 4000);
+    let map = t.point_map(w, h);
+    let points: Vec<(f32, f32)> = (0..25).map(|i| ((i % 5) as f32 / 4.0, (i / 5) as f32 / 4.0)).collect();
+    let started = std::time::Instant::now();
+    let each: Vec<_> = points.iter().map(|&(x, y)| (t.output_point(x, y, w, h), t.source_point(x, y, w, h))).collect();
+    let one_by_one = started.elapsed();
+    let started = std::time::Instant::now();
+    let mapped: Vec<_> = points.iter().map(|&(x, y)| (map.output_point(x, y), map.source_point(x, y))).collect();
+    println!("25 points: {one_by_one:.1?} one by one, {:.1?} through a point map", started.elapsed());
+    assert_eq!(each, mapped);
+    // Nothing to do: points stay where they are.
+    assert_eq!(Transform::default().point_map(w, h).output_point(0.3, 0.7), Some((0.3, 0.7)));
+}

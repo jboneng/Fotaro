@@ -354,6 +354,16 @@ type AreaDistance = (String, Arc<Vec<f32>>, usize, usize);
 static AREA_DISTANCES: std::sync::LazyLock<Mutex<Vec<AreaDistance>>> =
     std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
+/// Get area picture `id` ready for use (its signed distance takes a moment to make for a
+/// large picture): call it where the picture is made, off the thread that draws.
+pub fn prepare_area(id: &str) {
+    area_distance(id);
+}
+
+/// Distances kept, in values (4 bytes each): 256 MB. A found person's picture is their
+/// size in the full-size photo, so a crowd is many small ones or a few large.
+const AREA_DISTANCE_VALUES: usize = 64_000_000;
+
 /// The signed distance of area picture `id` (and its size), from the mask store.
 fn area_distance(id: &str) -> Option<(Arc<Vec<f32>>, usize, usize)> {
     {
@@ -371,7 +381,8 @@ fn area_distance(id: &str) -> Option<(Arc<Vec<f32>>, usize, usize)> {
     let sdf = Arc::new(signed_distance(&inside, w, h));
     let mut cache = AREA_DISTANCES.lock().unwrap_or_else(|e| e.into_inner());
     cache.push((id.to_owned(), sdf.clone(), w, h));
-    if cache.len() > 64 {
+    // The oldest go when they are too many (the newest always stays).
+    while cache.len() > 1 && cache.iter().map(|c| c.1.len()).sum::<usize>() > AREA_DISTANCE_VALUES {
         cache.remove(0);
     }
     Some((sdf, w, h))

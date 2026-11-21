@@ -78,12 +78,48 @@ fn hit(c: &Canvas, spots: &[Spot], selected: Option<usize>, p: Pos2) -> Option<R
     None
 }
 
-/// A spot's outline in photo pixels: line segments around where it covers anything
-/// (marching squares over its area), cached per shape and photo size.
-fn contour_px(spot: &Spot, size: (u32, u32)) -> std::sync::Arc<Vec<[egui::Vec2; 2]>> {
+/// Line segments joined end to end into paths (a segment's end is exactly the next one's
+/// start: marching squares gives neighbouring cells the same crossing point). A path is
+/// drawn as one line, far cheaper than its segments one by one.
+fn join_segments(segs: &[[egui::Vec2; 2]]) -> Vec<Vec<egui::Vec2>> {
+    use std::collections::HashMap;
+    let key = |p: egui::Vec2| (p.x.to_bits(), p.y.to_bits());
+    let mut ends: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (i, s) in segs.iter().enumerate() {
+        ends.entry(key(s[0])).or_default().push(i);
+        ends.entry(key(s[1])).or_default().push(i);
+    }
+    let mut used = vec![false; segs.len()];
+    // The far end of an unused segment touching `p`.
+    let next = |p: egui::Vec2, used: &mut [bool]| -> Option<egui::Vec2> {
+        let i = *ends.get(&key(p))?.iter().find(|i| !used[**i])?;
+        used[i] = true;
+        Some(if key(segs[i][0]) == key(p) { segs[i][1] } else { segs[i][0] })
+    };
+    let mut paths = Vec::new();
+    for i in 0..segs.len() {
+        if used[i] {
+            continue;
+        }
+        used[i] = true;
+        let mut path = std::collections::VecDeque::from(segs[i]);
+        while let Some(q) = next(path[path.len() - 1], &mut used) {
+            path.push_back(q);
+        }
+        while let Some(q) = next(path[0], &mut used) {
+            path.push_front(q);
+        }
+        paths.push(Vec::from(path));
+    }
+    paths
+}
+
+/// A spot's outline in photo pixels: paths around where it covers anything (marching
+/// squares over its area), cached per shape and photo size.
+fn contour_px(spot: &Spot, size: (u32, u32)) -> std::sync::Arc<Vec<Vec<egui::Vec2>>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    type Cache = Mutex<HashMap<(u64, u32, (u32, u32)), Arc<Vec<[egui::Vec2; 2]>>>>;
+    type Cache = Mutex<HashMap<(u64, u32, (u32, u32)), Arc<Vec<Vec<egui::Vec2>>>>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let key = (spot.shape_key(), spot.feather.to_bits(), size);
     let cache = CACHE.get_or_init(Default::default);
@@ -143,7 +179,7 @@ fn contour_px(spot: &Spot, size: (u32, u32)) -> std::sync::Arc<Vec<[egui::Vec2; 
             }
         }
     }
-    let segs = Arc::new(segs);
+    let segs = Arc::new(join_segments(&segs));
     let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
     if map.len() > 512 {
         map.clear();
@@ -152,10 +188,9 @@ fn contour_px(spot: &Spot, size: (u32, u32)) -> std::sync::Arc<Vec<[egui::Vec2; 
     segs
 }
 
-/// A spot's outline on screen, moved by `shift` (0..1 units; its source with the offset):
-/// one clean line around the whole area, however the strokes went.
-fn outline(c: &Canvas, spot: &Spot, shift: [f32; 2]) -> Vec<[Pos2; 2]> {
-    // Traced relative to the first point, so a moved spot reuses its outline.
+/// The spot relative to its first point (and that point): outlines are traced like this, so
+/// a moved spot reuses its outline.
+fn local_spot(spot: &Spot) -> (Spot, [f32; 2]) {
     let o = spot.points.first().copied().unwrap_or_default();
     let mv = |p: &[f32; 2]| [p[0] - o[0], p[1] - o[1]];
     let local = Spot {
@@ -168,20 +203,42 @@ fn outline(c: &Canvas, spot: &Spot, shift: [f32; 2]) -> Vec<[Pos2; 2]> {
         fill: None,
         ..spot.clone()
     };
-    let d = c.px([shift[0] + o[0], shift[1] + o[1]]);
-    contour_px(&local, c.size)
-        .iter()
-        .filter_map(|[p, q]| Some([c.screen_px(*p + d)?, c.screen_px(*q + d)?]))
-        .collect()
+    (local, o)
 }
 
-fn draw_outline(painter: &egui::Painter, segs: &[[Pos2; 2]], stroke: Stroke) {
-    let shadow = Stroke::new(stroke.width + 2.0, Color32::from_black_alpha(110));
-    for s in segs {
-        painter.line_segment(*s, shadow);
+/// Trace a found person's outline on a photo of `size` now (it is kept), so drawing them
+/// the first time doesn't have to: for the thread that found them.
+pub(crate) fn prepare_person(person: &crate::develop::FoundPerson, size: (u32, u32)) {
+    contour_px(&local_spot(&person_spot(person)).0, size);
+}
+
+/// A spot's outline on screen, moved by `shift` (0..1 units; its source with the offset):
+/// one clean line around the whole area, however the strokes went.
+fn outline(c: &Canvas, spot: &Spot, shift: [f32; 2]) -> Vec<Vec<Pos2>> {
+    let (local, o) = local_spot(spot);
+    let d = c.px([shift[0] + o[0], shift[1] + o[1]]);
+    // A path is cut where a point can't be shown.
+    let mut paths = Vec::new();
+    for path in contour_px(&local, c.size).iter() {
+        let mut run = Vec::with_capacity(path.len());
+        for p in path {
+            match c.screen_px(*p + d) {
+                Some(q) => run.push(q),
+                None if run.len() > 1 => paths.push(std::mem::take(&mut run)),
+                None => run.clear(),
+            }
+        }
+        if run.len() > 1 {
+            paths.push(run);
+        }
     }
-    for s in segs {
-        painter.line_segment(*s, stroke);
+    paths
+}
+
+fn draw_outline(painter: &egui::Painter, paths: &[Vec<Pos2>], stroke: Stroke) {
+    let shadow = Stroke::new(stroke.width + 2.0, Color32::from_black_alpha(110));
+    for stroke in [shadow, stroke] {
+        painter.extend(paths.iter().map(|p| egui::Shape::line(p.clone(), stroke)));
     }
 }
 
@@ -204,29 +261,20 @@ fn person_spot(f: &crate::develop::FoundPerson) -> Spot {
     Spot { points: vec![[(l + r) / 2.0, (t + b) / 2.0]], area: Some(f.area.clone()), feather: 0.0, ..Spot::default() }
 }
 
-/// A found person's mask picture as a texture (white, its coverage as alpha), made once.
+/// A found person's tint as a texture (their picture white, its coverage as alpha), made
+/// once from the picture the search prepared.
 fn person_texture(
     ctx: &egui::Context,
     cache: &mut Vec<(String, egui::TextureHandle)>,
-    id: &str,
+    person: &crate::develop::FoundPerson,
 ) -> Option<egui::TextureHandle> {
+    let id = &person.area.id;
     if let Some((_, t)) = cache.iter().find(|(k, _)| k == id) {
         return Some(t.clone());
     }
-    let pic = imaging::develop::mask_picture(id)?;
-    let (w, h) = pic.dimensions();
-    // A tint needn't be sharper than the screen.
-    let scale = (1024.0 / w.max(h) as f32).min(1.0);
-    let pic = if scale < 1.0 {
-        let (sw, sh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
-        image::imageops::resize(&*pic, sw, sh, image::imageops::FilterType::Triangle)
-    } else {
-        (*pic).clone()
-    };
-    let rgba: Vec<u8> = pic.as_raw().iter().flat_map(|&v| [v, v, v, v]).collect();
-    let img = egui::ColorImage::from_rgba_premultiplied([pic.width() as usize, pic.height() as usize], &rgba);
+    let img = person.tint.clone()?;
     let tex = ctx.load_texture(format!("person-{id}"), img, egui::TextureOptions::LINEAR);
-    cache.push((id.to_string(), tex.clone()));
+    cache.push((id.clone(), tex.clone()));
     Some(tex)
 }
 
@@ -492,7 +540,7 @@ pub(super) fn canvas(
             (false, false) => None,
         };
         if let Some(tint) = tint
-            && let Some(tex) = person_texture(ui.ctx(), &mut d.people_tex, &f.area.id)
+            && let Some(tex) = person_texture(ui.ctx(), &mut d.people_tex, f)
         {
             paint_person(&people_painter, &c, &tex, f.area.rect, tint);
         }
@@ -1158,6 +1206,26 @@ pub fn step_size(d: &mut DevelopState, dir: i8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segments_join_into_paths() {
+        let v = egui::vec2;
+        // A square given out of order and in mixed directions, and a lone segment.
+        let segs = [
+            [v(0.0, 0.0), v(1.0, 0.0)],
+            [v(1.0, 1.0), v(0.0, 1.0)],
+            [v(5.0, 5.0), v(6.0, 5.0)],
+            [v(1.0, 1.0), v(1.0, 0.0)],
+            [v(0.0, 1.0), v(0.0, 0.0)],
+        ];
+        let mut paths = join_segments(&segs);
+        paths.sort_by_key(|p| p.len());
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].len(), 2);
+        // Closed: five points, the first again at the end.
+        assert_eq!(paths[1].len(), 5);
+        assert_eq!(paths[1][0], paths[1][4]);
+    }
     use imaging::develop::Transform;
 
     fn canvas() -> Canvas {

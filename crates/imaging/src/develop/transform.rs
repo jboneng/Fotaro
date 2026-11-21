@@ -559,24 +559,45 @@ impl Transform {
     /// 0..1, for a `w × h` source): where the White Balance Selector samples, where a guide
     /// drawn on the photo lies.
     pub fn source_point(&self, x: f32, y: f32, w: u32, h: u32) -> (f32, f32) {
-        if self.is_identity() {
-            return (x, y);
-        }
-        let m = Mapping::new(self, w, h);
-        let (fw, fh) = (f64::from(w.max(1)), f64::from(h.max(1)));
-        m.source(f64::from(x) * f64::from(m.out.0), f64::from(y) * f64::from(m.out.1))
-            .map_or((x, y), |(u, v)| ((u / fw) as f32, (v / fh) as f32))
+        self.point_map(w, h).source_point(x, y)
+    }
+
+    /// This Transform's mapping of points for a `w × h` source, made once for any number
+    /// of points (an outline drawn on the photo has thousands; making the mapping fits the
+    /// frame inside the photo, which is far more work than mapping a point).
+    pub fn point_map(&self, w: u32, h: u32) -> PointMap {
+        let map = (!self.is_identity()).then(|| Mapping::new(self, w, h));
+        PointMap { map, size: (f64::from(w.max(1)), f64::from(h.max(1))) }
     }
 
     /// Where point (x, y) (0..1) of the untransformed photo is shown in the developed one
     /// (0..1, possibly outside), for a `w × h` source.
     pub fn output_point(&self, x: f32, y: f32, w: u32, h: u32) -> Option<(f32, f32)> {
-        if self.is_identity() {
-            return Some((x, y));
-        }
-        let m = Mapping::new(self, w, h);
-        let (fw, fh) = (f64::from(w.max(1)), f64::from(h.max(1)));
-        m.output(f64::from(x) * fw, f64::from(y) * fh)
+        self.point_map(w, h).output_point(x, y)
+    }
+}
+
+/// Points of a photo mapped through a [`Transform`] (see [`Transform::point_map`]).
+#[derive(Debug, Clone, Copy)]
+pub struct PointMap {
+    /// `None`: the Transform changes nothing.
+    map: Option<Mapping>,
+    /// The source's size.
+    size: (f64, f64),
+}
+
+impl PointMap {
+    /// As [`Transform::source_point`].
+    pub fn source_point(&self, x: f32, y: f32) -> (f32, f32) {
+        let Some(m) = &self.map else { return (x, y) };
+        m.source(f64::from(x) * f64::from(m.out.0), f64::from(y) * f64::from(m.out.1))
+            .map_or((x, y), |(u, v)| ((u / self.size.0) as f32, (v / self.size.1) as f32))
+    }
+
+    /// As [`Transform::output_point`].
+    pub fn output_point(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let Some(m) = &self.map else { return Some((x, y)) };
+        m.output(f64::from(x) * self.size.0, f64::from(y) * self.size.1)
             .map(|(u, v)| ((u / f64::from(m.out.0)) as f32, (v / f64::from(m.out.1)) as f32))
     }
 }

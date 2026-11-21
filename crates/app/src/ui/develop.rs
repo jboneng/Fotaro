@@ -870,13 +870,14 @@ fn guided_tool(
 ) -> bool {
     let Some((sw, sh)) = d.info.as_ref().map(|i| i.full_size) else { return false };
     let t = d.settings.transform.clone();
+    let map = t.point_map(sw, sh);
     let to_screen = |x: f32, y: f32| -> Option<egui::Pos2> {
-        let (u, v) = rotate(t.output_point(x, y, sw, sh)?, rotation);
+        let (u, v) = rotate(map.output_point(x, y)?, rotation);
         Some(img_rect.min + egui::vec2(u, v) * img_rect.size())
     };
     let to_source = |p: egui::Pos2| -> (f32, f32) {
         let (x, y) = unrotate((p - img_rect.min) / img_rect.size(), rotation);
-        t.source_point(x, y, sw, sh)
+        map.source_point(x, y)
     };
     let screen: Vec<Option<(egui::Pos2, egui::Pos2)>> =
         t.guides.iter().map(|g| Some((to_screen(g[0], g[1])?, to_screen(g[2], g[3])?))).collect();

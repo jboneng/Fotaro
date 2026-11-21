@@ -28,19 +28,20 @@ const SELECTED: Color32 = Color32::from_rgb(70, 150, 255);
 pub(super) struct Canvas {
     img_rect: Rect,
     rotation: u8,
-    transform: Transform,
+    /// The photo's Transform for points, made once (a frame maps thousands of them).
+    map: imaging::develop::PointMap,
     /// The untransformed photo's size in pixels.
     pub(super) size: (u32, u32),
 }
 
 impl Canvas {
     pub(super) fn new(img_rect: Rect, rotation: u8, transform: Transform, size: (u32, u32)) -> Canvas {
-        Canvas { img_rect, rotation, transform, size }
+        Canvas { img_rect, rotation, map: transform.point_map(size.0, size.1), size }
     }
 
     /// A point of the untransformed photo (0..1) on screen.
     pub(super) fn screen(&self, p: [f32; 2]) -> Option<Pos2> {
-        let q = self.transform.output_point(p[0], p[1], self.size.0, self.size.1)?;
+        let q = self.map.output_point(p[0], p[1])?;
         let (u, v) = rotate(q, self.rotation);
         Some(self.img_rect.min + egui::vec2(u, v) * self.img_rect.size())
     }
@@ -48,7 +49,7 @@ impl Canvas {
     /// The untransformed photo's point (0..1) under a screen position.
     pub(super) fn photo(&self, q: Pos2) -> [f32; 2] {
         let (x, y) = unrotate((q - self.img_rect.min) / self.img_rect.size(), self.rotation);
-        let (u, v) = self.transform.source_point(x, y, self.size.0, self.size.1);
+        let (u, v) = self.map.source_point(x, y);
         [u, v]
     }
 

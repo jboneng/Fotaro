@@ -630,6 +630,7 @@ fn run_people(
     }
     let started = std::time::Instant::now();
     let people = segment::find_people(rgb, 0.3, gpu, &|share, what| set(share, what.to_owned()))?;
+    set(1.0, "Outlining…".to_owned());
     log::info!("People: {} found in {:.1?}", people.len(), started.elapsed());
     let (fw, fh) = (size.0 as f32, size.1 as f32);
     let stamp =
@@ -646,14 +647,19 @@ fn run_people(
         };
         let id = format!("{photo_id}-person-{stamp:x}-{k}");
         imaging::develop::save_mask_picture(&id, &mask)?;
-        out.push(FoundPerson {
+        // What outlining and clicking the person need, made here rather than while drawing.
+        imaging::develop::prepare_area(&id);
+        let person = FoundPerson {
+            tint: Some(Arc::new(person_tint(&mask))),
             area: imaging::develop::SpotMask {
                 id,
                 rect: [rect[0] / fw, rect[1] / fh, rect[2] / fw, rect[3] / fh],
             },
             score: p.score,
             picked: p.score >= PEOPLE_SURE,
-        });
+        };
+        crate::ui::prepare_person(&person, size);
+        out.push(person);
     }
     Ok(out)
 }
@@ -750,6 +756,25 @@ pub struct FoundPerson {
     pub area: imaging::develop::SpotMask,
     pub score: f32,
     pub picked: bool,
+    /// The tint drawn over them, ready to become a texture.
+    pub tint: Option<Arc<egui::ColorImage>>,
+}
+
+/// A person's picture as the tint drawn over them: white, its coverage as alpha, no sharper
+/// than the screen needs.
+fn person_tint(mask: &image::GrayImage) -> egui::ColorImage {
+    let (w, h) = mask.dimensions();
+    let scale = (1024.0 / w.max(h) as f32).min(1.0);
+    let small;
+    let pic = if scale < 1.0 {
+        let (sw, sh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
+        small = image::imageops::resize(mask, sw, sh, image::imageops::FilterType::Triangle);
+        &small
+    } else {
+        mask
+    };
+    let rgba: Vec<u8> = pic.as_raw().iter().flat_map(|&v| [v, v, v, v]).collect();
+    egui::ColorImage::from_rgba_premultiplied([pic.width() as usize, pic.height() as usize], &rgba)
 }
 
 /// Found people the detector is less sure of start not picked (the user ticks them).

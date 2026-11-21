@@ -39,7 +39,7 @@ pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use groups::{SettingsGroup, changed_groups, copy_groups};
 pub use heal::{
-    Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input,
+    Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input, prepare_area,
     find_source,
 };
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
@@ -63,5 +63,5 @@ pub use pipeline::{
 };
 pub use settings::{DevelopSettings, PROCESS_VERSION, Slider, Treatment, WbPreset};
 pub use source::{ResolvedWb, SourceColor, WorkingImage};
-pub use transform::{Crop, MAX_CROP_ANGLE, MAX_GUIDES, Transform, TransformParam, Upright};
+pub use transform::{Crop, MAX_CROP_ANGLE, MAX_GUIDES, PointMap, Transform, TransformParam, Upright};
 pub use upright::{apply_upright, guided_angles, straighten_angle};
