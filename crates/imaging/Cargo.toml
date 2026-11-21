@@ -4,6 +4,7 @@ description = "Decoding (RAW via LibRaw, images via `image`), color management a
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 libraw.workspace = true

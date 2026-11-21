@@ -8,7 +8,7 @@ use imaging::develop::{SettingsGroup, changed_groups};
 
 use super::develop::weak;
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::develop::SnapshotEdit;
 use crate::presets::{BUILT_IN, PresetFile, USER};
 
@@ -56,7 +56,7 @@ enum Ask {
 }
 
 /// LrC's Presets panel: folders of presets; a click applies one.
-pub fn presets_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn presets_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let has_photo = app.session.as_ref().is_some_and(|s| s.develop.photo.is_some());
     let mut ask = None;
     ui.horizontal(|ui| {
@@ -171,7 +171,7 @@ fn groups_text(groups: &[SettingsGroup]) -> String {
 }
 
 /// LrC's Snapshots panel: settings kept under a name; a click goes back to them.
-pub fn snapshots_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn snapshots_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &app.session else { return };
     let d = &s.develop;
     let mut ask = None;
@@ -228,11 +228,11 @@ fn snapshot_name() -> String {
 }
 
 /// Ctrl+N in Develop: a new snapshot, then name it.
-pub fn take_snapshot(app: &mut PhotoLibraryApp) {
+pub fn take_snapshot(app: &mut FotaroApp) {
     run(app, Ask::TakeSnapshot);
 }
 
-fn run(app: &mut PhotoLibraryApp, ask: Ask) {
+fn run(app: &mut FotaroApp, ask: Ask) {
     match ask {
         Ask::Apply(i) => {
             let Some(p) = app.presets.presets.get(i).cloned() else { return };
@@ -306,7 +306,7 @@ fn run(app: &mut PhotoLibraryApp, ask: Ask) {
     }
 }
 
-fn import(app: &mut PhotoLibraryApp, paths: &[std::path::PathBuf]) {
+fn import(app: &mut FotaroApp, paths: &[std::path::PathBuf]) {
     let r = app.presets.import(paths, USER);
     for (p, why) in &r.skipped {
         log::info!("preset not imported: {}: {why}", p.display());
@@ -322,7 +322,7 @@ fn import(app: &mut PhotoLibraryApp, paths: &[std::path::PathBuf]) {
 }
 
 /// The panels' dialogs (New Preset, Copy Settings, Rename), drawn each frame in Develop.
-pub fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+pub fn dialogs(app: &mut FotaroApp, ctx: &egui::Context) {
     new_preset_dialog(app, ctx);
     copy_dialog(app, ctx);
     rename_dialog(app, ctx);
@@ -363,7 +363,7 @@ fn group_ticks(ui: &mut egui::Ui, ticked: &mut Vec<SettingsGroup>) {
     ticked.sort();
 }
 
-fn new_preset_dialog(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+fn new_preset_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(np) = &mut app.presets_ui.new_preset else { return };
     let folders: Vec<String> = app.presets.folders().into_iter().filter(|f| f != BUILT_IN).collect();
     let (mut create, mut cancel) = (false, false);
@@ -438,7 +438,7 @@ fn new_preset_dialog(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     }
 }
 
-fn copy_dialog(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+fn copy_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(groups) = &mut app.presets_ui.copy else { return };
     let (mut copy, mut cancel) = (false, false);
     let modal = egui::Modal::new(egui::Id::unique("copy_develop_settings")).show(ctx, |ui| {
@@ -471,7 +471,7 @@ fn copy_dialog(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     }
 }
 
-fn rename_dialog(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+fn rename_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some((target, name)) = &mut app.presets_ui.rename else { return };
     let target = *target;
     let (mut ok, mut cancel) = (false, false);

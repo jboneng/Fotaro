@@ -1,4 +1,4 @@
-//! Optional frame-time statistics, enabled with `PHOTOLIB_PERF=1`.
+//! Optional frame-time statistics, enabled with `FOTARO_PERF=1`.
 //! Logs every 2 seconds: frames drawn, average / worst CPU time per frame,
 //! and how many frames missed a 60 Hz budget.
 
@@ -19,7 +19,7 @@ pub struct FrameStats {
 impl FrameStats {
     pub fn from_env() -> Self {
         FrameStats {
-            enabled: std::env::var_os("PHOTOLIB_PERF").is_some(),
+            enabled: std::env::var_os("FOTARO_PERF").is_some(),
             start: Instant::now(),
             frames: 0,
             total_ms: 0.0,

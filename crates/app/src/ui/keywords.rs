@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use catalog::Keyword;
 use eframe::egui::{self, Align, Layout, RichText, TextEdit};
 
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 
 fn weak(text: impl Into<String>) -> RichText {
     RichText::new(text).color(super::theme::TEXT_WEAK)
@@ -43,7 +43,7 @@ pub fn commit_on_blur(
     }
 }
 
-pub fn keywording(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn keywording(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let view = app.view;
     let focus_entry = std::mem::take(&mut app.focus_keywording);
     let Some(s) = &mut app.session else { return };
@@ -138,7 +138,7 @@ pub fn keywording(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-pub fn keyword_list(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn keyword_list(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let view = app.view;
     let Some(s) = &mut app.session else { return };
     let mut commands = Vec::new();

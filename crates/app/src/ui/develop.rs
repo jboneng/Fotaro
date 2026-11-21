@@ -25,7 +25,7 @@ use super::panels::Side;
 use super::shortcuts::Action;
 use super::theme;
 use super::views::{paint_image, rotated_size};
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::develop::{DevelopState, GuideDrag, RegionTarget, Slot};
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
@@ -56,7 +56,7 @@ fn bottom_buttons(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.separator();
 }
 
-pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn left(app: &mut FotaroApp, ui: &mut egui::Ui) {
     ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
         let (has_clip, has_photo) = app
             .session
@@ -104,7 +104,7 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 /// The Library's Navigator (zoom levels, visible area), showing the photo as developed.
-fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn navigator(app: &mut FotaroApp, ui: &mut egui::Ui) {
     // A hovered preset or snapshot, once rendered; else the photo as it is.
     let shown = app.session.as_ref().and_then(|s| {
         s.develop.preview_texture().or_else(|| s.develop.textures.get(&Slot::Current)).cloned()
@@ -113,7 +113,7 @@ fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 /// LrC's History: newest step first; click one to go back to it.
-fn history(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn history(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &app.session else { return };
     let steps = &s.develop.history;
     if steps.is_empty() {
@@ -132,7 +132,7 @@ fn history(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn right(app: &mut FotaroApp, ui: &mut egui::Ui) {
     ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
         let has_photo = app.session.as_ref().is_some_and(|s| s.develop.photo.is_some());
         bottom_buttons(ui, |ui| {
@@ -433,7 +433,7 @@ fn profile_row(
 }
 
 /// LrC's Basic panel.
-fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn basic(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     if d.photo.is_none() {
@@ -586,7 +586,7 @@ fn basic(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
 /// LrC's clipping triangles in the histogram's top corners: lit (blue / red) when the
 /// render has clipped shadows / highlights; click to toggle showing them (J).
-fn clipping_triangles(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, hist: Rect) {
+fn clipping_triangles(app: &mut FotaroApp, ui: &mut egui::Ui, hist: Rect) {
     let Some(s) = &app.session else { return };
     let (on, c) = (s.develop.clipping, s.develop.clipped);
     let size = 9.0;
@@ -629,7 +629,7 @@ fn clipping_triangles(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, hist: Rect) 
 /// scroll to move around, as in the Loupe). Zoomed, the visible part is rendered from the
 /// full-size image once the settings settle, over the enlarged proxy. Also the WB
 /// Selector's clicks.
-pub fn center(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn center(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     let ppp = ui.ctx().pixels_per_point();
@@ -1035,7 +1035,7 @@ fn standard_preview(s: &mut crate::app::Session, photo: &PhotoRow) -> Option<egu
     s.thumbs.get(photo.id)
 }
 
-pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &app.session else { return };
     let d = &s.develop;
     let (before, picking, busy) = (d.before, d.picking_wb, d.rendering());
@@ -1089,7 +1089,7 @@ const POINT_GRAB: f32 = 9.0;
 
 /// LrC's Tone Curve panel: the curve over the histogram; Parametric (region sliders and
 /// split points) or Point (RGB / Red / Green / Blue curves, presets).
-fn tone_curve(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn tone_curve(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     if d.photo.is_none() {
@@ -1393,7 +1393,7 @@ fn swatch(i: usize, brightness: f32, saturation: f32) -> Color32 {
 
 /// LrC's HSL / Color panel (Hue, Saturation, Luminance or All), or in Black & White its
 /// B&W Mix.
-fn hsl_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn hsl_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     if d.photo.is_none() {
@@ -1537,7 +1537,7 @@ pub(super) fn color_wheel(ui: &mut egui::Ui, id: egui::Id, size: f32, hue: &mut 
 
 /// LrC's Color Grading panel: 3-way (Midtones above, Shadows and Highlights below) or one
 /// wheel at a time (Shadows, Midtones, Highlights, Global), then Blending and Balance.
-fn color_grading(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn color_grading(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     if d.photo.is_none() {
@@ -1649,7 +1649,7 @@ fn color_grading(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
 /// LrC's Detail panel: Sharpening (Amount, Radius, Detail, Masking) and Noise Reduction
 /// (Luminance with its Detail and Contrast; Color with its Detail and Smoothness).
-fn detail_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn detail_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let rotation = s.active_photo().map_or(0, |p| p.rotation);
     let d = &mut s.develop;
@@ -1800,7 +1800,7 @@ fn detail_box(ui: &mut egui::Ui, d: &mut crate::develop::DevelopState, rotation:
 
 /// LrC's Transform panel: the Manual Transform sliders (Vertical, Horizontal, Rotate,
 /// Aspect, Scale, X / Y Offset). A grid is shown over the photo while one is dragged.
-fn transform_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn transform_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     if d.photo.is_none() {
@@ -1893,7 +1893,7 @@ fn transform_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 /// LrC's Effects panel: Post-Crop Vignetting (Style, Amount, Midpoint, Roundness, Feather,
 /// Highlights) and Grain (Amount, Size, Roughness). There is no crop yet, so the vignette
 /// follows the whole frame.
-fn effects_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     if d.photo.is_none() {

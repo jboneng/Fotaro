@@ -5,7 +5,7 @@ use std::time::Instant;
 
 fn main() {
     println!("LibRaw {}", libraw::version());
-    let out_dir = std::env::temp_dir().join("photolibrary-rawinfo");
+    let out_dir = std::env::temp_dir().join("fotaro-rawinfo");
     std::fs::create_dir_all(&out_dir).unwrap();
 
     for path in std::env::args().skip(1) {

@@ -1619,6 +1619,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "fotaro"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "catalog",
+ "chrono",
+ "crossbeam-channel",
+ "directories",
+ "dunce",
+ "eframe",
+ "env_logger",
+ "fs4",
+ "image",
+ "imaging",
+ "lensdb",
+ "log",
+ "mimalloc",
+ "rayon",
+ "rfd",
+ "segment",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thread-priority",
+ "winreg",
+ "xmp",
+]
+
+[[package]]
 name = "fs4"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3395,35 +3424,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
 dependencies = [
  "siphasher",
-]
-
-[[package]]
-name = "photo_library"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "catalog",
- "chrono",
- "crossbeam-channel",
- "directories",
- "dunce",
- "eframe",
- "env_logger",
- "fs4",
- "image",
- "imaging",
- "lensdb",
- "log",
- "mimalloc",
- "rayon",
- "rfd",
- "segment",
- "serde",
- "serde_json",
- "tempfile",
- "thread-priority",
- "winreg",
- "xmp",
 ]
 
 [[package]]

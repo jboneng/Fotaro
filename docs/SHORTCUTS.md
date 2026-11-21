@@ -1,7 +1,7 @@
 # Keyboard shortcuts
 
 Generated from `crates/app/src/ui/shortcuts.rs` — do not edit by hand.
-Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.
+Run `UPDATE_DOCS=1 cargo test -p fotaro shortcuts` to regenerate.
 
 `Ctrl` is `Cmd` on macOS. These follow Lightroom Classic's Library and Develop modules.
 Shortcuts work in both modules unless marked (Library) or listed under Develop.

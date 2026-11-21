@@ -4,6 +4,7 @@ description = "The Lensfun lens database: read, match a photo's camera and lens,
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 anyhow.workspace = true

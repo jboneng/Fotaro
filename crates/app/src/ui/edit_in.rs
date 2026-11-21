@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, Align, Layout, RichText};
 
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::editors::{EditColorSpace, EditFormat, Editor, RESULT_SUFFIX, darktable, luminar};
 
 fn weak(text: impl Into<String>) -> RichText {
@@ -21,7 +21,7 @@ fn row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// Look for the editors not looked for yet.
-fn refresh(app: &mut PhotoLibraryApp) {
+fn refresh(app: &mut FotaroApp) {
     for e in Editor::ALL {
         if !app.editors.contains_key(&e) {
             let found = crate::editors::find(e, &app.ui.edit_in);
@@ -75,7 +75,7 @@ fn location(
     changed
 }
 
-pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+pub fn window(app: &mut FotaroApp, ctx: &egui::Context) {
     if !app.edit_settings {
         return;
     }
@@ -206,7 +206,7 @@ pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
 }
 
 /// Photo ▸ Edit In, and the same in the photo context menu.
-pub fn menu(ui: &mut egui::Ui, app: &mut PhotoLibraryApp) {
+pub fn menu(ui: &mut egui::Ui, app: &mut FotaroApp) {
     let has_catalog = app.session.is_some();
     let primary = app.ui.edit_in.primary;
     for editor in Editor::ALL {

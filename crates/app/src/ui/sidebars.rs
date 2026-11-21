@@ -7,7 +7,7 @@ use imaging::PreviewSize;
 
 use super::panels::Side;
 use super::theme;
-use crate::app::{Command, FieldValue, MetadataPreset, PhotoLibraryApp, View, ZoomLevel};
+use crate::app::{Command, FieldValue, MetadataPreset, FotaroApp, View, ZoomLevel};
 use crate::platform;
 use catalog::IptcField;
 
@@ -53,7 +53,7 @@ pub(super) fn source_row(
     resp
 }
 
-pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn left(app: &mut FotaroApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut stack = std::mem::take(&mut app.ui.left);
         stack.section(ui, Side::Left, "Navigator", LEFT, true, |ui| {
@@ -73,7 +73,7 @@ pub fn left(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 /// LrC's Navigator: the active photo, the zoom level picker (FIT FILL 1:1 2:1 3:1), and
 /// while zoomed a rectangle showing the visible area; click or drag to move it.
 /// `shown`: the image to show instead of the photo's thumbnail (Develop's live render).
-pub(super) fn navigator(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, shown: Option<egui::TextureHandle>) {
+pub(super) fn navigator(app: &mut FotaroApp, ui: &mut egui::Ui, shown: Option<egui::TextureHandle>) {
     let fit_selected = !(app.zoom.zoomed && matches!(app.view, View::Loupe | View::Compare));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
@@ -139,7 +139,7 @@ fn zoom_choice(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
     ui.add(egui::Label::new(egui::RichText::new(text).size(11.0).color(color)).sense(Sense::click()))
 }
 
-fn catalog_section(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn catalog_section(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &app.session else { return };
     let (all, prev) = s.counts;
     let quick = s.quick_count;
@@ -160,7 +160,7 @@ fn catalog_section(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
     if ui.button("+  Add Folder…").on_hover_text("Import ▸ Add: catalog photos where they are").clicked()
     {
         app.run(Command::OpenImport(Some(catalog::ImportMode::Add)));
@@ -284,7 +284,7 @@ fn folders(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn right(app: &mut FotaroApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut stack = std::mem::take(&mut app.ui.right);
         stack.section(ui, Side::Right, "Histogram", RIGHT, true, |ui| {
@@ -301,7 +301,7 @@ pub fn right(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     });
 }
 
-fn histogram(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn histogram(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else {
         paint_histogram(ui, None);
         return;
@@ -344,7 +344,7 @@ pub(super) fn paint_histogram(ui: &mut egui::Ui, h: Option<&crate::jobs::Histogr
 }
 
 /// The exposure summary under the histogram, as in LrC ("ISO 100  50 mm  f / 2.8  1/250").
-pub(super) fn exposure_summary(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub(super) fn exposure_summary(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     if let Some(m) = s.active_metadata() {
         let mut parts = Vec::new();
@@ -380,7 +380,7 @@ pub fn format_capture_time(t: i64) -> String {
         .unwrap_or_default()
 }
 
-fn metadata(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn metadata(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let preset = &mut app.ui.metadata_preset;
     let name = |p: MetadataPreset| match p {
         MetadataPreset::Default => "Default",

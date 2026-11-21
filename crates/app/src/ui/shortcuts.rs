@@ -562,7 +562,7 @@ pub fn markdown() -> String {
     let mut out = String::from(
         "# Keyboard shortcuts\n\n\
          Generated from `crates/app/src/ui/shortcuts.rs` — do not edit by hand.\n\
-         Run `UPDATE_DOCS=1 cargo test -p photo_library shortcuts` to regenerate.\n\n\
+         Run `UPDATE_DOCS=1 cargo test -p fotaro shortcuts` to regenerate.\n\n\
          `Ctrl` is `Cmd` on macOS. These follow Lightroom Classic's Library and Develop modules.\n\
          Shortcuts work in both modules unless marked (Library) or listed under Develop.\n",
     );
@@ -684,7 +684,7 @@ mod tests {
         let actual = std::fs::read_to_string(path).unwrap_or_default().replace("\r\n", "\n");
         assert!(
             actual == expected,
-            "docs/SHORTCUTS.md is out of date; run UPDATE_DOCS=1 cargo test -p photo_library shortcuts"
+            "docs/SHORTCUTS.md is out of date; run UPDATE_DOCS=1 cargo test -p fotaro shortcuts"
         );
     }
 }

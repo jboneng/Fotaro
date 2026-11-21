@@ -9,6 +9,7 @@ mod filter;
 mod import;
 mod jobs;
 mod lens;
+mod migrate;
 mod perf;
 mod platform;
 mod presets;
@@ -17,14 +18,17 @@ mod ui;
 
 use std::path::PathBuf;
 
+/// The app's name: in the title bar, and its folders (settings, presets, AI models).
+pub const APP_NAME: &str = "Fotaro";
+
 // mimalloc avoids allocator lock contention between the UI thread and the many
 // worker threads that allocate large image buffers.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use app::PhotoLibraryApp;
+use app::FotaroApp;
 
-/// Command line: `photo_library [--catalog <dir.plcat>] [--add <folder>]`.
+/// Command line: `fotaro [--catalog <dir.plcat>] [--add <folder>]`.
 /// `--catalog` opens (or creates) that catalog instead of the last one;
 /// `--add` imports a folder into it at startup.
 #[derive(Debug, Default)]
@@ -51,6 +55,8 @@ fn parse_args() -> Args {
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Before anything reads them: the folders the app had under its old name.
+    migrate::move_old_folders();
     let args = parse_args();
 
     // egui-wgpu caps textures at 8192 px; ask for what the GPU supports (often 16384) so
@@ -69,7 +75,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         wgpu_options,
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Photo Library")
+            .with_title(APP_NAME)
             .with_inner_size([1400.0, 880.0])
             .with_min_inner_size([900.0, 560.0])
             .with_maximized(true),
@@ -77,8 +83,8 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "Photo Library",
+        APP_NAME,
         options,
-        Box::new(move |cc| Ok(Box::new(PhotoLibraryApp::new(cc, args)))),
+        Box::new(move |cc| Ok(Box::new(FotaroApp::new(cc, args)))),
     )
 }

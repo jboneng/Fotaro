@@ -6,14 +6,14 @@ use eframe::egui::{self, Align, Layout, RichText};
 use imaging::develop::{LensSetup, Slider};
 
 use super::develop::{LABEL_W, Spec, slider_row_as, sub_header, weak};
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::lens::LensTab;
 
 fn spec(id: u8, range: (f32, f32), default: f32) -> Spec {
     Spec { slider: Slider::MaskAmount(id), range, default, log: false, gradient: None, kelvin: false }
 }
 
-pub(super) fn lens_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;

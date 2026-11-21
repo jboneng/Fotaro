@@ -195,11 +195,11 @@ const RUNTIME_LIB: &str = "libonnxruntime.dylib";
 #[cfg(all(unix, not(target_os = "macos")))]
 const RUNTIME_LIB: &str = "libonnxruntime.so";
 
-/// The folder the AI files are kept in (`%LOCALAPPDATA%\PhotoLibrary\data\ai` on Windows).
+/// The folder the AI files are kept in (`%LOCALAPPDATA%\Fotaro\data\ai` on Windows).
 pub fn data_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "PhotoLibrary")
+    directories::ProjectDirs::from("", "", "Fotaro")
         .map(|d| d.data_local_dir().join("ai"))
-        .unwrap_or_else(|| std::env::temp_dir().join("PhotoLibrary-ai"))
+        .unwrap_or_else(|| std::env::temp_dir().join("Fotaro-ai"))
 }
 
 /// ONNX Runtime's library: `ORT_DYLIB_PATH`, else next to the program (a packaged app),

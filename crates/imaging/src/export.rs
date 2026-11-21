@@ -306,7 +306,7 @@ fn exif_fields(meta: &EmbeddedMetadata, opts: &ImageOptions) -> Vec<Field> {
         rational(Tag::XResolution, f64::from(ppi.max(1)), 1),
         rational(Tag::YResolution, f64::from(ppi.max(1)), 1),
         short(Tag::ResolutionUnit, 2), // inches
-        ascii(Tag::Software, concat!("PhotoLibrary ", env!("CARGO_PKG_VERSION"))),
+        ascii(Tag::Software, concat!("Fotaro ", env!("CARGO_PKG_VERSION"))),
     ];
     let text = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
     if let Some(a) = text(&meta.artist) {

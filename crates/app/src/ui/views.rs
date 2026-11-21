@@ -7,7 +7,7 @@ use imaging::PreviewSize;
 use super::shortcuts::Action;
 use super::sidebars::{format_capture_time, format_shutter};
 use super::{icons, theme};
-use crate::app::{Command, GridStyle, PhotoLibraryApp, Session, View};
+use crate::app::{Command, GridStyle, FotaroApp, Session, View};
 
 const UV: Rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
@@ -328,7 +328,7 @@ fn paint_needs_saving(painter: &egui::Painter, center: egui::Pos2) {
     );
 }
 
-fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &PhotoRow) {
+fn photo_context_menu(resp: &egui::Response, app: &mut FotaroApp, photo: &PhotoRow) {
     resp.context_menu(|ui| {
         if ui.button(crate::platform::REVEAL_LABEL).clicked() {
             app.run(Command::Reveal(photo.path.clone()));
@@ -429,7 +429,7 @@ fn photo_context_menu(resp: &egui::Response, app: &mut PhotoLibraryApp, photo: &
 
 /// Handle a click on a photo (cell or filmstrip frame).
 fn handle_click(
-    app: &mut PhotoLibraryApp,
+    app: &mut FotaroApp,
     resp: &egui::Response,
     photo: &PhotoRow,
     open_loupe_on_double: bool,
@@ -449,7 +449,7 @@ fn handle_click(
     }
 }
 
-pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn grid(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let style = app.ui.grid_style;
     let auto_write = app.ui.auto_write_xmp;
     let cell_w = app.ui.thumb_size.clamp(80.0, 360.0);
@@ -546,7 +546,7 @@ pub fn grid(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-fn info_overlay(app: &mut PhotoLibraryApp, ui: &egui::Ui, rect: Rect, photo: &PhotoRow) {
+fn info_overlay(app: &mut FotaroApp, ui: &egui::Ui, rect: Rect, photo: &PhotoRow) {
     if app.ui.info_overlay == 0 {
         return;
     }
@@ -644,7 +644,7 @@ pub fn clamp_center(center: Vec2, visible: Vec2) -> Vec2 {
 /// their zoom and position stay linked). `primary` panes record where they drew the
 /// photo for the Navigator and for Z; `zoom_on_click` panes toggle zoom when clicked.
 fn photo_pane(
-    app: &mut PhotoLibraryApp,
+    app: &mut FotaroApp,
     ui: &mut egui::Ui,
     rect: Rect,
     photo: &PhotoRow,
@@ -744,7 +744,7 @@ fn photo_pane(
     resp
 }
 
-pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn loupe(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
     ui.allocate_rect(rect, Sense::hover());
     let Some(s) = &mut app.session else { return };
@@ -775,7 +775,7 @@ pub fn loupe(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 /// LrC's Compare view: the Select (left) and a Candidate (right), zoom and position
 /// linked. Rating and flagging go to the active pane (white frame); click the other
 /// pane to activate it. ←/→ step the Candidate, ↑ makes it the Select, ↓ swaps.
-pub fn compare(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn compare(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
     ui.allocate_rect(rect, Sense::hover());
     if let Some((original, other)) = app.member_compare.clone() {
@@ -871,7 +871,7 @@ pub fn survey_columns(n: usize, area: Vec2, aspect: f32) -> usize {
 
 /// LrC's Survey view: every selected photo, as large as fits. Click one to make it
 /// active (rating and flagging apply to it); ✕ takes a photo out of the survey.
-pub fn survey(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn survey(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
     ui.allocate_rect(rect, Sense::hover());
     let Some(s) = &mut app.session else { return };
@@ -951,7 +951,7 @@ pub fn survey(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-pub fn fullscreen(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: Rect) {
+pub fn fullscreen(app: &mut FotaroApp, ctx: &egui::Context, full: Rect) {
     egui::Area::new(egui::Id::unique("fullscreen_preview"))
         .order(egui::Order::Foreground)
         .fixed_pos(full.min)
@@ -969,7 +969,7 @@ pub fn fullscreen(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: Rect) {
         });
 }
 
-pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn filmstrip(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     // Header: source breadcrumb, counts and the active file name.
     ui.horizontal(|ui| {
@@ -1064,7 +1064,7 @@ pub fn filmstrip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-pub fn toolbar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
         let views = [
             (View::Grid, "▦", 15.0, "Grid (G)", Action::GridView),
@@ -1190,7 +1190,7 @@ pub fn member_label(photo: &PhotoRow) -> String {
 /// Compare with Original: a picture's original (left) and the member that was shown
 /// (right), zoom and position linked. Esc or G leaves.
 fn member_compare(
-    app: &mut PhotoLibraryApp,
+    app: &mut FotaroApp,
     ui: &mut egui::Ui,
     rect: Rect,
     original: &PhotoRow,
@@ -1225,7 +1225,7 @@ fn member_compare(
 /// The version strip (above the filmstrip): every member of the active unit, picture by
 /// picture, with its role. Click shows a member (the grid cell keeps its photo);
 /// double-click or Shift+S makes it the one shown for the stack.
-pub fn version_strip(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn version_strip(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let members: Vec<catalog::Member> = s.strip_members().to_vec();
     let shown = s.active_photo().map(|p| p.id);

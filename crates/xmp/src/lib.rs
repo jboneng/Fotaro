@@ -152,7 +152,7 @@ pub struct XmpDoc {
     nodes: Vec<Node>,
 }
 
-const SKELETON: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"PhotoLibrary\">\n \
+const SKELETON: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Fotaro\">\n \
      <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n  \
      <rdf:Description rdf:about=\"\"/>\n \
      </rdf:RDF>\n</x:xmpmeta>\n";

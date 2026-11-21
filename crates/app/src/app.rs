@@ -1131,7 +1131,7 @@ impl Session {
     }
 }
 
-pub struct PhotoLibraryApp {
+pub struct FotaroApp {
     pub ui: UiState,
     last_catalog: Option<PathBuf>,
     pub session: Option<Session>,
@@ -1172,12 +1172,12 @@ pub struct PhotoLibraryApp {
     perf: crate::perf::FrameStats,
 }
 
-impl PhotoLibraryApp {
+impl FotaroApp {
     pub fn new(cc: &eframe::CreationContext<'_>, args: crate::Args) -> Self {
         crate::ui::theme::apply(&cc.egui_ctx);
         let settings: Settings =
             cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
-        let mut app = PhotoLibraryApp {
+        let mut app = FotaroApp {
             ui: settings.ui,
             last_catalog: None,
             session: None,
@@ -1207,7 +1207,7 @@ impl PhotoLibraryApp {
         };
         // Presets and imported LUTs live in the app's data folder (PL_DATA_DIR overrides).
         let data = std::env::var_os("PL_DATA_DIR").map(PathBuf::from).or_else(|| {
-            directories::ProjectDirs::from("", "", "PhotoLibrary").map(|d| d.data_dir().to_path_buf())
+            directories::ProjectDirs::from("", "", crate::APP_NAME).map(|d| d.data_dir().to_path_buf())
         });
         if let Some(data) = &data {
             imaging::develop::set_lut_store(data.join("LUTs"));
@@ -1243,7 +1243,7 @@ impl PhotoLibraryApp {
             .and_then(|d| d.picture_dir().map(Path::to_path_buf))
             .or_else(|| directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
-        base.join("Photo Library").join(format!("Photo Library.{}", catalog::CATALOG_EXTENSION))
+        base.join("Fotaro").join(format!("Fotaro.{}", catalog::CATALOG_EXTENSION))
     }
 
     fn open_catalog(&mut self, ctx: &egui::Context, dir: &Path, create: bool) {
@@ -1257,7 +1257,7 @@ impl PhotoLibraryApp {
                 self.last_catalog = Some(dir.to_path_buf());
                 self.view = View::Grid;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{} - Photo Library",
+                    "{} - Fotaro",
                     dir.file_stem().unwrap_or_default().to_string_lossy()
                 )));
             }
@@ -2793,7 +2793,7 @@ impl PhotoLibraryApp {
     }
 }
 
-impl eframe::App for PhotoLibraryApp {
+impl eframe::App for FotaroApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.perf.record(frame.info().cpu_usage);
         let ctx = ui.ctx().clone();
@@ -2985,7 +2985,7 @@ pub fn folder_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
-impl PhotoLibraryApp {
+impl FotaroApp {
     /// Run a folder operation, then refresh the folder tree and grid. If the grid's
     /// folder no longer exists, fall back to All Photographs.
     fn folder_op(&mut self, op: impl FnOnce(&mut Session) -> Result<String>) {

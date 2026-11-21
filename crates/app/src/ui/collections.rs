@@ -9,7 +9,7 @@ use catalog::{
 use eframe::egui::{self, Color32, RichText, Stroke};
 
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 
 /// Drag payload: photos dragged from the grid or filmstrip.
 #[derive(Debug, Clone)]
@@ -55,7 +55,7 @@ pub fn accept_photos(resp: &egui::Response, ui: &egui::Ui) -> Option<Vec<i64>> {
     resp.dnd_release_payload::<PhotoDrag>().map(|p| p.0.clone())
 }
 
-pub fn panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut commands = Vec::new();
     ui.horizontal(|ui| {
         ui.menu_button(RichText::new("+").size(13.0), |ui| {
@@ -193,7 +193,7 @@ pub fn panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 /// "Add to Collection" items for a photo context menu.
-pub fn add_to_collection_menu(ui: &mut egui::Ui, app: &mut PhotoLibraryApp) {
+pub fn add_to_collection_menu(ui: &mut egui::Ui, app: &mut FotaroApp) {
     let Some(s) = &app.session else { return };
     let targets: Vec<(i64, String)> = s
         .collections

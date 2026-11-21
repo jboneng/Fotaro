@@ -10,7 +10,7 @@ use imaging::export::{
 };
 
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::export::{
     BUILTIN_PRESETS, ExportPrefs, ExportPreset, ExportTo, PresetId, preset_prefs, unique_preset_name,
 };
@@ -78,7 +78,7 @@ fn combo<T: Copy + PartialEq>(
 }
 
 /// File ▸ Export with Preset, and the same in the photo context menu.
-pub fn preset_menu(ui: &mut egui::Ui, app: &mut PhotoLibraryApp) {
+pub fn preset_menu(ui: &mut egui::Ui, app: &mut FotaroApp) {
     let mut chosen = None;
     for (i, (name, _)) in BUILTIN_PRESETS.iter().enumerate() {
         if ui.button(*name).clicked() {
@@ -99,7 +99,7 @@ pub fn preset_menu(ui: &mut egui::Ui, app: &mut PhotoLibraryApp) {
     }
 }
 
-pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+pub fn window(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(d) = app.session.as_mut().and_then(|s| s.export.as_mut()) else { return };
     let count = d.photo_ids.len();
     let sample = d.sample.clone();

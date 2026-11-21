@@ -1,11 +1,12 @@
 [package]
 name = "libraw"
-description = "Safe Rust wrapper around a vendored LibRaw (used under CDDL 1.0)"
+description = "Safe Rust wrapper around a vendored LibRaw (used under LGPL-2.1)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-# LibRaw is dual-licensed LGPL-2.1 / CDDL-1.0; we statically link it under CDDL-1.0.
-license = "MIT AND CDDL-1.0"
+# LibRaw is dual-licensed LGPL-2.1 / CDDL-1.0; we statically link it under LGPL-2.1 (the
+# GPL-compatible one): our wrapper is GPL-3.0-or-later, the vendored LibRaw LGPL-2.1.
+license = "GPL-3.0-or-later AND LGPL-2.1-only"
 build = "build.rs"
 
 [dependencies]

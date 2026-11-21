@@ -62,7 +62,7 @@ impl Darktable {
         let dir = result.parent().map(Path::to_path_buf).unwrap_or_default();
         let name = PathBuf::from(result.file_name().unwrap_or_default());
         let temp = std::env::temp_dir()
-            .join("photolibrary-darktable")
+            .join("fotaro-darktable")
             .join(format!("{}-{id}-{n}.tif", std::process::id()));
         let bits = if prefs.darktable_sixteen_bit { "16" } else { "8" };
         let args: Vec<OsString> = vec![

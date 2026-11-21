@@ -1,9 +1,10 @@
 [package]
-name = "photo_library"
-description = "A desktop photo library"
+name = "fotaro"
+description = "Fotaro: a desktop photo library and RAW developer"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 catalog.workspace = true

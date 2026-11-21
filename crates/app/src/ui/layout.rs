@@ -18,7 +18,7 @@ use eframe::egui::{self, Align, Align2, Color32, Layout, RichText};
 
 use super::shortcuts::{Action, SHORTCUTS, Status};
 use super::{sidebars, theme, views};
-use crate::app::{Command, Dialog, Lights, Module, PhotoLibraryApp, View};
+use crate::app::{Command, Dialog, Lights, Module, FotaroApp, View};
 use catalog::Flag;
 
 const TOAST_TIME: Duration = Duration::from_millis(1400);
@@ -29,7 +29,7 @@ pub(super) fn shortcut_for(action: Action) -> Option<String> {
 }
 
 /// A menu item that runs a shortcut action, showing its key binding.
-fn menu_action(ui: &mut egui::Ui, app: &mut PhotoLibraryApp, text: &str, action: Action) {
+fn menu_action(ui: &mut egui::Ui, app: &mut FotaroApp, text: &str, action: Action) {
     let planned =
         SHORTCUTS.iter().find(|s| s.action == action).is_some_and(|s| matches!(s.status, Status::Planned(_)));
     let mut button = egui::Button::new(text);
@@ -44,14 +44,14 @@ fn menu_action(ui: &mut egui::Ui, app: &mut PhotoLibraryApp, text: &str, action:
     }
 }
 
-fn menu_cmd(ui: &mut egui::Ui, app: &mut PhotoLibraryApp, text: &str, enabled: bool, cmd: Command) {
+fn menu_cmd(ui: &mut egui::Ui, app: &mut FotaroApp, text: &str, enabled: bool, cmd: Command) {
     if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
         app.run(cmd);
         ui.close();
     }
 }
 
-fn menu_toggle(ui: &mut egui::Ui, app: &mut PhotoLibraryApp, text: &str, on: bool, action: Action) {
+fn menu_toggle(ui: &mut egui::Ui, app: &mut FotaroApp, text: &str, on: bool, action: Action) {
     let mut button = egui::Button::new(text).selected(on);
     if let Some(sc) = shortcut_for(action) {
         button = button.shortcut_text(sc);
@@ -62,7 +62,7 @@ fn menu_toggle(ui: &mut egui::Ui, app: &mut PhotoLibraryApp, text: &str, on: boo
     }
 }
 
-fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let has_catalog = app.session.is_some();
     let active_path = app.session.as_ref().and_then(|s| s.active_photo()).map(|p| p.path.clone());
     let folder_source = app.session.as_ref().and_then(|s| match s.source {
@@ -300,7 +300,7 @@ fn menu_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 /// Identity plate (left) with background activity, and the module picker (right).
-fn top_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn top_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     ui.horizontal_centered(|ui| {
         ui.add_space(14.0);
         let progress = app.session.as_ref().map(|s| s.jobs.progress()).unwrap_or_default();
@@ -357,7 +357,7 @@ fn top_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
             });
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         } else {
-            ui.label(RichText::new("Photo Library").size(20.0).color(theme::TEXT_WEAK));
+            ui.label(RichText::new("Fotaro").size(20.0).color(theme::TEXT_WEAK));
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -387,14 +387,14 @@ fn top_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     });
 }
 
-fn welcome(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn welcome(app: &mut FotaroApp, ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.25);
-        ui.label(RichText::new("Photo Library").size(30.0).color(theme::TEXT_STRONG));
+        ui.label(RichText::new("Fotaro").size(30.0).color(theme::TEXT_STRONG));
         ui.add_space(6.0);
         ui.label("A catalog keeps track of your photos, ratings and keywords.\nYour original files are never changed.");
         ui.add_space(18.0);
-        let default = PhotoLibraryApp::default_catalog_dir();
+        let default = FotaroApp::default_catalog_dir();
         let exists = default.join("catalog.db").is_file();
         let label = if exists { "Open Default Catalog" } else { "Create Catalog" };
         if ui.add(egui::Button::new(RichText::new(label).size(14.0)).min_size(egui::vec2(220.0, 30.0))).clicked() {
@@ -432,7 +432,7 @@ fn panel_frame(fill: Color32) -> egui::Frame {
     egui::Frame::new().fill(fill)
 }
 
-pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn draw(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let full = ui.max_rect();
     app.panel_rects.clear();
@@ -583,7 +583,7 @@ pub fn draw(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 }
 
 /// LrC-style transient message in the middle of the photo area ("Set Rating to 3 Stars").
-fn toast(app: &mut PhotoLibraryApp, ctx: &egui::Context, center: egui::Rect) {
+fn toast(app: &mut FotaroApp, ctx: &egui::Context, center: egui::Rect) {
     let Some(t) = &app.toast else { return };
     let age = t.at.elapsed();
     if age > TOAST_TIME {
@@ -603,7 +603,7 @@ fn toast(app: &mut PhotoLibraryApp, ctx: &egui::Context, center: egui::Rect) {
     ctx.request_repaint();
 }
 
-fn overlays(app: &mut PhotoLibraryApp, ctx: &egui::Context, full: egui::Rect) {
+fn overlays(app: &mut FotaroApp, ctx: &egui::Context, full: egui::Rect) {
     // Lights Out: dim (or black out) everything except the photo area.
     if app.lights != Lights::On {
         let alpha = if app.lights == Lights::Dim { 205 } else { 255 };
@@ -725,7 +725,7 @@ fn keyword_name_prompt(ui: &mut egui::Ui, name: &mut String, ok_label: &str) -> 
     result
 }
 
-fn dialogs(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+fn dialogs(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(dialog) = app.dialog.as_mut() else { return };
     // Live "N photos match" for the smart collection editor.
     type Counter<'a> = Box<dyn Fn(&catalog::SmartRules) -> i64 + 'a>;

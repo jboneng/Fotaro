@@ -5,7 +5,7 @@ use catalog::{FileKind, Flag, MetaColumn, NumOp, TextField, TextOp};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
 use super::{icons, theme};
-use crate::app::PhotoLibraryApp;
+use crate::app::FotaroApp;
 use crate::filter::{COLUMNS, FilterBar};
 
 /// Picks one of the bar's on/off switches.
@@ -26,7 +26,7 @@ fn mode_button(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
     ui.add(egui::Button::new(RichText::new(text).color(color)).frame(false).selected(on))
 }
 
-pub fn show(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub fn show(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut f = app.ui.filter.clone();
     let focus_text = std::mem::take(&mut app.focus_find);
     let shift = ui.input(|i| i.modifiers.shift);

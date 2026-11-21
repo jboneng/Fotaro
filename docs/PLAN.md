@@ -1,10 +1,10 @@
-# PhotoLibrary — Plan
+# Fotaro — Plan
 
 ## Context
 
 Goal: a Rust/egui desktop app that recreates the **Lightroom Classic Library module** (catalog, import, folders, collections, grid/loupe/compare/survey, culling, filter bar, metadata/keywords). Editing was first delegated to external apps through **Edit In** (NegPy, Luminar, darktable). A **Develop** module of our own is now being added, starting with LrC's Basic panel (see "Design: Develop module" below); Edit In stays.
 
-Current state: a working scaffold (`photo_library` crate, eframe/egui 0.37, edition 2024) at `C:\Users\jbone\Desktop\PhotoLibrary`:
+Current state: a working scaffold (`fotaro` crate, called Photo Library until 2026-11-21; eframe/egui 0.37, edition 2024) at `C:\Users\jbone\Desktop\PhotoLibrary`:
 - `src/main.rs` – window setup; `src/app.rs` – menu, file list, details panel, persisted `Settings`; `src/library.rs` – `is_photo()` + recursive `scan()` with 3 unit tests.
 - Note for egui 0.37: `App::ui(&mut self, ui, frame)`, `egui::Panel::{top,bottom,left}(..).show(ui, ..)`, `.default_size()`.
 
@@ -124,7 +124,7 @@ Baseline measured with a generated 10,000-photo library (100 folders, 1600 px JP
 Fixes: metadata read in parallel during sync (one transaction, no reload churn, no SQLite write
 contention from workers); SIMD `jpeg-encoder` for previews; free-space queries off the UI thread;
 folder tree computed once per change; workers at lowest OS priority; mimalloc allocator.
-Measure again with `PHOTOLIB_PERF=1` (frame stats) and the `imaging` `bench` example.
+Measure again with `FOTARO_PERF=1` (frame stats) and the `imaging` `bench` example.
 
 - [x] 10k-photo performance pass
 - [x] Sort options (Capture Time, Added Order, Pick, Label Color, Rating, File Name, Extension, Aspect Ratio) + direction
@@ -735,7 +735,7 @@ later as another component kind.
       another.
 
 ## Design: AI masks (Subject, Sky, Background, Objects)
-Decided with the user (2026-11-18): PhotoLibrary will never be a commercial product, so
+Decided with the user (2026-11-18): the app will never be a commercial product, so
 non-commercial model weights are fine; DirectML from the start; ~400–500 MB of models
 downloaded on first use is acceptable; benchmark before choosing.
 

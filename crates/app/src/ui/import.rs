@@ -6,7 +6,7 @@ use catalog::{DateFolders, FileKind, ImportMode, RENAME_PRESETS, RENAME_TOKENS};
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke};
 
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::jobs::Job;
 
 const CELL: f32 = 132.0;
@@ -21,7 +21,7 @@ fn weak(text: impl Into<String>) -> RichText {
     RichText::new(text).color(theme::TEXT_WEAK)
 }
 
-pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+pub fn window(app: &mut FotaroApp, ctx: &egui::Context) {
     if app.session.as_ref().is_none_or(|s| s.import.is_none()) {
         return;
     }
@@ -70,7 +70,7 @@ pub fn window(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
     }
 }
 
-fn top_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn top_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let source = app.session.as_ref().and_then(|s| s.import.as_ref()).and_then(|d| d.source.clone());
     let mode = &mut app.ui.import.settings.mode;
     ui.horizontal(|ui| {
@@ -102,7 +102,7 @@ fn top_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     });
 }
 
-fn source_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, commands: &mut Vec<Command>) {
+fn source_panel(app: &mut FotaroApp, ui: &mut egui::Ui, commands: &mut Vec<Command>) {
     let Some(s) = &mut app.session else { return };
     let Some(d) = &mut s.import else { return };
     let volumes = d.volumes.lock().unwrap().clone();
@@ -168,7 +168,7 @@ fn source_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, commands: &mut Vec
     }
 }
 
-fn photos_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn photos_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let skip = app.ui.import.settings.skip_duplicates;
     let Some(s) = &mut app.session else { return };
     let Some(d) = &mut s.import else { return };
@@ -286,7 +286,7 @@ fn photos_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
     }
 }
 
-fn settings_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+fn settings_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let first = app
         .session
         .as_ref()
@@ -386,7 +386,7 @@ fn settings_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
         .on_hover_text("Comma separated; Child < Parent for hierarchy");
 }
 
-fn bottom_bar(app: &mut PhotoLibraryApp, ui: &mut egui::Ui, commands: &mut Vec<Command>) {
+fn bottom_bar(app: &mut FotaroApp, ui: &mut egui::Ui, commands: &mut Vec<Command>) {
     let prefs = app.ui.import.clone();
     let chosen = app
         .session

@@ -9,7 +9,7 @@ use imaging::develop::{DevelopSettings, DustLayer, DustPolarity, DustSource, Sli
 use super::develop::{Spec, slider_row_as, weak};
 use super::masking::{Canvas, header, pill};
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::develop::{DevelopState, RemoveDrag, RemoveSettings, RemoveTool, spot_radius, spot_size};
 
 /// How close (screen points) to a circle's edge resizes it.
@@ -675,7 +675,7 @@ fn mode_button(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
 
 /// The right panel with the Remove tool open: Heal or Clone, Size, Feather, Opacity (of the
 /// selected spot, or for new ones), New Source, Delete, Reset.
-pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     let Some(mut tool) = d.removing.clone() else { return };

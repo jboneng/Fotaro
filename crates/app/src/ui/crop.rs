@@ -12,7 +12,7 @@ use imaging::develop::{Crop, MAX_CROP_ANGLE, Slider};
 use super::develop::{Spec, rotate, slider_row, unrotate, weak};
 use super::masking::{header, pill};
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::develop::{CropDrag, CropHandle, CropTool, DevelopState};
 
 /// Screen ↔ frame (0..1 across and down) for the photo drawn in `img_rect`.
@@ -379,7 +379,7 @@ fn with_preset(c: &Crop, preset: Option<f32>, aspect: f32, constrain: bool) -> C
 
 /// The right panel with the crop tool open: Aspect and its lock, Angle, Straighten and
 /// Auto, Constrain to Image, Reset.
-pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     let Some(mut tool) = d.cropping.clone() else { return };

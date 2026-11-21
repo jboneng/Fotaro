@@ -12,7 +12,7 @@ use imaging::develop::{
 
 use super::develop::{Spec, rotate, slider_row, slider_row_as, unrotate, weak};
 use super::theme;
-use crate::app::{Command, PhotoLibraryApp};
+use crate::app::{Command, FotaroApp};
 use crate::develop::{
     AiKind, BrushSettings, DevelopState, Handle, MaskDrag, MaskTool, Masking, ObjectPrompt, ShapeKind,
     ToolTarget,
@@ -752,7 +752,7 @@ pub(super) fn ai_progress(ui: &mut egui::Ui, job: &crate::develop::AiJob) {
 }
 
 /// Before the first AI mask: what has to be downloaded, and agreeing to it.
-pub(super) fn ai_consent(app: &mut PhotoLibraryApp, ctx: &egui::Context) {
+pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     let Some(consent) = d.ai_consent.clone() else { return };
@@ -833,7 +833,7 @@ pub(super) fn pill(ui: &mut egui::Ui, text: &str, menu: bool) -> egui::Response 
 
 /// LrC's floating Masks panel over the photo: the masks (a row each, with a switch to show
 /// or hide it), the selected mask's components, adding to it, and the overlay.
-pub(super) fn masks_panel(app: &mut PhotoLibraryApp, ctx: &egui::Context, anchor: Rect) {
+pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     let Some(mut m) = d.masking.clone() else { return };
@@ -1256,7 +1256,7 @@ pub(super) fn header(ui: &mut egui::Ui, title: &str, icon: Option<ShapeKind>) {
 
 /// The right panel while masking: the selected mask's Amount, its component (Invert,
 /// Feather or the brush) and the local sliders, in a section like the other panels.
-pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     let Some(mut m) = d.masking.clone() else { return };
@@ -1407,7 +1407,7 @@ pub(super) fn right_panel(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
 
 /// LrC's tool strip under the histogram: the Masking tool (Shift+W), with the number of
 /// masks.
-pub(super) fn masking_button(app: &mut PhotoLibraryApp, ui: &mut egui::Ui) {
+pub(super) fn masking_button(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
     let n = d.settings.masks.len();
