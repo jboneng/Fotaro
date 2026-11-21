@@ -23,6 +23,8 @@ pub const MODULE_ACTIVE: Color32 = Color32::from_rgb(0xe6, 0xe6, 0xe6);
 pub const PICK: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf2);
 pub const REJECT: Color32 = Color32::from_rgb(0x15, 0x15, 0x15);
 pub const STAR: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x1e);
+/// The menu bar's update indicator.
+pub const UPDATE: Color32 = Color32::from_rgb(0x6c, 0xb4, 0xe6);
 pub const MISSING: Color32 = Color32::from_rgb(0xd0, 0x8a, 0x2a);
 
 pub fn label_color(label: &str) -> Option<Color32> {

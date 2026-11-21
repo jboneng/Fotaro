@@ -295,8 +295,120 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
         });
         ui.menu_button("Help", |ui| {
             menu_action(ui, app, "Library Module Shortcuts", Action::ShowShortcuts);
+            ui.separator();
+            if ui.button("Check for Updates…").clicked() {
+                app.updater.check(ui.ctx(), true);
+                ui.close();
+            }
+            ui.checkbox(&mut app.ui.check_updates, "Check for Updates Automatically");
+            ui.separator();
+            if ui.button(format!("About {}", crate::APP_NAME)).clicked() {
+                app.show_about = true;
+                ui.close();
+            }
         });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| update_indicator(app, ui));
     });
+}
+
+/// The menu bar's update indicator: a newer release is out (click to download it), its
+/// download's progress, then "Restart to Update". Nothing while there is no update.
+fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
+    use crate::update::{Started, State};
+    let ctx = ui.ctx().clone();
+    let pill = |ui: &mut egui::Ui, text: String, strong: bool| {
+        let color = if strong { theme::TOP_BAR } else { theme::UPDATE };
+        let fill = if strong { theme::UPDATE } else { Color32::TRANSPARENT };
+        ui.add(
+            egui::Button::new(RichText::new(text).size(11.5).color(color))
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, theme::UPDATE))
+                .corner_radius(9.0),
+        )
+    };
+    match app.updater.state.clone() {
+        State::Idle => {}
+        State::Checking => {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(RichText::new("Checking for updates").size(11.5).color(theme::TEXT_WEAK));
+        }
+        State::Available(release) => {
+            let resp = pill(ui, format!("⬆ {} {} available", crate::APP_NAME, release.version), false);
+            let can_install = release.asset.is_some();
+            let resp = resp.on_hover_ui(|ui| {
+                ui.set_max_width(380.0);
+                ui.label(RichText::new(format!("{} {}", crate::APP_NAME, release.version)).strong());
+                ui.label(format!("You have {}.", crate::VERSION));
+                if !release.notes.is_empty() {
+                    ui.add_space(4.0);
+                    let notes: String = release.notes.lines().take(14).collect::<Vec<_>>().join("\n");
+                    ui.label(RichText::new(notes).small());
+                }
+                ui.add_space(4.0);
+                if let Some(e) = &app.updater.error {
+                    ui.label(RichText::new(format!("The last try failed: {e}")).color(theme::MISSING));
+                }
+                ui.label(RichText::new(if can_install {
+                    "Click to download it. Right-click for more."
+                } else {
+                    "There is no installer for this system yet: click to open the release page."
+                })
+                .color(theme::TEXT_WEAK));
+            });
+            if resp.clicked() {
+                if can_install {
+                    app.updater.download(&ctx);
+                } else {
+                    ctx.open_url(egui::OpenUrl::new_tab(&release.page));
+                }
+            }
+            resp.context_menu(|ui| {
+                if ui.button("What's New…").clicked() {
+                    ctx.open_url(egui::OpenUrl::new_tab(&release.page));
+                    ui.close();
+                }
+                if ui.button("Skip This Version").clicked() {
+                    app.ui.skipped_update = Some(release.version.clone());
+                    app.updater.dismiss();
+                    ui.close();
+                }
+            });
+        }
+        State::Downloading(release) => {
+            let p = app.updater.progress();
+            ui.add(egui::ProgressBar::new(p).desired_width(90.0).desired_height(6.0));
+            ui.label(
+                RichText::new(format!("Downloading {} {} – {:.0}%", crate::APP_NAME, release.version, p * 100.0))
+                    .size(11.5)
+                    .color(theme::TEXT_WEAK),
+            );
+        }
+        State::Ready(release, _) => {
+            let silent = crate::update::installed();
+            let text = if silent { "⟳ Restart to Update".to_owned() } else { "Install Update…".to_owned() };
+            let hover = if silent {
+                format!("Close {0}, install {0} {1} and start it again", crate::APP_NAME, release.version)
+            } else {
+                format!("Open the {} {} installer", crate::APP_NAME, release.version)
+            };
+            if pill(ui, text, true).on_hover_text(hover).clicked() {
+                let progress = app.session.as_ref().map(|s| s.jobs.progress()).unwrap_or_default();
+                if progress.import.is_some() || progress.export.is_some() {
+                    let what = if progress.import.is_some() { "import" } else { "export" };
+                    app.toast = Some(crate::app::Toast {
+                        text: format!("Update after the {what} has finished (or stop it first)"),
+                        at: std::time::Instant::now(),
+                    });
+                    return;
+                }
+                match app.updater.install() {
+                    Ok(Started::AfterClose) => app.run(Command::Quit),
+                    Ok(Started::Opened) => {}
+                    Err(e) => app.error = Some(format!("Could not start the update: {e}")),
+                }
+            }
+        }
+    }
 }
 
 /// Identity plate (left) with background activity, and the module picker (right).
@@ -390,7 +502,8 @@ fn top_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
 fn welcome(app: &mut FotaroApp, ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.25);
-        ui.label(RichText::new("Fotaro").size(30.0).color(theme::TEXT_STRONG));
+        ui.label(RichText::new(crate::APP_NAME).size(30.0).color(theme::TEXT_STRONG));
+        ui.label(RichText::new(format!("Version {}", crate::VERSION)).color(theme::TEXT_WEAK));
         ui.add_space(6.0);
         ui.label("A catalog keeps track of your photos, ratings and keywords.\nYour original files are never changed.");
         ui.add_space(18.0);
@@ -654,6 +767,10 @@ fn overlays(app: &mut FotaroApp, ctx: &egui::Context, full: egui::Rect) {
                 });
             });
         app.show_shortcuts = open;
+    }
+
+    if app.show_about {
+        about(app, ctx);
     }
 
     dialogs(app, ctx);
@@ -1005,4 +1122,45 @@ fn dialogs(app: &mut FotaroApp, ctx: &egui::Context) {
     if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.dialog = None;
     }
+}
+
+/// Help ▸ About: the app's name, version, licence and where it lives.
+fn about(app: &mut FotaroApp, ctx: &egui::Context) {
+    let mut open = true;
+    egui::Window::new(format!("About {}", crate::APP_NAME))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.vertical_centered(|ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new(crate::APP_NAME).size(26.0).color(theme::TEXT_STRONG));
+                ui.label(RichText::new(format!("Version {}", crate::VERSION)).color(theme::TEXT_WEAK));
+                ui.add_space(8.0);
+                ui.label("A photo organiser and RAW editor.");
+                ui.add_space(8.0);
+                ui.hyperlink_to("github.com/jboneng/Fotaro", "https://github.com/jboneng/Fotaro");
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "Free software under the GNU General Public License, version 3 or later. \
+                         It comes with absolutely no warranty.",
+                    )
+                    .small()
+                    .color(theme::TEXT_WEAK),
+                );
+                ui.label(
+                    RichText::new(
+                        "RAW decoding by LibRaw (LGPL-2.1). Lens corrections from the Lensfun \
+                         database (CC BY-SA 3.0).",
+                    )
+                    .small()
+                    .color(theme::TEXT_WEAK),
+                );
+                ui.add_space(4.0);
+            });
+        });
+    app.show_about = open;
 }

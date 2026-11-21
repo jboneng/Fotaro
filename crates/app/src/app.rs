@@ -191,6 +191,10 @@ pub struct UiState {
     pub show_version_strip: bool,
     /// Run AI masks on the GPU (DirectML) when it can.
     pub ai_gpu: bool,
+    /// Help ▸ Check for Updates Automatically: at start and once a day.
+    pub check_updates: bool,
+    /// The release the user chose to skip (not offered again unless they check).
+    pub skipped_update: Option<String>,
 }
 
 impl Default for UiState {
@@ -222,6 +226,8 @@ impl Default for UiState {
             edit_in: crate::editors::EditInPrefs::default(),
             show_version_strip: true,
             ai_gpu: true,
+            check_updates: true,
+            skipped_update: None,
         }
     }
 }
@@ -1146,6 +1152,10 @@ pub struct FotaroApp {
     /// Ctrl+F: put the cursor in the Text filter next frame.
     pub focus_find: bool,
     pub show_shortcuts: bool,
+    /// Help ▸ About Fotaro.
+    pub show_about: bool,
+    /// New releases on GitHub: checked for, downloaded and installed.
+    pub updater: crate::update::Updater,
     pub toast: Option<Toast>,
     pub error: Option<String>,
     /// Develop presets (app-wide, files in the app's data folder) and their panel's state.
@@ -1190,6 +1200,8 @@ impl FotaroApp {
             focus_keywording: false,
             focus_find: false,
             show_shortcuts: false,
+            show_about: false,
+            updater: Default::default(),
             toast: None,
             error: None,
             dialog: None,
@@ -2828,6 +2840,12 @@ impl eframe::App for FotaroApp {
         }
         if self.module == Module::Develop {
             self.develop_frame(&ctx);
+        }
+        if self.ui.check_updates {
+            self.updater.check_daily(&ctx);
+        }
+        if let Some(text) = self.updater.poll(self.ui.skipped_update.as_deref()) {
+            self.toast = Some(Toast { text, at: Instant::now() });
         }
 
         for sc in crate::ui::shortcuts::take_actions(&ctx, self.module) {

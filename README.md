@@ -78,9 +78,26 @@ beach photos are 35 mm film scans.*
 
 ## Getting Fotaro
 
-Fotaro is in active development and there are no ready-made downloads yet, so for now you build
-it yourself. It is developed and tested on **Windows 11**. macOS and Linux are planned but not
-tested at the moment.
+Fotaro is in active development. It is developed and tested on **Windows 11**; macOS and Linux
+are planned but not tested at the moment.
+
+### Install on Windows
+
+Download `Fotaro-<version>-windows-x86_64-setup.exe` from the
+[latest release](https://github.com/jboneng/Fotaro/releases/latest) and run it. It installs for
+your user account only, so it doesn't need administrator rights. The installer isn't signed yet,
+so Windows may warn you about an unrecognised app: choose **More info ▸ Run anyway**.
+
+### Updates
+
+Fotaro checks for a new release when it starts, and once a day while it runs. When there is one, a
+small **Fotaro x.y available** button appears at the right end of the menu bar. Hover over it to
+see what's new, and click it to download the update. When the download has finished, the button
+reads **Restart to Update**: click it, and Fotaro closes, installs the new version and starts
+again. Right-click the button to skip that version. **Help ▸ Check for Updates** checks straight
+away, and you can turn the automatic check off in the same menu.
+
+### Build from source
 
 You need:
 
@@ -144,6 +161,12 @@ cargo run -p imaging --example renderbench --release -- <file>   # Develop rende
 
 If you cloned without `--recurse-submodules`, run `git submodule update --init` to fetch LibRaw.
 
+**Releasing:** set the new `version` in the workspace `Cargo.toml`, commit, then push a tag
+`v<version>`. The Release workflow builds the Windows installer and publishes it on a GitHub
+release, where the updater in older versions finds it. To build the installer locally, run
+`installer\build.ps1` (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)); it lands in
+`target\installer\`.
+
 | Path             | Purpose                                                              |
 |------------------|----------------------------------------------------------------------|
 | `crates/app`     | The application: windows, panels, tools (binary `fotaro`)            |
@@ -153,3 +176,4 @@ If you cloned without `--recurse-submodules`, run `git submodule update --init` 
 | `crates/lensdb`  | The Lensfun lens database: download, matching, corrections           |
 | `crates/segment` | AI models: masks, content-aware fill, dust and people detection      |
 | `crates/xmp`     | XMP sidecars: read and update in place (Lightroom, Bridge, darktable) |
+| `installer`      | The Windows installer (Inno Setup) and its build script              |

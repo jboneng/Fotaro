@@ -28,6 +28,9 @@ fs4 = "1.1.0"
 mimalloc = "0.1.52"
 rayon = "1.12"
 thread-priority = "3.1.1"
+# Updates: the latest release from GitHub, and its installer's checksum.
+ureq = "3"
+sha2 = "0.10"
 
 [lints]
 workspace = true

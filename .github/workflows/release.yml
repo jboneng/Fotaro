@@ -1,0 +1,61 @@
+name: Release
+
+# Push a tag like v0.6.0 (the version in Cargo.toml) to publish a release with the Windows
+# installer. Fotaro's updater offers it to everyone on an older version.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Build
+        id: build
+        shell: pwsh
+        run: ./installer/build.ps1
+
+      - name: Check the tag matches the version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          if ($tag -ne '${{ steps.build.outputs.version }}') {
+            throw "The tag ($tag) is not the version in Cargo.toml (${{ steps.build.outputs.version }})"
+          }
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $installer = '${{ steps.build.outputs.installer }}'
+          # A release already written by hand (with its notes) gets the installer added.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $installer --clobber
+          } else {
+            gh release create $tag $installer --title "Fotaro ${{ steps.build.outputs.version }}" --generate-notes
+          }

@@ -15,11 +15,14 @@ mod platform;
 mod presets;
 mod textures;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 
 /// The app's name: in the title bar, and its folders (settings, presets, AI models).
 pub const APP_NAME: &str = "Fotaro";
+/// The app's version (the workspace's, in `Cargo.toml`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // mimalloc avoids allocator lock contention between the UI thread and the many
 // worker threads that allocate large image buffers.
