@@ -93,8 +93,8 @@ You need:
 Then, in a terminal:
 
 ```sh
-git clone --recurse-submodules https://github.com/jboneng/ImageLibrary.git
-cd ImageLibrary
+git clone --recurse-submodules https://github.com/jboneng/Fotaro.git
+cd Fotaro
 cargo run --release -p fotaro
 ```
 
