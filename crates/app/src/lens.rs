@@ -63,8 +63,13 @@ pub struct LensState {
     pub candidates: Vec<lensdb::LensMatch>,
     pub status: String,
     pub tab: LensTab,
-    /// The Make menu's choice while choosing a lens by hand.
-    pub maker: Option<String>,
+    /// Choosing a lens by hand: what is typed in the list's search box, the row the arrow
+    /// keys are on, and whether the box still has to take the keyboard (just opened).
+    pub search: String,
+    pub pick: usize,
+    pub focus_search: bool,
+    /// Also list lenses for other mounts than the camera's (a lens on an adapter).
+    pub any_mount: bool,
     /// Remove CA is being measured.
     pub measuring: bool,
 }
@@ -76,7 +81,8 @@ impl LensState {
         self.checked = None;
         self.candidates.clear();
         self.status.clear();
-        self.maker = None;
+        self.search.clear();
+        self.pick = 0;
         self.measuring = false;
     }
 

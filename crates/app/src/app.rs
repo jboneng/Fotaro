@@ -195,6 +195,8 @@ pub struct UiState {
     pub check_updates: bool,
     /// The release the user chose to skip (not offered again unless they check).
     pub skipped_update: Option<String>,
+    /// Lenses chosen by hand in Lens Corrections (maker, model), newest first.
+    pub recent_lenses: Vec<(String, String)>,
 }
 
 impl Default for UiState {
@@ -228,6 +230,7 @@ impl Default for UiState {
             ai_gpu: true,
             check_updates: true,
             skipped_update: None,
+            recent_lenses: Vec::new(),
         }
     }
 }

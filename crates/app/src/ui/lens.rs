@@ -68,7 +68,7 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 done = Some(Some(format!("Lens Profile Corrections: {}", if on { "On" } else { "Off" })));
             }
             if l.profile_enable {
-                profile_box(ui, d, &mut st, &mut done, &ctx);
+                profile_box(ui, d, &mut st, &mut done, &ctx, &mut app.ui.recent_lenses);
             }
             ui.add_space(6.0);
             database_line(ui, d, &ctx);
@@ -139,14 +139,15 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The profile: Setup, how it was found, Make / Model, focal length and aperture when the
-/// photo doesn't say, and the Amount sliders.
+/// The profile: Setup, how it was found, the lens (one list to search), focal length and
+/// aperture when the photo doesn't say, and the Amount sliders.
 fn profile_box(
     ui: &mut egui::Ui,
     d: &mut crate::develop::DevelopState,
     st: &mut imaging::develop::DevelopSettings,
     done: &mut Option<Option<String>>,
     ctx: &egui::Context,
+    recent: &mut Vec<(String, String)>,
 ) {
     let Some(db) = d.lens.db.clone() else {
         d.lens.load(ctx);
@@ -181,73 +182,39 @@ fn profile_box(
     if !d.lens.status.is_empty() {
         ui.label(weak(d.lens.status.as_str()).size(11.5));
     }
-    // Make and Model: the photo's candidates first; any lens of a maker by hand.
+    // The lens: one list to search, with the photo's candidates and recent choices first.
     let current = l.profile.clone();
     let camera =
         d.lens.photo.as_ref().and_then(|p| db.find_camera(&p.lens.camera_maker, &p.lens.camera_model));
-    let mounts = camera.map(|c| db.compatible_mounts(&c.mount));
+    let mounts = camera.filter(|_| !d.lens.any_mount).map(|c| db.compatible_mounts(&c.mount));
     let fits = |x: &lensdb::Lens| {
         x.kind == lensdb::LensType::Rectilinear
             && x.has_corrections()
             && mounts.as_ref().is_none_or(|m| x.mounts.iter().any(|mm| m.contains(mm)))
             && camera.is_none_or(|c| x.crop <= c.crop * 1.01)
     };
-    let maker = d.lens.maker.clone().or_else(|| current.as_ref().map(|p| p.maker.clone()));
     let mut chosen: Option<usize> = None;
     ui.horizontal(|ui| {
-        ui.add_sized([LABEL_W - 20.0, 18.0], egui::Label::new(weak("Make:")));
-        egui::ComboBox::from_id_salt("lens_make")
-            .selected_text(maker.clone().unwrap_or_else(|| "—".into()))
-            .width(150.0)
-            .height(400.0)
-            .show_ui(ui, |ui| {
-                let mut makers: Vec<&str> =
-                    db.lenses.iter().filter(|x| fits(x)).map(|x| x.maker.as_str()).collect();
-                makers.sort_by_key(|m| m.to_lowercase());
-                makers.dedup();
-                for m in makers {
-                    if ui.selectable_label(maker.as_deref() == Some(m), m).clicked() {
-                        d.lens.maker = Some(m.to_string());
-                    }
-                }
-            });
-    });
-    ui.horizontal(|ui| {
-        ui.add_sized([LABEL_W - 20.0, 18.0], egui::Label::new(weak("Model:")));
-        let shown = current.as_ref().map_or_else(|| "None".to_string(), |p| p.lens.clone());
-        egui::ComboBox::from_id_salt("lens_model")
-            .selected_text(RichText::new(shown).size(11.5))
-            .width(ui.available_width().max(120.0))
-            .height(420.0)
-            .show_ui(ui, |ui| {
-                // The photo's candidates, then every lens of the chosen maker.
-                if !d.lens.candidates.is_empty() {
-                    ui.label(weak("Fits the photo").size(11.0));
-                    for m in d.lens.candidates.iter().take(12) {
-                        let x = &db.lenses[m.index];
-                        let on = current.as_ref().is_some_and(|p| p.lens == x.model);
-                        if ui.selectable_label(on, &x.model).clicked() {
-                            chosen = Some(m.index);
-                        }
-                    }
-                    ui.separator();
-                }
-                if let Some(mk) = &maker {
-                    let mut all: Vec<usize> = (0..db.lenses.len())
-                        .filter(|&i| db.lenses[i].maker == *mk && fits(&db.lenses[i]))
-                        .collect();
-                    all.sort_by_key(|&i| db.lenses[i].model.to_lowercase());
-                    for i in all {
-                        let x = &db.lenses[i];
-                        let on = current.as_ref().is_some_and(|p| p.lens == x.model);
-                        if ui.selectable_label(on, &x.model).clicked() {
-                            chosen = Some(i);
-                        }
-                    }
-                } else if d.lens.candidates.is_empty() {
-                    ui.label(weak("Choose the Make first").size(11.0));
-                }
-            });
+        ui.add_sized([LABEL_W - 20.0, 18.0], egui::Label::new(weak("Lens:")));
+        let shown = current.as_ref().map_or_else(|| "Choose a lens…".to_string(), |p| p.lens.clone());
+        let resp = ui.add_sized(
+            [ui.available_width().max(120.0), 20.0],
+            egui::Button::new(RichText::new(shown).size(11.5)).truncate(),
+        );
+        if resp.clicked() {
+            d.lens.search.clear();
+            d.lens.pick = 0;
+            d.lens.focus_search = true;
+        }
+        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(340.0);
+            ui.set_max_width(340.0);
+            let now = current.as_ref().map(|p| p.lens.as_str());
+            chosen = lens_picker(ui, &mut d.lens, &db, &fits, now, recent, camera.is_some());
+            if chosen.is_some() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                ui.close();
+            }
+        });
     });
     if let Some(i) = chosen {
         let lens = &db.lenses[i];
@@ -255,8 +222,11 @@ fn profile_box(
         let focal = focal.filter(|f| *f >= lens.min_focal && *f <= lens.max_focal);
         l.setup = LensSetup::Custom;
         l.profile = Some(d.lens.resolve_for(&db, lens, focal, aperture));
-        d.lens.maker = Some(lens.maker.clone());
         d.lens.status = format!("Chosen: {}", lens.model);
+        let key = (lens.maker.clone(), lens.model.clone());
+        recent.retain(|r| *r != key);
+        recent.insert(0, key);
+        recent.truncate(8);
         *done = Some(Some(format!("Lens Profile: {}", lens.model)));
     }
     // What the photo doesn't say: focal length (zooms) and aperture.
@@ -317,6 +287,173 @@ fn profile_box(
     });
 }
 
+/// How a lens reads in the list: its model, with the maker in front when the model
+/// doesn't already start with it.
+fn lens_name(x: &lensdb::Lens) -> String {
+    if x.model.to_lowercase().starts_with(&x.maker.to_lowercase()) {
+        x.model.clone()
+    } else {
+        format!("{} {}", x.maker, x.model)
+    }
+}
+
+/// How well a lens answers a search (`words`, lower case): every word must be somewhere
+/// in its maker, model or other names; a word found at the start of one counts double
+/// ("50" is better in "50mm" than in "150mm"). `None`: not an answer.
+fn search_score(words: &[String], x: &lensdb::Lens) -> Option<u32> {
+    let hay = format!("{} {} {}", x.maker, x.model, x.names.join(" ")).to_lowercase();
+    let mut score = 0;
+    for w in words {
+        let mut any = false;
+        let mut starts = false;
+        for (i, _) in hay.match_indices(w.as_str()) {
+            any = true;
+            let before = hay[..i].chars().next_back();
+            starts |= before.is_none_or(|c| !c.is_alphanumeric() && c != '.');
+        }
+        if !any {
+            return None;
+        }
+        score += if starts { 2 } else { 1 };
+    }
+    Some(score)
+}
+
+/// The lens list: a search box (type any part of the make or model: "nikon 50 1.8"), the
+/// answers best first, with the arrow keys and Enter; without a search, the lenses that
+/// fit the photo, those chosen lately, and every maker to open. Returns the lens chosen.
+fn lens_picker(
+    ui: &mut egui::Ui,
+    state: &mut crate::lens::LensState,
+    db: &lensdb::Database,
+    fits: &dyn Fn(&lensdb::Lens) -> bool,
+    current: Option<&str>,
+    recent: &[(String, String)],
+    has_camera: bool,
+) -> Option<usize> {
+    let mut chosen = None;
+    let edit = ui.add(
+        egui::TextEdit::singleline(&mut state.search)
+            .hint_text("Search, e.g. nikon 50 1.8")
+            .desired_width(f32::INFINITY),
+    );
+    if std::mem::take(&mut state.focus_search) {
+        edit.request_focus();
+    }
+    if edit.changed() {
+        state.pick = 0;
+    }
+    let row = |ui: &mut egui::Ui, i: usize, lit: bool| {
+        let x = &db.lenses[i];
+        let on = lit || current == Some(x.model.as_str());
+        ui.selectable_label(on, RichText::new(lens_name(x)).size(11.5))
+    };
+    let words: Vec<String> = state.search.to_lowercase().split_whitespace().map(String::from).collect();
+    ui.add_space(2.0);
+    if !words.is_empty() {
+        let mut found: Vec<(u32, usize)> = db
+            .lenses
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| fits(x))
+            .filter_map(|(i, x)| search_score(&words, x).map(|s| (s, i)))
+            .collect();
+        found.sort_by_cached_key(|(s, i)| (std::cmp::Reverse(*s), lens_name(&db.lenses[*i]).to_lowercase()));
+        const SHOWN: usize = 80;
+        let shown = found.len().min(SHOWN);
+        let (down, up) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+            )
+        });
+        if down {
+            state.pick += 1;
+        }
+        if up {
+            state.pick = state.pick.saturating_sub(1);
+        }
+        state.pick = state.pick.min(shown.saturating_sub(1));
+        if shown > 0 && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            chosen = Some(found[state.pick].1);
+        }
+        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if found.is_empty() {
+                ui.label(weak("No lens with all of those words").size(11.0));
+            }
+            for (k, (_, i)) in found.iter().take(SHOWN).enumerate() {
+                let r = row(ui, *i, k == state.pick);
+                if k == state.pick && (down || up) {
+                    r.scroll_to_me(None);
+                }
+                if r.clicked() {
+                    chosen = Some(*i);
+                }
+            }
+            if found.len() > SHOWN {
+                ui.label(
+                    weak(format!("{} more: type more to narrow it down", found.len() - SHOWN)).size(11.0),
+                );
+            }
+        });
+    } else {
+        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if !state.candidates.is_empty() {
+                ui.label(weak("Fits the photo").size(11.0));
+                for m in state.candidates.iter().take(8) {
+                    if row(ui, m.index, false).clicked() {
+                        chosen = Some(m.index);
+                    }
+                }
+                ui.separator();
+            }
+            let lately: Vec<usize> = recent
+                .iter()
+                .filter_map(|(maker, model)| {
+                    db.lenses.iter().position(|x| x.maker == *maker && x.model == *model)
+                })
+                .collect();
+            if !lately.is_empty() {
+                ui.label(weak("Chosen lately").size(11.0));
+                for i in lately {
+                    if row(ui, i, false).clicked() {
+                        chosen = Some(i);
+                    }
+                }
+                ui.separator();
+            }
+            // Every maker, closed: open one to see its lenses.
+            let mut makers: std::collections::BTreeMap<String, (&str, Vec<usize>)> = Default::default();
+            for (i, x) in db.lenses.iter().enumerate().filter(|(_, x)| fits(x)) {
+                makers.entry(x.maker.to_lowercase()).or_insert((x.maker.as_str(), Vec::new())).1.push(i);
+            }
+            ui.label(weak("All makes").size(11.0));
+            for (maker, mut lenses) in makers.into_values() {
+                egui::CollapsingHeader::new(RichText::new(format!("{maker}  ({})", lenses.len())).size(11.5))
+                    .id_salt(("lens_maker", maker))
+                    .show(ui, |ui| {
+                        lenses.sort_by_cached_key(|i| db.lenses[*i].model.to_lowercase());
+                        for i in lenses {
+                            if row(ui, i, false).clicked() {
+                                chosen = Some(i);
+                            }
+                        }
+                    });
+            }
+        });
+    }
+    if has_camera {
+        ui.separator();
+        ui.checkbox(&mut state.any_mount, RichText::new("Lenses for other mounts too").size(11.5))
+            .on_hover_text(
+                "For a lens used on an adapter: list every lens, not only those for this camera's mount",
+            );
+    }
+    chosen
+}
+
 /// The lens database: download it, its date and Update, and the credit.
 fn database_line(ui: &mut egui::Ui, d: &mut crate::develop::DevelopState, ctx: &egui::Context) {
     if let Some(p) = &d.lens.downloading {
@@ -356,4 +493,29 @@ fn database_line(ui: &mut egui::Ui, d: &mut crate::develop::DevelopState, ctx: &
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lens_search_needs_every_word_and_likes_whole_numbers() {
+        let lens = |maker: &str, model: &str| lensdb::Lens {
+            maker: maker.into(),
+            model: model.into(),
+            ..Default::default()
+        };
+        let words = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
+        let fifty = lens("Nikon", "Nikon AF-S Nikkor 50mm f/1.8G");
+        let long = lens("Sigma", "Sigma 150mm f/2.8 EX DG");
+        assert!(search_score(&words("nikon 50 1.8"), &fifty).is_some());
+        assert!(search_score(&words("nikon 50 1.4"), &fifty).is_none(), "every word must be there");
+        assert!(search_score(&words("nikon 50"), &long).is_none());
+        let (a, b) =
+            (search_score(&words("50"), &fifty).unwrap(), search_score(&words("50"), &long).unwrap());
+        assert!(a > b, "50 is a better answer in 50mm than in 150mm");
+        assert_eq!(lens_name(&fifty), "Nikon AF-S Nikkor 50mm f/1.8G");
+        assert_eq!(lens_name(&lens("Nikon", "Nikkor 50mm")), "Nikon Nikkor 50mm");
+    }
 }
