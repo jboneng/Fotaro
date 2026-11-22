@@ -202,6 +202,12 @@ fn local_spot(spot: &Spot) -> (Spot, [f32; 2]) {
             .iter()
             .map(|t| SpotStroke { points: t.points.iter().map(mv).collect(), ..t.clone() })
             .collect(),
+        // An area picture sits at its own rectangle, not at the points: it moves too (or
+        // its outline is traced where it is and then moved again when drawn).
+        area: spot.area.as_ref().map(|a| {
+            let [l, t, r, b] = a.rect;
+            imaging::develop::SpotMask { rect: [l - o[0], t - o[1], r - o[0], b - o[1]], ..a.clone() }
+        }),
         fill: None,
         ..spot.clone()
     };
@@ -1237,6 +1243,25 @@ pub fn step_size(d: &mut DevelopState, dir: i8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_area_picture_moves_with_its_spot() {
+        // A found person: an area picture at its rectangle, the spot's point at its middle.
+        let spot = Spot {
+            points: vec![[0.6, 0.5]],
+            area: Some(imaging::develop::SpotMask { id: "p".into(), rect: [0.5, 0.25, 0.75, 0.75] }),
+            ..Spot::default()
+        };
+        let (local, o) = local_spot(&spot);
+        assert_eq!(o, [0.6, 0.5]);
+        assert_eq!(local.points, vec![[0.0, 0.0]]);
+        // The rectangle keeps its place relative to the point, so the outline traced for
+        // the local spot lands on the person once it is moved back by `o`.
+        let rect = local.area.unwrap().rect;
+        for (got, want) in rect.iter().zip([-0.1, -0.25, 0.15, 0.25]) {
+            assert!((got - want).abs() < 1e-6, "{rect:?}");
+        }
+    }
 
     #[test]
     fn segments_join_into_paths() {

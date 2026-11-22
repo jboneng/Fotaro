@@ -760,13 +760,16 @@ pub fn find_people(
                     }
                 }
             }
-            // A little larger (edges, hair, soft shadows close by), and cut to its box.
-            let mask = imageops::filter3x3(&mask, &[1.0; 9]);
-            let grown = GrayImage::from_fn(mask.width(), mask.height(), |x, y| {
-                image::Luma([if mask.get_pixel(x, y)[0] > 0 { 255 } else { 0 }])
-            });
+            // Larger by a share of the person's size, and cut to its box. The outline found
+            // sits on the person's edge, and a soft edge, hair, motion blur and a close
+            // shadow reach past it: left outside, they stay in the photo and the fill is made
+            // from them too, a pale shape of the person where they stood.
             let all = boxes.iter().copied().reduce(|a, b| union(&a, &b)).unwrap_or([0.0; 4]);
-            let (gx, gy) = ((all[2] - all[0]) * 0.15 + 4.0, (all[3] - all[1]) * 0.15 + 4.0);
+            let reach = ((all[2] - all[0]).max(all[3] - all[1]) * 0.02).clamp(2.0, 32.0);
+            let grown = dilate(&mask, reach.round() as u32);
+            // Room for what the outline grew by.
+            let room = |side: f32| (side * 0.15 + 4.0).max(reach + 2.0);
+            let (gx, gy) = (room(all[2] - all[0]), room(all[3] - all[1]));
             let bx0 = ((all[0] - gx).max(x0 as f32) as u32).max(x0);
             let by0 = ((all[1] - gy).max(y0 as f32) as u32).max(y0);
             let bx1 = ((all[2] + gx).ceil() as u32).min(x1);
@@ -784,6 +787,34 @@ pub fn find_people(
     progress(1.0, "Done");
     out.sort_by(|a, b| b.score.total_cmp(&a.score));
     Ok(out)
+}
+
+/// `mask` (0 or 255) with everything set made larger by `r` pixels each way (a square
+/// reach: two passes of counts along the rows, then the columns).
+fn dilate(mask: &GrayImage, r: u32) -> GrayImage {
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    let r = r as usize;
+    // One direction: is anything set within `r` along a line of `n` values?
+    let pass = |src: &[bool], n: usize, lines: usize, at: &dyn Fn(usize, usize) -> usize| {
+        let mut out = vec![false; src.len()];
+        let mut sums = vec![0u32; n + 1];
+        for line in 0..lines {
+            for i in 0..n {
+                sums[i + 1] = sums[i] + u32::from(src[at(line, i)]);
+            }
+            for i in 0..n {
+                let (lo, hi) = (i.saturating_sub(r), (i + r + 1).min(n));
+                out[at(line, i)] = sums[hi] > sums[lo];
+            }
+        }
+        out
+    };
+    let set: Vec<bool> = mask.as_raw().iter().map(|v| *v >= 128).collect();
+    let rows = pass(&set, w, h, &|y, x| y * w + x);
+    let both = pass(&rows, h, w, &|x, y| y * w + x);
+    GrayImage::from_fn(mask.width(), mask.height(), |x, y| {
+        image::Luma([if both[y as usize * w + x as usize] { 255 } else { 0 }])
+    })
 }
 
 /// The scratch detector, kept loaded while it is used.
@@ -891,4 +922,25 @@ pub fn scratches(
 pub fn unload_remove() {
     *REMOVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *REMOVE_BEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dilate_grows_by_its_reach_each_way() {
+        let mut mask = GrayImage::new(20, 12);
+        mask.put_pixel(10, 6, image::Luma([255]));
+        mask.put_pixel(0, 0, image::Luma([255]));
+        let grown = dilate(&mask, 3);
+        let on = |x: u32, y: u32| grown.get_pixel(x, y)[0] == 255;
+        // A square of 7 around the pixel, no further.
+        assert!(on(7, 3) && on(13, 9) && on(10, 6));
+        assert!(!on(6, 6) && !on(14, 6) && !on(10, 2) && !on(10, 10));
+        // At the corner it stops at the picture's edge.
+        assert!(on(3, 3) && !on(4, 0) && !on(0, 4));
+        // No reach: unchanged.
+        assert_eq!(dilate(&mask, 0), mask);
+    }
 }
