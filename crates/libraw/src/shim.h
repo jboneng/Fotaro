@@ -54,6 +54,14 @@ void *pl_new(void);
 void pl_free(void *raw);
 // The buffer must stay alive and unchanged until pl_free.
 int pl_open_buffer(void *raw, const void *buffer, size_t size);
+// Read `len` bytes at `offset` into `buf`; returns how many were read (less at the end of
+// the file or on an error). Must not unwind.
+typedef size_t (*pl_read_at)(void *ctx, uint64_t offset, uint8_t *buf, size_t len);
+// Open a file of `size` bytes that is read through `read_at` as LibRaw asks for it (no
+// memory map, no whole-file read). `*stream_out` gets a handle to release with
+// pl_stream_free AFTER pl_free; `ctx` must stay valid until then.
+int pl_open_stream(void *raw, pl_read_at read_at, void *ctx, uint64_t size, void **stream_out);
+void pl_stream_free(void *stream);
 void pl_get_info(void *raw, pl_info *out);
 int pl_thumbnail(void *raw, pl_image *out);
 int pl_render(void *raw, int half_size, pl_image *out);

@@ -56,8 +56,8 @@ pub struct ImportDialog {
     pub source: Option<PathBuf>,
     /// Bumped per scan, so late answers for an old source are ignored.
     pub generation: u64,
-    /// `None` while scanning.
-    pub candidates: Option<Vec<Candidate>>,
+    /// `None` while scanning. Shared: the dialog reads the list every frame.
+    pub candidates: Option<Arc<Vec<Candidate>>>,
     pub checked: Vec<bool>,
     pub error: Option<String>,
     pub thumbs: TextureCache,
@@ -112,12 +112,29 @@ impl ImportDialog {
     }
 
     /// Photos that will be imported: checked, and not skipped as duplicates.
-    pub fn chosen(&self, skip_duplicates: bool) -> Vec<Candidate> {
-        let Some(c) = &self.candidates else { return Vec::new() };
-        c.iter()
+    fn chosen_iter(&self, skip_duplicates: bool) -> impl Iterator<Item = &Candidate> {
+        let all = self.candidates.as_deref().map(Vec::as_slice).unwrap_or_default();
+        all.iter()
             .zip(&self.checked)
-            .filter(|(c, on)| **on && !(skip_duplicates && c.duplicate))
-            .map(|(c, _)| c.clone())
-            .collect()
+            .filter(move |(c, on)| **on && !(skip_duplicates && c.duplicate))
+            .map(|(c, _)| c)
+    }
+
+    /// The photos that will be imported (copied out: for starting the import).
+    pub fn chosen(&self, skip_duplicates: bool) -> Vec<Candidate> {
+        self.chosen_iter(skip_duplicates).cloned().collect()
+    }
+
+    /// What will be imported, for the dialog's bottom line (drawn every frame, so
+    /// nothing is copied): how many photos, their bytes, and the first of them.
+    pub fn chosen_totals(&self, skip_duplicates: bool) -> (usize, u64, Option<&Candidate>) {
+        let mut first = None;
+        let (mut count, mut bytes) = (0, 0);
+        for c in self.chosen_iter(skip_duplicates) {
+            first.get_or_insert(c);
+            count += 1;
+            bytes += c.size;
+        }
+        (count, bytes, first)
     }
 }

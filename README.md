@@ -167,6 +167,7 @@ cargo test --workspace                # tests
 cargo run -p fotaro -- --catalog <dir.plcat> --add <folder>   # open a catalog, import a folder
 cargo run -p libraw --example rawinfo --release -- <raw files>   # RAW decode check
 cargo run -p imaging --example renderbench --release -- <file>   # Develop render timings
+cargo run -p imaging --example sharebench --release -- <folder> # reading from a network share
 ```
 
 If you cloned without `--recurse-submodules`, run `git submodule update --init` to fetch LibRaw.

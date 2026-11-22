@@ -2173,6 +2173,7 @@ dependencies = [
  "jpeg-encoder",
  "kamadak-exif",
  "lcms2",
+ "libc",
  "libraw",
  "log",
  "memmap2",

@@ -992,11 +992,11 @@ impl Session {
                         match result {
                             Ok(found) => {
                                 d.checked = vec![true; found.len()];
-                                d.candidates = Some(found);
+                                d.candidates = Some(std::sync::Arc::new(found));
                                 d.error = None;
                             }
                             Err(e) => {
-                                d.candidates = Some(Vec::new());
+                                d.candidates = Some(Default::default());
                                 d.error = Some(e);
                             }
                         }

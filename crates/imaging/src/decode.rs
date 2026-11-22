@@ -115,7 +115,7 @@ fn embedded_preview(raw: &mut libraw::RawFile, wanted: u32) -> Option<DynamicIma
 }
 
 fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImage, Metadata)> {
-    let mut raw = libraw::RawFile::open(path)?;
+    let mut raw = crate::storage::open_raw(path)?;
     let info = raw.info();
     let meta = metadata::from_raw_info(&info);
     let wanted =
@@ -139,7 +139,7 @@ fn decode_raw_with(path: &Path, max_px: u32, full_size: bool) -> Result<(RgbImag
 /// Just the camera's embedded preview of a RAW, fitted to `max_px` and oriented, if it
 /// has one big enough: a quick stand-in while a rendered preview is built.
 pub fn decode_embedded(path: &Path, max_px: u32) -> Option<RgbImage> {
-    let mut raw = libraw::RawFile::open(path).ok()?;
+    let mut raw = crate::storage::open_raw(path).ok()?;
     let info = raw.info();
     let img = embedded_preview(&mut raw, (max_px as f32 * MIN_EMBEDDED_FRACTION) as u32)?;
     Some(orient_raw(fit(img, max_px), info.orientation).into_rgb8())
@@ -148,6 +148,11 @@ pub fn decode_embedded(path: &Path, max_px: u32) -> Option<RgbImage> {
 /// Decode a non-RAW image at full size and native bit depth, oriented, with its ICC
 /// profile (if any).
 pub(crate) fn open_image(path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    // On a network share: the whole file in one sequential read (a mapped file there is
+    // read by page faults, each a round trip; see `storage`).
+    if crate::storage::is_remote(path) {
+        return decode_bytes(&std::fs::read(path)?);
+    }
     // Memory-map instead of `ImageReader::open`: TIFF decoding seeks a lot, and every seek
     // discards a BufReader's buffer (a 184 MB 16-bit TIFF decoded in 2 s that way vs 1 s).
     let file = std::fs::File::open(path)?;
@@ -155,8 +160,12 @@ pub(crate) fn open_image(path: &Path) -> Result<(DynamicImage, Option<Vec<u8>>)>
     // truncates the file meanwhile we may read garbage (or fault), the same risk every
     // mmap-based viewer accepts; LibRaw files are opened the same way.
     let map = unsafe { memmap2::Mmap::map(&file)? };
-    let mut decoder =
-        ImageReader::new(std::io::Cursor::new(&map[..])).with_guessed_format()?.into_decoder()?;
+    decode_bytes(&map[..])
+}
+
+/// Decode a whole image file held in memory (see [`open_image`]).
+fn decode_bytes(bytes: &[u8]) -> Result<(DynamicImage, Option<Vec<u8>>)> {
+    let mut decoder = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?.into_decoder()?;
     let icc = decoder.icc_profile().ok().flatten();
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut img = DynamicImage::from_decoder(decoder)?;
@@ -184,7 +193,7 @@ pub(crate) fn decode_for_export(
 ) -> Result<(DynamicImage, SourceSpace, Metadata)> {
     let (img, space, meta) = match kind {
         SourceKind::Raw if sixteen => (|| {
-            let mut raw = libraw::RawFile::open(path)?;
+            let mut raw = crate::storage::open_raw(path)?;
             let info = raw.info();
             if let Some(img) = embedded_preview(&mut raw, full_size_preview(&info)) {
                 let img = DynamicImage::ImageRgb8(orient_raw(img, info.orientation).into_rgb8());

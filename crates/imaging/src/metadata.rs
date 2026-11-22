@@ -78,7 +78,8 @@ pub(crate) fn from_raw_info(info: &libraw::RawInfo) -> Metadata {
 pub fn read_metadata(path: &Path, kind: SourceKind) -> Result<Metadata> {
     let meta = match kind {
         SourceKind::Raw => {
-            let raw = libraw::RawFile::open(path).with_context(|| format!("opening {}", path.display()))?;
+            let raw =
+                crate::storage::open_raw(path).with_context(|| format!("opening {}", path.display()))?;
             from_raw_info(&raw.info())
         }
         SourceKind::Image => read_exif(path)?,

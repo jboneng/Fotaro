@@ -307,7 +307,7 @@ fn settings_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         .session
         .as_ref()
         .and_then(|s| s.import.as_ref())
-        .and_then(|d| d.candidates.as_ref())
+        .and_then(|d| d.candidates.as_deref())
         .and_then(|c| c.first().cloned());
     let p = &mut app.ui.import;
     let picking = app.session.as_mut().and_then(|s| s.import.as_mut()).map(|d| &mut d.picking_destination);
@@ -410,24 +410,22 @@ fn settings_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
 }
 
 fn bottom_bar(app: &mut FotaroApp, ui: &mut egui::Ui, commands: &mut Vec<Command>) {
-    let prefs = app.ui.import.clone();
-    let chosen = app
+    let prefs = &app.ui.import;
+    let (count, bytes, first) = app
         .session
         .as_ref()
         .and_then(|s| s.import.as_ref())
-        .map(|d| d.chosen(prefs.settings.skip_duplicates))
+        .map(|d| d.chosen_totals(prefs.settings.skip_duplicates))
         .unwrap_or_default();
-    let bytes: u64 = chosen.iter().map(|c| c.size).sum();
-    // The plan catches bad templates, subfolder names and a missing destination.
-    let problem = if chosen.is_empty() {
-        Some("Nothing to import".to_string())
-    } else {
-        catalog::import::plan(&chosen[..1], &prefs.effective()).err().map(|e| e.to_string())
+    // Bad templates, subfolder names and a missing destination (checked without
+    // touching the disk: this runs every frame).
+    let problem = match first {
+        None => Some("Nothing to import".to_string()),
+        Some(first) => catalog::import::validate(first, &prefs.effective()).err().map(|e| e.to_string()),
     };
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!("{} photos / {}", chosen.len(), crate::platform::human_bytes(bytes)))
-                .size(14.0),
+            RichText::new(format!("{count} photos / {}", crate::platform::human_bytes(bytes))).size(14.0),
         );
         if let Some(p) = &problem {
             ui.label(RichText::new(p).color(theme::TEXT_WEAK));

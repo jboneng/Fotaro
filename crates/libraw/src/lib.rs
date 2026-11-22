@@ -17,6 +17,8 @@ use std::ptr::NonNull;
 // Make sure the zlib that LibRaw's DNG decoder uses gets linked.
 use libz_sys as _;
 
+mod stream;
+
 mod ffi {
     use super::*;
 
@@ -68,6 +70,14 @@ mod ffi {
         pub fn pl_new() -> *mut c_void;
         pub fn pl_free(raw: *mut c_void);
         pub fn pl_open_buffer(raw: *mut c_void, buffer: *const c_void, size: usize) -> c_int;
+        pub fn pl_open_stream(
+            raw: *mut c_void,
+            read_at: unsafe extern "C" fn(*mut c_void, u64, *mut u8, usize) -> usize,
+            ctx: *mut c_void,
+            size: u64,
+            stream_out: *mut *mut c_void,
+        ) -> c_int;
+        pub fn pl_stream_free(stream: *mut c_void);
         pub fn pl_get_info(raw: *mut c_void, out: *mut Info);
         pub fn pl_thumbnail(raw: *mut c_void, out: *mut Image) -> c_int;
         pub fn pl_render(raw: *mut c_void, half_size: c_int, out: *mut Image) -> c_int;
@@ -236,14 +246,36 @@ fn rgb_of(m: [f32; 4]) -> Option<[f32; 3]> {
 /// An open RAW file. Not thread-safe to share, but can be moved between threads.
 pub struct RawFile {
     raw: NonNull<c_void>,
-    // LibRaw reads from this mapping; it must outlive `raw` (see Drop).
-    _map: memmap2::Mmap,
+    // What LibRaw reads from; it must outlive `raw` (see Drop).
+    source: Source,
     /// Read right after opening: rendering overwrites some of LibRaw's colour fields.
     color: Option<ColorInfo>,
 }
 
 // SAFETY: a LibRaw instance has no thread affinity; we never share it (&mut for work).
 unsafe impl Send for RawFile {}
+
+/// Where an open RAW file's bytes come from.
+enum Source {
+    /// The whole file, memory-mapped: fastest on local disks.
+    Mapped(#[allow(dead_code)] memmap2::Mmap),
+    /// Read a block at a time as LibRaw asks (see [`RawFile::open_streamed`]). The reader
+    /// is boxed: the shim's stream holds its address.
+    Streamed { stream: NonNull<c_void>, reader: Box<stream::BlockReader> },
+}
+
+/// The shim's `pl_read_at`: `ctx` is the `BlockReader` of a [`Source::Streamed`].
+unsafe extern "C" fn read_at(ctx: *mut c_void, offset: u64, buf: *mut u8, len: usize) -> usize {
+    // Nothing may unwind into C++.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: `ctx` is the boxed reader, alive and used by one thread at a time (the
+        // one working with the RawFile); the shim passes `len` writable bytes at `buf`.
+        let (reader, buf) =
+            unsafe { (&mut *ctx.cast::<stream::BlockReader>(), std::slice::from_raw_parts_mut(buf, len)) };
+        reader.read_at(offset, buf)
+    }))
+    .unwrap_or(0)
+}
 
 /// CIE XYZ of D65 white (Y = 1).
 const D65_XYZ: [f32; 3] = [0.950_47, 1.0, 1.088_83];
@@ -256,11 +288,44 @@ impl RawFile {
         let map = unsafe { memmap2::Mmap::map(&file)? };
         // SAFETY: plain allocation.
         let raw = NonNull::new(unsafe { ffi::pl_new() }).ok_or(Error::OutOfMemory)?;
-        let mut this = RawFile { raw, _map: map, color: None };
-        // SAFETY: `raw` is valid and the buffer lives as long as `this`.
-        check(unsafe { ffi::pl_open_buffer(this.raw.as_ptr(), this._map.as_ptr().cast(), this._map.len()) })?;
+        // SAFETY: `raw` is valid and the buffer lives as long as the RawFile.
+        let opened = unsafe { ffi::pl_open_buffer(raw.as_ptr(), map.as_ptr().cast(), map.len()) };
+        let mut this = RawFile { raw, source: Source::Mapped(map), color: None };
+        check(opened)?;
         this.color = Some(this.read_color());
         Ok(this)
+    }
+
+    /// Open without a memory map: the file is read a block at a time as LibRaw asks for
+    /// it, with ordinary reads. For files on network shares, where a mapped file is read
+    /// by page faults (slow, and on Linux they can stall the whole program). Reading the
+    /// metadata or the embedded preview then reads only those parts of the file.
+    pub fn open_streamed(path: impl AsRef<Path>) -> Result<Self> {
+        let mut reader = Box::new(stream::BlockReader::new(File::open(path)?)?);
+        // SAFETY: plain allocation.
+        let raw = NonNull::new(unsafe { ffi::pl_new() }).ok_or(Error::OutOfMemory)?;
+        let mut stream = std::ptr::null_mut();
+        let ctx: *mut stream::BlockReader = &mut *reader;
+        // SAFETY: `raw` is valid; the reader is boxed (its address stays) and is kept in
+        // the RawFile until after the stream and `raw` are freed.
+        let opened =
+            unsafe { ffi::pl_open_stream(raw.as_ptr(), read_at, ctx.cast(), reader.size(), &mut stream) };
+        let Some(stream) = NonNull::new(stream) else {
+            unsafe { ffi::pl_free(raw.as_ptr()) };
+            return Err(Error::OutOfMemory);
+        };
+        let mut this = RawFile { raw, source: Source::Streamed { stream, reader }, color: None };
+        check(opened)?;
+        this.color = Some(this.read_color());
+        Ok(this)
+    }
+
+    /// (requests made to the file, bytes read from it) so far, for a streamed open.
+    pub fn read_stats(&self) -> Option<(u64, u64)> {
+        match &self.source {
+            Source::Streamed { reader, .. } => Some((reader.requests, reader.bytes)),
+            Source::Mapped(_) => None,
+        }
     }
 
     pub fn info(&self) -> RawInfo {
@@ -381,8 +446,12 @@ impl RawFile {
 
 impl Drop for RawFile {
     fn drop(&mut self) {
-        // Runs before fields drop, so LibRaw is gone before the mapping is unmapped.
+        // Runs before fields drop, so LibRaw is gone before the mapping is unmapped; a
+        // stream goes after LibRaw (which reads through it) and before its reader.
         unsafe { ffi::pl_free(self.raw.as_ptr()) };
+        if let Source::Streamed { stream, .. } = &self.source {
+            unsafe { ffi::pl_stream_free(stream.as_ptr()) };
+        }
     }
 }
 
@@ -430,6 +499,51 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(b"definitely not a raw file").unwrap();
         assert!(matches!(RawFile::open(f.path()), Err(Error::LibRaw { .. })));
+        assert!(matches!(RawFile::open_streamed(f.path()), Err(Error::LibRaw { .. })));
+    }
+
+    /// The sample RAWs (not in the repository: skipped where they are missing) give the
+    /// same answers streamed as mapped, and their headers cost only a few requests.
+    #[test]
+    fn streamed_matches_mapped_on_sample_raws() {
+        fn raws(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if p.is_dir() {
+                    raws(&p, out);
+                } else if ["nef", "dng", "cr2", "cr3", "arw", "raf", "orf", "rw2"].contains(&ext.as_str()) {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        raws(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata"), &mut files);
+        files.sort();
+        let bytes = |t: Result<Thumbnail>| match t {
+            Ok(Thumbnail::Jpeg(b) | Thumbnail::JpegXl(b)) => b,
+            Ok(Thumbnail::Bitmap(b)) => b.data,
+            Err(_) => Vec::new(),
+        };
+        for path in files.iter().take(6) {
+            let (Ok(mut mapped), Ok(mut streamed)) = (RawFile::open(path), RawFile::open_streamed(path))
+            else {
+                assert!(RawFile::open(path).is_err() && RawFile::open_streamed(path).is_err(), "{path:?}");
+                continue;
+            };
+            assert_eq!(format!("{:?}", mapped.info()), format!("{:?}", streamed.info()), "{path:?}");
+            assert_eq!(format!("{:?}", mapped.color()), format!("{:?}", streamed.color()), "{path:?}");
+            let (requests, read) = streamed.read_stats().unwrap();
+            let size = std::fs::metadata(path).unwrap().len();
+            println!("{}: header in {requests} requests, {read} of {size} bytes", path.display());
+            assert!(read < size / 2 || size < 4 << 20, "the header read {read} of {size} bytes");
+            assert!(bytes(mapped.thumbnail()) == bytes(streamed.thumbnail()), "thumbnail of {path:?}");
+            let (a, b) = (mapped.render(true), streamed.render(true));
+            match (a, b) {
+                (Ok(a), Ok(b)) => assert!(a.data == b.data && a.width == b.width, "render of {path:?}"),
+                (a, b) => assert!(a.is_err() && b.is_err(), "render of {path:?}"),
+            }
+        }
     }
 
     #[test]
@@ -442,5 +556,6 @@ mod tests {
     #[test]
     fn missing_file_is_io_error() {
         assert!(matches!(RawFile::open("does/not/exist.nef"), Err(Error::Io(_))));
+        assert!(matches!(RawFile::open_streamed("does/not/exist.nef"), Err(Error::Io(_))));
     }
 }

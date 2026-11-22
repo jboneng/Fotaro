@@ -256,6 +256,33 @@ fn stem(p: &Path) -> String {
     p.file_stem().unwrap_or_default().to_string_lossy().into_owned()
 }
 
+/// Would an import with these settings start? Checks what [`plan`] refuses (no
+/// destination, a bad subfolder name or rename template) for one photo, without touching
+/// the disk: the Import dialog asks every frame, and a destination on a busy network
+/// share can take seconds to answer.
+pub fn validate(first: &Candidate, s: &ImportSettings) -> Result<()> {
+    if s.mode == ImportMode::Add {
+        return Ok(());
+    }
+    anyhow::ensure!(!s.destination.as_os_str().is_empty(), "choose a destination folder");
+    if let Some(sub) = s.subfolder.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        crate::folders::validate_folder_name(sub)?;
+    }
+    if let Some(t) = &s.rename {
+        let time = first.capture_time.unwrap_or(0);
+        render(
+            t,
+            &RenameContext {
+                stem: &stem(&first.path),
+                text: s.custom_text.trim(),
+                seq: s.start_number,
+                date: DateParts::from_timestamp(time),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Work out every file's destination. Photos sharing a base name in the same source
 /// folder (RAW+JPEG) get the same sequence number and the same collision suffix, so
 /// they stay a pair. Existing files are never targeted.
@@ -350,8 +377,10 @@ pub fn scan_source(
             continue;
         }
         let Some(kind) = file_kind(entry.path()) else { continue };
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok()).map(|t| unix_ms(t) / 1000);
+        // One stat per file: on Linux each is a round trip to a network share.
+        let meta = entry.metadata().ok();
+        let size = meta.as_ref().map_or(0, |m| m.len());
+        let mtime = meta.and_then(|m| m.modified().ok()).map(|t| unix_ms(t) / 1000);
         let name = entry.file_name().to_string_lossy().to_lowercase();
         found.push(Candidate {
             path: entry.into_path(),

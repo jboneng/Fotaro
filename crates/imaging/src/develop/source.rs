@@ -271,7 +271,7 @@ impl WorkingImage {
 }
 
 fn load_raw(path: &Path, max_px: Option<u32>) -> Result<(WorkingImage, Metadata)> {
-    let mut raw = libraw::RawFile::open(path)?;
+    let mut raw = crate::storage::open_raw(path)?;
     let info = raw.info();
     let meta = metadata::from_raw_info(&info);
     let color = raw.color();

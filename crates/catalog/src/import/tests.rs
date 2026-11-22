@@ -67,8 +67,19 @@ fn plans_dated_renamed_destinations_and_keeps_pairs_together() {
     let flat =
         ImportSettings { date_folders: DateFolders::None, subfolder: Some("Card 1".into()), ..settings };
     assert!(plan_ok(&files, &flat).iter().all(|p| p.dest.parent() == Some(&dest.join("Card 1"))));
-    let bad = ImportSettings { subfolder: Some("a/b".into()), ..flat };
+    let bad = ImportSettings { subfolder: Some("a/b".into()), ..flat.clone() };
     assert!(super::plan(&files, &bad).is_err());
+
+    // `validate` refuses what `plan` refuses, for the dialog (without touching the disk).
+    let no_destination = ImportSettings { destination: PathBuf::new(), ..flat.clone() };
+    let bad_template = ImportSettings { rename: Some("{Nope}".into()), ..flat.clone() };
+    for (s, ok) in [(&flat, true), (&bad, false), (&no_destination, false), (&bad_template, false)] {
+        assert_eq!(super::validate(&files[0], s).is_ok(), ok, "{s:?}");
+        assert_eq!(super::plan(&files, s).is_ok(), ok, "{s:?}");
+    }
+    // Add needs none of it.
+    let add = ImportSettings { mode: ImportMode::Add, ..no_destination };
+    assert!(super::validate(&files[0], &add).is_ok());
 }
 
 fn plan_ok(files: &[Candidate], s: &ImportSettings) -> Vec<Planned> {

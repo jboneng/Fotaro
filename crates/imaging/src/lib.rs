@@ -11,6 +11,7 @@ pub mod develop;
 pub mod export;
 mod metadata;
 mod preview;
+pub mod storage;
 mod tiff_sample;
 
 pub use decode::{SourceKind, decode, decode_embedded, decode_full, fit_image};
