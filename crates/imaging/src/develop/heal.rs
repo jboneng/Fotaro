@@ -676,13 +676,19 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
     let [l, t, r, b] = fill.rect;
     let (sx, sy) = (pw as f32 / ((r - l) * f.w).max(1e-3), ph as f32 / ((b - t) * f.h).max(1e-3));
     // A fill made smaller than it is shown (a large spot) is smooth: the grain it lacks,
-    // measured around the spot, goes back in.
-    let grain = if sx.min(sy) < 0.8 {
-        let lost = (1.0 - sx.min(sy).powi(2)).max(0.0).sqrt();
-        surrounding_grain(px, w, h, &s).map(|g| g * lost)
-    } else {
-        [0.0; 3]
-    };
+    // measured around the spot, goes back in, as fine or coarse as it is there and as
+    // strong as it is at each lightness (grain is far weaker in the dark than in the light).
+    let lost = (1.0 - sx.min(sy).powi(2)).max(0.0).sqrt();
+    let grain = if sx.min(sy) < 0.8 { surrounding_grain(px, w, h, &s) } else { None };
+    // The grain's part that is the same in every channel (lightness), and each channel's own
+    // (colour): as around the spot, so a black and white photo gets no coloured grain.
+    let noise = grain.as_ref().map(|g| {
+        let (same, own) = (g.shared.sqrt(), (1.0 - g.shared).sqrt());
+        let shared = noise_plane(x0, y0, bw, bh, g.sigma, 1);
+        let each: Option<[Vec<f32>; 3]> = (own > 0.05)
+            .then(|| std::array::from_fn(|c| noise_plane(x0, y0, bw, bh, g.sigma, 10 + c as u32)));
+        (same, own, shared, each)
+    });
     let raw = pic.as_raw();
     for y in y0..y0 + bh {
         for x in x0..x0 + bw {
@@ -703,22 +709,11 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
                 top + ty * (bottom - top)
             });
             let mut target = fill_decode(v, fill.gains);
-            if grain != [0.0; 3] {
-                // The same noise every render (by position), about normal.
-                let n = |k: u32| {
-                    let mut z =
-                        (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77) ^ k;
-                    z ^= z >> 15;
-                    z = z.wrapping_mul(0x2C1B_3C6D);
-                    z ^= z >> 12;
-                    z = z.wrapping_mul(0x297A_2D39);
-                    z ^= z >> 15;
-                    (z as f32 / u32::MAX as f32) - 0.5
-                };
-                // Luminance grain with a little colour, as film's.
-                let g = (n(1) + n(2) + n(3)) * 2.0;
+            if let (Some(g), Some((same, own, shared, each))) = (&grain, &noise) {
+                let k = (y - y0) * bw + (x - x0);
                 for (c, t) in target.iter_mut().enumerate() {
-                    *t += grain[c] * (0.8 * g + 0.6 * (n(10 + c as u32) * 3.46));
+                    let n = same * shared[k] + each.as_ref().map_or(0.0, |e| own * e[c][k]);
+                    *t = (*t + lost * g.spread(c, *t) * n).max(0.0);
                 }
             }
             let i = 3 * (y * w + x);
@@ -729,30 +724,188 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
     }
 }
 
-/// How grainy the photo is just around a spot, per channel: the spread of each pixel
-/// from its four neighbours' mean, in a ring outside the spot (as a standard deviation of
-/// the pixels themselves).
-fn surrounding_grain(px: &[f32], w: usize, h: usize, s: &SpotPx) -> [f32; 3] {
+/// Noise by position (the same every render), evenly spread over -0.5..0.5.
+fn hash_noise(x: isize, y: isize, k: u32) -> f32 {
+    let mut z = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77) ^ k;
+    z ^= z >> 15;
+    z = z.wrapping_mul(0x2C1B_3C6D);
+    z ^= z >> 12;
+    z = z.wrapping_mul(0x297A_2D39);
+    z ^= z >> 15;
+    (z as f32 / u32::MAX as f32) - 0.5
+}
+
+/// A box of noise with unit spread, about normal, the same every render: white, or (with
+/// `sigma`, in pixels) smoothed into clumps that size, as film grain is in a scan.
+fn noise_plane(x0: usize, y0: usize, bw: usize, bh: usize, sigma: f32, k: u32) -> Vec<f32> {
+    use rayon::prelude::*;
+    let r = if sigma < 0.25 { 0 } else { (3.0 * sigma).ceil() as usize };
+    let (pw, ph) = (bw + 2 * r, bh + 2 * r);
+    let mut white = vec![0.0f32; pw * ph];
+    white.par_chunks_mut(pw.max(1)).enumerate().for_each(|(y, row)| {
+        let yy = (y0 + y) as isize - r as isize;
+        for (x, v) in row.iter_mut().enumerate() {
+            let xx = (x0 + x) as isize - r as isize;
+            *v = (hash_noise(xx, yy, k)
+                + hash_noise(xx, yy, k ^ 0x5bd1_e995)
+                + hash_noise(xx, yy, k ^ 0x1b87_3593))
+                * 2.0;
+        }
+    });
+    if r == 0 {
+        return white;
+    }
+    // Weights whose squares sum to 1 keep the spread at 1 through each pass.
+    let mut kernel: Vec<f32> =
+        (0..=2 * r).map(|i| (-((i as f32 - r as f32).powi(2)) / (2.0 * sigma * sigma)).exp()).collect();
+    let norm = kernel.iter().map(|v| v * v).sum::<f32>().sqrt();
+    kernel.iter_mut().for_each(|v| *v /= norm);
+    let mut across = vec![0.0f32; bw * ph];
+    across.par_chunks_mut(bw.max(1)).enumerate().for_each(|(y, row)| {
+        let src = &white[y * pw..(y + 1) * pw];
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = kernel.iter().zip(&src[x..]).map(|(k, s)| k * s).sum();
+        }
+    });
+    let mut out = vec![0.0f32; bw * bh];
+    out.par_chunks_mut(bw.max(1)).enumerate().for_each(|(y, row)| {
+        for (i, k) in kernel.iter().enumerate() {
+            let src = &across[(y + i) * bw..(y + i + 1) * bw];
+            for (v, s) in row.iter_mut().zip(src) {
+                *v += k * s;
+            }
+        }
+    });
+    out
+}
+
+/// Lightness steps the grain is measured in (by log2 of the level, from `GRAIN_LOW` up).
+const GRAIN_BINS: usize = 10;
+/// The darkest level told apart (2^-10): below it grain is taken as at this level.
+const GRAIN_LOW: f32 = 1.0 / 1024.0;
+
+/// The grain around a spot.
+#[derive(Debug, Clone, PartialEq)]
+struct Grain {
+    /// Per lightness step and channel: the grain's spread as a share of the level.
+    ratio: [[f32; 3]; GRAIN_BINS],
+    /// How much of the grain the channels share (0..1 of its variance): 1 in a black and
+    /// white photo, where the grain has no colour.
+    shared: f32,
+    /// How coarse it is: the blur (pixels) that turns white noise into grain like it.
+    sigma: f32,
+}
+
+fn grain_step(level: f32) -> f32 {
+    ((level.max(GRAIN_LOW).log2() + 10.0) / 10.5 * GRAIN_BINS as f32 - 0.5)
+        .clamp(0.0, (GRAIN_BINS - 1) as f32)
+}
+
+impl Grain {
+    /// The grain's spread in channel `c` where the picture is at `level`.
+    fn spread(&self, c: usize, level: f32) -> f32 {
+        let p = grain_step(level);
+        let (i, t) = (p as usize, p.fract());
+        let j = (i + 1).min(GRAIN_BINS - 1);
+        (self.ratio[i][c] + t * (self.ratio[j][c] - self.ratio[i][c])) * level.max(GRAIN_LOW)
+    }
+}
+
+/// What a pixel less the mean of its four neighbours `d` away has of the variance of noise
+/// that is white noise blurred by `sigma`.
+fn residual_share(sigma: f32, d: f32) -> f32 {
+    if sigma < 1e-3 {
+        return 1.25;
+    }
+    let rho = |r: f32| (-(r * r) / (4.0 * sigma * sigma)).exp();
+    1.25 + 0.5 * rho(std::f32::consts::SQRT_2 * d) + 0.25 * rho(2.0 * d) - 2.0 * rho(d)
+}
+
+fn median(v: &mut [f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mid = v.len() / 2;
+    *v.select_nth_unstable_by(mid, f32::total_cmp).1
+}
+
+/// How grainy the photo is just around a spot: how far each pixel is from its four
+/// neighbours' mean, in a ring outside the spot. Measured as a share of the level and per
+/// lightness step (grain in the light must not go into a fill in the dark), by medians
+/// (so the picture's own edges don't count as grain), with how coarse it is and how much
+/// of it the channels share. `None` with too little to measure.
+fn surrounding_grain(px: &[f32], w: usize, h: usize, s: &SpotPx) -> Option<Grain> {
     let (x0, y0, bw, bh) = s.bbox((0.5 * s.r).max(8.0), w, h);
     let step = ((bw * bh) / 40_000).max(1);
-    let (mut sum, mut n) = ([0.0f64; 3], 0usize);
+    let mut found: [[Vec<f32>; 3]; GRAIN_BINS] = Default::default();
+    let (mut near, mut far) = (Vec::new(), Vec::new());
+    let (mut sum, mut cross) = ([0.0f64; 3], [0.0f64; 3]);
     for k in (0..bw * bh).step_by(step) {
         let (x, y) = (x0 + k % bw, y0 + k / bw);
-        if x == 0 || y == 0 || x + 1 >= w || y + 1 >= h || s.coverage(x, y) > 0.0 {
+        if x < 2 || y < 2 || x + 2 >= w || y + 2 >= h || s.coverage(x, y) > 0.0 {
             continue;
         }
         let i = 3 * (y * w + x);
-        for (c, total) in sum.iter_mut().enumerate() {
-            let around = 0.25 * (px[i - 3 + c] + px[i + 3 + c] + px[i - 3 * w + c] + px[i + 3 * w + c]);
-            *total += f64::from(px[i + c] - around).powi(2);
+        // Relative to the level around, at one pixel away and at two.
+        let at = |c: usize, d: usize| {
+            let around = 0.25
+                * (px[i - 3 * d + c] + px[i + 3 * d + c] + px[i - 3 * d * w + c] + px[i + 3 * d * w + c]);
+            ((px[i + c] - around) / around.max(GRAIN_LOW), around)
+        };
+        let d: [(f32, f32); 3] = std::array::from_fn(|c| at(c, 1));
+        for c in 0..3 {
+            found[grain_step(d[c].1).round() as usize][c].push(d[c].0.abs());
+            sum[c] += f64::from(d[c].0 * d[c].0);
+            cross[c] += f64::from(d[c].0 * d[(c + 1) % 3].0);
         }
-        n += 1;
+        near.push(d[1].0.abs());
+        far.push(at(1, 2).0.abs());
     }
-    if n < 50 {
-        return [0.0; 3];
+    if near.len() < 50 {
+        return None;
     }
-    // A pixel less its neighbours' mean has 1.25 times the noise's variance.
-    sum.map(|v| ((v / n as f64) / 1.25).sqrt() as f32)
+    // How coarse: smooth grain differs more from neighbours two away than from those next
+    // to it; white noise differs the same.
+    let q = (median(&mut far) / median(&mut near).max(1e-9)).powi(2);
+    let sigma = (0..=40)
+        .map(|i| i as f32 * 0.05)
+        .find(|s| residual_share(*s, 2.0) / residual_share(*s, 1.0) >= q)
+        .unwrap_or(2.0);
+    let sigma = if sigma < 0.4 { 0.0 } else { sigma };
+    // A median of distances to a spread (1.4826), and the residual's share of the noise.
+    let scale = 1.4826 / residual_share(sigma, 1.0).sqrt();
+    let mut ratio = [[0.0f32; 3]; GRAIN_BINS];
+    let mut known = [false; GRAIN_BINS];
+    // A step with few pixels holds the odd ones of its neighbours, not their grain.
+    let few = (near.len() / 20).max(30);
+    for (b, bin) in found.iter_mut().enumerate() {
+        if bin[0].len() >= few {
+            known[b] = true;
+            for c in 0..3 {
+                ratio[b][c] = median(&mut bin[c]) * scale;
+            }
+        }
+    }
+    if !known.contains(&true) {
+        return None;
+    }
+    // Steps with too little around the spot: as the nearest measured one.
+    for b in 0..GRAIN_BINS {
+        if !known[b] {
+            let nearest = (0..GRAIN_BINS).filter(|o| known[*o]).min_by_key(|o| o.abs_diff(b)).unwrap_or(b);
+            ratio[b] = ratio[nearest];
+        }
+    }
+    // How alike the channels' grain is: their mean correlation (1: the same grain in each).
+    let pairs: Vec<f64> = (0..3)
+        .filter_map(|c| {
+            let both = (sum[c] * sum[(c + 1) % 3]).sqrt();
+            (both > 0.0).then(|| cross[c] / both)
+        })
+        .collect();
+    let shared =
+        if pairs.is_empty() { 1.0 } else { (pairs.iter().sum::<f64>() / pairs.len() as f64).clamp(0.0, 1.0) };
+    Some(Grain { ratio, shared: shared as f32, sigma })
 }
 
 /// The healed copies cached with the image: with all the spots last asked for (`top`), and
@@ -931,6 +1084,62 @@ pub fn find_source(img: &WorkingImage, spot: &Spot, avoid: Option<[f32; 2]>) -> 
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
+
+    #[test]
+    fn grain_around_a_spot_knows_whether_it_has_colour() {
+        // Noise by position: the same in every channel (black and white film), or each
+        // channel its own.
+        let noise = |x: usize, y: usize, k: u32| {
+            let mut z = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77) ^ k;
+            z ^= z >> 15;
+            z = z.wrapping_mul(0x2C1B_3C6D);
+            z ^= z >> 12;
+            (z % 1000) as f32 / 1000.0 - 0.5
+        };
+        let (w, h) = (200usize, 100usize);
+        let spot = Spot { points: vec![[0.5, 0.5]], size: 0.1, ..Spot::default() };
+        let s = SpotPx::new(&spot, Frame { w: w as f32, h: h as f32, half: 100.0 });
+        let photo = |own: bool| -> Vec<f32> {
+            (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    [0u32, 1, 2].map(|c| 0.4 + 0.1 * noise(x, y, if own { c } else { 0 }))
+                })
+                .collect()
+        };
+        let g = surrounding_grain(&photo(false), w, h, &s).unwrap();
+        assert!(g.shared > 0.98, "black and white: the channels share their grain ({})", g.shared);
+        assert_eq!(g.sigma, 0.0, "white noise is not coarse");
+        let spread = g.spread(0, 0.4);
+        assert!((spread - 0.0289).abs() < 0.006, "0.1 of even noise has a spread of 0.029: {spread}");
+        assert!((g.spread(1, 0.4) - spread).abs() < 1e-6);
+        let g = surrounding_grain(&photo(true), w, h, &s).unwrap();
+        assert!(g.shared < 0.1, "each channel its own grain ({})", g.shared);
+    }
+
+    #[test]
+    fn grain_is_measured_per_lightness_and_as_coarse_as_it_is() {
+        // Coarse grain (noise blurred by 1.2 px), a tenth of the level: light on the left
+        // half, dark on the right.
+        let (w, h) = (400usize, 200usize);
+        let plane = noise_plane(0, 0, w, h, 1.2, 7);
+        let mean = plane.iter().sum::<f32>() / plane.len() as f32;
+        let var = plane.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / plane.len() as f32;
+        assert!((var - 1.0).abs() < 0.15, "the noise has unit spread ({var})");
+        let px: Vec<f32> = (0..w * h)
+            .flat_map(|i| {
+                let level = if i % w < w / 2 { 0.5 } else { 0.02 };
+                [level * (1.0 + 0.1 * plane[i]); 3]
+            })
+            .collect();
+        let spot = Spot { points: vec![[0.5, 0.5]], size: 0.1, ..Spot::default() };
+        let s = SpotPx::new(&spot, Frame { w: w as f32, h: h as f32, half: 200.0 });
+        let g = surrounding_grain(&px, w, h, &s).unwrap();
+        assert!((g.sigma - 1.2).abs() < 0.4, "how coarse: {}", g.sigma);
+        let (light, dark) = (g.spread(0, 0.5), g.spread(0, 0.02));
+        assert!((light - 0.05).abs() < 0.02, "light: {light}");
+        assert!((dark - 0.002).abs() < 0.001, "dark: {dark}");
+    }
 
     fn image(f: impl Fn(u32, u32) -> f32) -> WorkingImage {
         WorkingImage::for_tests(ImageBuffer::from_fn(200, 100, |x, y| {
