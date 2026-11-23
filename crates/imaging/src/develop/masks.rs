@@ -198,6 +198,37 @@ pub(super) fn fill_picture(id: &str) -> Option<Arc<image::RgbImage>> {
     }
 }
 
+/// A Remove fill's picture halved `halvings` times (each pixel the mean of four), kept
+/// like the pictures themselves: for showing a large fill in a small preview.
+pub(super) fn fill_picture_halved(id: &str, halvings: u32) -> Option<Arc<image::RgbImage>> {
+    if halvings == 0 {
+        return fill_picture(id);
+    }
+    let key = format!("{id}@{halvings}");
+    if let Some((_, p)) =
+        FILL_PICTURES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| *k == key)
+    {
+        return Some(p.clone());
+    }
+    let from = fill_picture_halved(id, halvings - 1)?;
+    let (w, h) = ((from.width() / 2).max(1), (from.height() / 2).max(1));
+    let half = Arc::new(image::RgbImage::from_fn(w, h, |x, y| {
+        let at = |dx: u32, dy: u32| {
+            from.get_pixel((2 * x + dx).min(from.width() - 1), (2 * y + dy).min(from.height() - 1)).0
+        };
+        let (a, b, c, d) = (at(0, 0), at(1, 0), at(0, 1), at(1, 1));
+        image::Rgb(std::array::from_fn(|i| {
+            ((u16::from(a[i]) + u16::from(b[i]) + u16::from(c[i]) + u16::from(d[i]) + 2) / 4) as u8
+        }))
+    }));
+    let mut cache = FILL_PICTURES.lock().unwrap_or_else(|e| e.into_inner());
+    cache.push((key, half.clone()));
+    if cache.len() > 32 {
+        cache.remove(0);
+    }
+    Some(half)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Component {
     #[serde(default)]

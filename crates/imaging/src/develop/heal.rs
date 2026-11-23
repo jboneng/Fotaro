@@ -112,6 +112,14 @@ pub struct Fill {
     /// What made it (for information).
     #[serde(default)]
     pub model: String,
+    /// How much detail the picture holds: model pixels per picture pixel (1: all there
+    /// is). 0 in fills made before this was kept (worked out from the picture's size).
+    #[serde(default)]
+    pub detail: f32,
+    /// The picture is at the photo's own size, with the photo's fine detail and grain in
+    /// it (see [`super::fill_detail`]): nothing is added when it is shown.
+    #[serde(default)]
+    pub full: bool,
 }
 
 impl Spot {
@@ -234,6 +242,28 @@ pub fn fill_input(
     });
     let rect = [x0 as f32 / f.w, y0 as f32 / f.h, (x0 + side) as f32 / f.w, (y0 + side) as f32 / f.h];
     Some(FillInput { image, mask, rect, gains })
+}
+
+/// The part `rect` (0..1) of the photo with `spots` applied, as a model sees it (8-bit
+/// sRGB after `gains`): for looking at what a fill came to.
+pub fn healed_crop(
+    img: &WorkingImage,
+    spots: &[Spot],
+    dust: Option<&super::dust::DustLayer>,
+    rect: [f32; 4],
+    gains: [f32; 3],
+) -> image::RgbImage {
+    let done = healed(img, spots, dust);
+    let img: &WorkingImage = &done;
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let (x0, y0) = ((rect[0] * w as f32).round() as usize, (rect[1] * h as f32).round() as usize);
+    let (x1, y1) =
+        (((rect[2] * w as f32).round() as usize).min(w), ((rect[3] * h as f32).round() as usize).min(h));
+    let px = img.pixels.as_raw();
+    image::RgbImage::from_fn(x1.saturating_sub(x0) as u32, y1.saturating_sub(y0) as u32, |x, y| {
+        let i = 3 * ((y0 + y as usize) * w + x0 + x as usize);
+        image::Rgb(fill_encode([px[i], px[i + 1], px[i + 2]], gains))
+    })
 }
 
 /// The photo's pixel frame: 0..1 coordinates and sizes to pixels.
@@ -665,7 +695,22 @@ fn apply_spot(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
 /// photo shows through.
 fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
     let Some(fill) = spot.current_fill() else { return };
-    let Some(pic) = super::masks::fill_picture(&fill.id) else { return };
+    let Some(whole) = super::masks::fill_picture(&fill.id) else { return };
+    let [l, t, r, b] = fill.rect;
+    // Shown smaller than it is (a preview): from a copy halved until it is about the size
+    // shown, so every pixel of the picture counts (its grain averages out as the photo's).
+    let shown = (whole.width() as f32 / ((r - l) * f.w).max(1e-3))
+        .min(whole.height() as f32 / ((b - t) * f.h).max(1e-3));
+    let halvings = if shown >= 2.0 { (shown.log2().floor() as u32).min(6) } else { 0 };
+    let Some(pic) = super::masks::fill_picture_halved(&fill.id, halvings) else { return };
+    // What the model drew, per pixel shown.
+    let drawn = if fill.full {
+        1.0
+    } else if fill.detail > 0.0 {
+        fill.detail
+    } else {
+        (512.0 / whole.width().max(1) as f32).min(1.0)
+    } * shown;
     let s = SpotPx::new(spot, f);
     let opacity = spot.opacity.clamp(0.0, 100.0) / 100.0;
     let (x0, y0, bw, bh) = s.bbox(1.0, w, h);
@@ -673,13 +718,12 @@ fn apply_fill(px: &mut [f32], w: usize, h: usize, spot: &Spot, f: Frame) {
     if pw == 0 || ph == 0 {
         return;
     }
-    let [l, t, r, b] = fill.rect;
     let (sx, sy) = (pw as f32 / ((r - l) * f.w).max(1e-3), ph as f32 / ((b - t) * f.h).max(1e-3));
     // A fill made smaller than it is shown (a large spot) is smooth: the grain it lacks,
     // measured around the spot, goes back in, as fine or coarse as it is there and as
     // strong as it is at each lightness (grain is far weaker in the dark than in the light).
-    let lost = (1.0 - sx.min(sy).powi(2)).max(0.0).sqrt();
-    let grain = if sx.min(sy) < 0.8 { surrounding_grain(px, w, h, &s) } else { None };
+    let lost = (1.0 - drawn.powi(2)).max(0.0).sqrt();
+    let grain = if drawn < 0.8 { surrounding_grain(px, w, h, &s) } else { None };
     // The grain's part that is the same in every channel (lightness), and each channel's own
     // (colour): as around the spot, so a black and white photo gets no coloured grain.
     let noise = grain.as_ref().map(|g| {
@@ -737,7 +781,7 @@ fn hash_noise(x: isize, y: isize, k: u32) -> f32 {
 
 /// A box of noise with unit spread, about normal, the same every render: white, or (with
 /// `sigma`, in pixels) smoothed into clumps that size, as film grain is in a scan.
-fn noise_plane(x0: usize, y0: usize, bw: usize, bh: usize, sigma: f32, k: u32) -> Vec<f32> {
+pub(super) fn noise_plane(x0: usize, y0: usize, bw: usize, bh: usize, sigma: f32, k: u32) -> Vec<f32> {
     use rayon::prelude::*;
     let r = if sigma < 0.25 { 0 } else { (3.0 * sigma).ceil() as usize };
     let (pw, ph) = (bw + 2 * r, bh + 2 * r);

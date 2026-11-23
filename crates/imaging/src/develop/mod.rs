@@ -7,6 +7,7 @@ mod dehaze;
 mod detail;
 mod dust;
 mod effects;
+mod fill_detail;
 mod grading;
 mod groups;
 mod heal;
@@ -36,11 +37,12 @@ pub use dust::{
     render_dust_overlay, sensor_dust_spots,
 };
 pub use effects::{EffectParam, Effects, VignetteStyle};
+pub use fill_detail::{FinishedFill, finish_fill};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use groups::{SettingsGroup, changed_groups, copy_groups};
 pub use heal::{
     Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input,
-    find_source, prepare_area,
+    find_source, healed_crop, prepare_area,
 };
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use lens::{

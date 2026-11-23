@@ -1118,6 +1118,8 @@ fn remove_spots_show_their_fill_inside_only_and_follow_their_shape() {
         gains: input.gains,
         made_for: spot.shape_key(),
         model: "test".into(),
+        detail: 0.0,
+        full: false,
     });
     assert!(!s.spots[0].needs_fill());
     let out = render_srgb8(&img, &s);

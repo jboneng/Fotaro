@@ -2904,14 +2904,30 @@ fn run_fill(
     });
     let (out, device) = segment::remove(&img, &mask, best, gpu)?;
     log::info!("Remove: filled on {} in {:.0?}", device.label(), started.elapsed());
-    // Back to the crop's size (at most 1024 px: larger areas come out softer).
-    let side = input.image.width().min(1024);
-    let out = resize(&out, side, side, FilterType::Lanczos3);
+    // A large area gets the photo's own fine detail and grain over what the model drew.
+    let started = std::time::Instant::now();
+    let done = imaging::develop::finish_fill(&input, &out, key);
+    if done.full {
+        log::info!(
+            "Remove: detail from the photo for {} x {} px in {:.0?}",
+            done.picture.width(),
+            done.picture.height(),
+            started.elapsed()
+        );
+    }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let id = format!("{photo_id}-fill-{:x}", stamp.as_nanos());
-    imaging::develop::save_fill_picture(&id, &out)?;
+    imaging::develop::save_fill_picture(&id, &done.picture)?;
     let model = if best { "big-LaMa" } else { "LaMa-Dilated" }.to_owned();
-    Ok(imaging::develop::Fill { id, rect: input.rect, gains: input.gains, made_for: key, model })
+    Ok(imaging::develop::Fill {
+        id,
+        rect: done.rect,
+        gains: input.gains,
+        made_for: key,
+        model,
+        detail: done.detail,
+        full: done.full,
+    })
 }
 
 /// Start loading the full-size image of `photo_id` on a thread of its own (unless it is
