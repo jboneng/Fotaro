@@ -57,6 +57,20 @@ pub struct Effects {
     pub glow_range: f32,
     pub glow_spread: f32,
     pub glow_warmth: f32,
+    /// Fog, by how far away things are: Amount 0..100 (the farthest all fog); Distance 0..100 (where it begins, 0: right in front); Density
+    /// 0..100 (how soon it thickens); Height 0..100 (0: at every height, more: lying
+    /// low); Warmth −100..+100.
+    pub fog_amount: f32,
+    pub fog_distance: f32,
+    pub fog_density: f32,
+    pub fog_height: f32,
+    pub fog_warmth: f32,
+    /// The photo's depth map (a picture in the mask store, white near), made by a model
+    /// when Fog is first used on the photo. Belongs to its photo: not copied to others.
+    pub fog_depth: Option<String>,
+    /// For looking only (never kept): render the depth map in place of the photo.
+    #[serde(skip)]
+    pub fog_show: bool,
 }
 
 impl Default for Effects {
@@ -75,7 +89,61 @@ impl Default for Effects {
             glow_range: 50.0,
             glow_spread: 50.0,
             glow_warmth: 0.0,
+            fog_amount: 0.0,
+            fog_distance: 30.0,
+            fog_density: 50.0,
+            fog_height: 0.0,
+            fog_warmth: 0.0,
+            fog_depth: None,
+            fog_show: false,
         }
+    }
+}
+
+/// Fog as the settings ask for it: how much of a pixel is fog, from how far away it is.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Fog {
+    /// 0..1.
+    pub amount: f32,
+    start: f32,
+    rate: f32,
+    full: f32,
+    height: f32,
+    warmth: f32,
+}
+
+impl Fog {
+    pub fn new(e: &Effects) -> Option<Fog> {
+        if e.fog_amount <= 0.0 {
+            return None;
+        }
+        let rate = 0.5 + 7.5 * (e.fog_density.clamp(0.0, 100.0) / 100.0).powi(2);
+        Some(Fog {
+            amount: (e.fog_amount / 100.0).min(1.0),
+            start: e.fog_distance.clamp(0.0, 100.0) / 100.0,
+            rate,
+            full: 1.0 - (-rate).exp(),
+            height: e.fog_height.clamp(0.0, 100.0) / 100.0,
+            warmth: (e.fog_warmth / 100.0).clamp(-1.0, 1.0),
+        })
+    }
+
+    /// How much of the full effect applies `far` away (0: the nearest thing in the photo,
+    /// 1: the farthest) and `up` the frame (0: the bottom edge, 1: the top): none before
+    /// the Distance, all at the farthest, thickening sooner with more Density, and
+    /// thinning upward with Height.
+    #[inline]
+    pub fn share(&self, far: f32, up: f32) -> f32 {
+        let reach = ((far - self.start) / (1.0 - self.start).max(0.02)).clamp(0.0, 1.0);
+        let thick = (1.0 - (-self.rate * reach).exp()) / self.full;
+        thick * (-4.0 * self.height * up).exp()
+    }
+
+    /// The fog's colour: the photo's own haze colour, half way to grey, warmer or cooler.
+    pub fn color(&self, airlight: [f32; 3], luma: [f32; 3]) -> [f32; 3] {
+        let grey = airlight[0] * luma[0] + airlight[1] * luma[1] + airlight[2] * luma[2];
+        let tint = [1.0 + 0.3 * self.warmth, 1.0, 1.0 - 0.3 * self.warmth];
+        [0, 1, 2].map(|c| (0.5 * (airlight[c] + grey) * tint[c]).max(0.0))
     }
 }
 
@@ -94,6 +162,11 @@ pub enum EffectParam {
     GlowRange,
     GlowSpread,
     GlowWarmth,
+    FogAmount,
+    FogDistance,
+    FogDensity,
+    FogHeight,
+    FogWarmth,
 }
 
 impl EffectParam {
@@ -107,6 +180,8 @@ impl EffectParam {
     pub const GRAIN: [EffectParam; 3] = [Self::GrainAmount, Self::GrainSize, Self::GrainRoughness];
     pub const GLOW: [EffectParam; 4] =
         [Self::GlowAmount, Self::GlowRange, Self::GlowSpread, Self::GlowWarmth];
+    pub const FOG: [EffectParam; 5] =
+        [Self::FogAmount, Self::FogDistance, Self::FogDensity, Self::FogHeight, Self::FogWarmth];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -120,6 +195,11 @@ impl EffectParam {
             Self::GlowRange => "Range",
             Self::GlowSpread => "Spread",
             Self::GlowWarmth => "Warmth",
+            Self::FogAmount => "Amount",
+            Self::FogDistance => "Distance",
+            Self::FogDensity => "Density",
+            Self::FogHeight => "Height",
+            Self::FogWarmth => "Warmth",
         }
     }
 
@@ -129,6 +209,8 @@ impl EffectParam {
             "Post-Crop Vignette"
         } else if Self::GLOW.contains(&self) {
             "Glow"
+        } else if Self::FOG.contains(&self) {
+            "Fog"
         } else {
             "Grain"
         }
@@ -136,7 +218,7 @@ impl EffectParam {
 
     /// Amount and Roundness go both ways; the rest are 0..100.
     pub fn signed(self) -> bool {
-        matches!(self, Self::VignetteAmount | Self::VignetteRoundness | Self::GlowWarmth)
+        matches!(self, Self::VignetteAmount | Self::VignetteRoundness | Self::GlowWarmth | Self::FogWarmth)
     }
 
     pub fn range(self) -> (f32, f32) {
@@ -157,6 +239,11 @@ impl EffectParam {
             Self::GlowRange => &e.glow_range,
             Self::GlowSpread => &e.glow_spread,
             Self::GlowWarmth => &e.glow_warmth,
+            Self::FogAmount => &e.fog_amount,
+            Self::FogDistance => &e.fog_distance,
+            Self::FogDensity => &e.fog_density,
+            Self::FogHeight => &e.fog_height,
+            Self::FogWarmth => &e.fog_warmth,
         }
     }
 
@@ -174,6 +261,11 @@ impl EffectParam {
             Self::GlowRange => &mut e.glow_range,
             Self::GlowSpread => &mut e.glow_spread,
             Self::GlowWarmth => &mut e.glow_warmth,
+            Self::FogAmount => &mut e.fog_amount,
+            Self::FogDistance => &mut e.fog_distance,
+            Self::FogDensity => &mut e.fog_density,
+            Self::FogHeight => &mut e.fog_height,
+            Self::FogWarmth => &mut e.fog_warmth,
         }
     }
 }

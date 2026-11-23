@@ -17,7 +17,7 @@ use super::cache::{GainsKey, WbKey};
 use super::curve::{CurveFns, ToneCurve};
 use super::dehaze::{HazeMap, add_haze};
 use super::detail::{SharpenView, apply as apply_detail, apply_local};
-use super::effects::{Effects, Glow, Grain, Vignette, VignetteStyle};
+use super::effects::{Effects, Fog, Glow, Grain, Vignette, VignetteStyle};
 use super::grading::Grading;
 use super::heal::healed;
 use super::hsl::{HslAdjust, oklab_to_srgb, srgb_to_oklab};
@@ -149,6 +149,29 @@ impl Region {
     }
 }
 
+/// How near everything in `region` of `shown` is (1: the nearest), for Fog: the photo's
+/// depth map read as a mask is, so it follows the crop and the transform and has its
+/// edges fitted to the photo's. `None` without Fog or without a depth map.
+fn nearness(
+    source: &WorkingImage,
+    shown: &WorkingImage,
+    s: &DevelopSettings,
+    region: Region,
+) -> Option<Arc<MaskField>> {
+    let id = s.effects.fog_depth.as_ref().filter(|_| s.effects.fog_amount != 0.0 || s.effects.fog_show)?;
+    super::masks::mask_picture(id)?;
+    let shape = super::masks::Shape::Raster {
+        id: id.clone(),
+        selects: "Depth".into(),
+        model: String::new(),
+        range: None,
+    };
+    let map = [Mask::new("Depth", shape)];
+    let field = MaskField::build_for(source, shown, &map, vec![0], region).map(Arc::new);
+    super::perf::mark("depth for fog");
+    field
+}
+
 /// Everything per-pixel rendering needs, prepared once per render.
 struct Prepared {
     input: Input,
@@ -182,6 +205,12 @@ struct Prepared {
     locals: Option<Locals>,
     /// Glow, when on.
     glow: Option<Glow>,
+    /// Fog, when on and the photo has its depth map: how near each pixel of the region
+    /// is, the fog's colour, and the image's height.
+    fog: Option<(Fog, Arc<MaskField>, [f32; 3], f32)>,
+    /// Show Depth: the depth map (how near each pixel of the region is) in place of the
+    /// photo.
+    depth_shown: Option<Arc<MaskField>>,
     /// Profile: a 3D LUT after the base tone, when set (and its file is there).
     lut: Option<super::lut::PreparedLut>,
     /// Lens Corrections' Defringe, when on.
@@ -197,6 +226,7 @@ impl Prepared {
         s: &DevelopSettings,
         region: Region,
         field: Option<Arc<MaskField>>,
+        nearness: Option<Arc<MaskField>>,
     ) -> Prepared {
         let wb = img.resolve_wb(s);
         let input = match &img.color {
@@ -241,6 +271,8 @@ impl Prepared {
             vignette: Vignette::new(&s.effects, img.width(), img.height()),
             locals: field.map(|field| Locals::new(field, &s.masks)),
             glow: None,
+            fog: None,
+            depth_shown: nearness.clone().filter(|_| s.effects.fog_show),
             lut: s.profile.as_ref().and_then(super::lut::PreparedLut::new),
             fringe: None,
         };
@@ -258,12 +290,16 @@ impl Prepared {
         };
         let (local_dehaze, local_detail) =
             (local(|p| p.dehaze), local(|p| p.clarity) || local(|p| p.texture));
-        if prep.dehaze != 0.0 || local_dehaze {
+        let fog = Fog::new(&s.effects).zip(nearness);
+        if prep.dehaze != 0.0 || local_dehaze || fog.is_some() {
             let (w, h) = (img.width() as usize, img.height() as usize);
             let map = img
                 .render_cache
                 .haze
                 .get_or(prep.wb_key(), || HazeMap::build(w, h, |x, y| prep.linear(input_at(img, x, y))));
+            if let Some((fog, near)) = fog {
+                prep.fog = Some((fog, near, fog.color(map.airlight, prep.luma), img.height() as f32));
+            }
             prep.haze = Some(map);
             super::perf::mark("haze map");
         }
@@ -276,10 +312,11 @@ impl Prepared {
         // Glow: from the whole photo developed (without the region-only parts: local
         // gains and masks, which only cover the region), so every region agrees.
         if s.effects.glow_amount > 0.0 {
-            let (gains, locals) = (prep.gains.take(), prep.locals.take());
+            let (gains, locals, fog) = (prep.gains.take(), prep.locals.take(), prep.fog.take());
+            let shown = prep.depth_shown.take();
             let (w, h) = (img.width() as usize, img.height() as usize);
             prep.glow = Glow::new(&s.effects, w, h, prep.luma, |x, y| prep.pixel(input_at(img, x, y), x, y));
-            (prep.gains, prep.locals) = (gains, locals);
+            (prep.gains, prep.locals, prep.fog, prep.depth_shown) = (gains, locals, fog, shown);
             super::perf::mark("glow");
         }
         prep
@@ -449,6 +486,11 @@ impl Prepared {
     /// Input pixel `p` at (x, y) → display-referred linear working-space RGB, 0..1.
     #[inline]
     fn pixel(&self, p: [f32; 3], x: usize, y: usize) -> [f32; 3] {
+        if let Some(near) = &self.depth_shown {
+            // White near, black far, about as the map is kept.
+            let v = near.at(x, y)[0];
+            return [v * v; 3];
+        }
         let mut lin = self.linear(p);
         // Masks: how much of each active mask applies here.
         let masks = self.locals.as_ref().map(|l| (l, l.field.at(x, y)));
@@ -463,6 +505,11 @@ impl Prepared {
             } else if amount < 0.0 {
                 lin = add_haze(lin, (-amount).min(1.0), haze.airlight);
             }
+        }
+        if let Some((fog, near, color, height)) = &self.fog {
+            let far = 1.0 - near.at(x, y)[0];
+            let share = fog.share(far, 1.0 - (y as f32 + 0.5) / height) * fog.amount;
+            lin = [0, 1, 2].map(|c| lin[c] + share * (color[c] - lin[c]));
         }
         let g = match &self.gains {
             Some(gains) => {
@@ -821,7 +868,7 @@ pub fn render_region_srgb8_until(
     if stop() {
         return None;
     }
-    let prep = Prepared::new(img, s, region, field);
+    let prep = Prepared::new(img, s, region, field, nearness(source, img, s, region));
     if stop() {
         return None;
     }
@@ -912,7 +959,13 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
         });
         return out;
     }
-    let prep = Prepared::new(img, s, region, MaskField::build(source, img, &s.masks, region));
+    let prep = Prepared::new(
+        img,
+        s,
+        region,
+        MaskField::build(source, img, &s.masks, region),
+        nearness(source, img, s, region),
+    );
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         o.copy_from_slice(&finish.apply(prep.pixel(p, x, y), x, y).map(to_u16));
     });
@@ -967,7 +1020,7 @@ impl Detailed {
         let developed = match img.render_cache.planes.get(&key) {
             Some(planes) => planes,
             None => {
-                let prep = Prepared::new(img, s, area, field.clone());
+                let prep = Prepared::new(img, s, area, field.clone(), nearness(source, img, s, area));
                 if stop() {
                     return None;
                 }
@@ -1049,7 +1102,7 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
         effects: Effects::default(),
         ..s.clone()
     };
-    let prep = Prepared::new(img, &neutral, Region::whole(img), None);
+    let prep = Prepared::new(img, &neutral, Region::whole(img), None, None);
     // Luminance in stops from middle grey, on a sample of pixels.
     let px = img.pixels.as_raw().as_chunks::<3>().0;
     let step = (px.len() / 200_000).max(1);

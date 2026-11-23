@@ -1934,11 +1934,51 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
         });
     });
-    let groups: [&[EffectParam]; 3] = [&EffectParam::VIGNETTE, &EffectParam::GRAIN, &EffectParam::GLOW];
+    let groups: [&[EffectParam]; 4] =
+        [&EffectParam::VIGNETTE, &EffectParam::GRAIN, &EffectParam::GLOW, &EffectParam::FOG];
     for (n, params) in groups.into_iter().enumerate() {
         match n {
             1 => sub_header(ui, "Grain", |_| {}),
             2 => sub_header(ui, "Glow", |_| {}),
+            3 => {
+                sub_header(ui, "Fog", |_| {});
+                let tip = "See the photo's depth map instead of the photo: white is near, black is far";
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut d.show_depth, "Show Depth").on_hover_text(tip).changed() {
+                        d.request_renders();
+                    }
+                    if st.effects.fog_depth.is_some() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let tip = "Make the photo's depth map again";
+                            let idle = d.ai_job.is_none();
+                            if ui
+                                .add_enabled(idle, egui::Button::new("Remake").small())
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                d.remake_depth();
+                            }
+                            if !idle {
+                                ui.add(egui::Spinner::new().size(11.0));
+                            }
+                        });
+                    }
+                });
+                // Fog goes by a depth map of the photo, made by a model the first time.
+                if (st.effects.fog_amount != 0.0 || d.show_depth) && st.effects.fog_depth.is_none() {
+                    ui.horizontal(|ui| {
+                        if d.ai_job.is_some() {
+                            ui.add(egui::Spinner::new().size(11.0));
+                            ui.label(weak("Working out how far away everything is…").size(11.5));
+                        } else {
+                            ui.label(weak("Needs a depth map of the photo").size(11.5));
+                            if d.fog_declined && ui.small_button("Make It").clicked() {
+                                d.fog_declined = false;
+                            }
+                        }
+                    });
+                }
+            }
             _ => {}
         }
         for p in params {
@@ -1951,7 +1991,11 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     e.vignette_amount < 0.0 && e.vignette_style != VignetteStyle::PaintOverlay
                 }
                 EffectParam::GrainSize | EffectParam::GrainRoughness => e.grain_amount > 0.0,
-                EffectParam::GlowAmount => true,
+                EffectParam::GlowAmount | EffectParam::FogAmount => true,
+                EffectParam::FogDistance
+                | EffectParam::FogDensity
+                | EffectParam::FogHeight
+                | EffectParam::FogWarmth => e.fog_amount != 0.0,
                 EffectParam::GlowRange | EffectParam::GlowSpread | EffectParam::GlowWarmth => {
                     e.glow_amount > 0.0
                 }
@@ -1965,7 +2009,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 log: false,
                 gradient: match p {
                     EffectParam::VignetteAmount => Some([Color32::from_gray(20), Color32::from_gray(235)]),
-                    EffectParam::GlowWarmth => {
+                    EffectParam::GlowWarmth | EffectParam::FogWarmth => {
                         Some([Color32::from_rgb(70, 110, 220), Color32::from_rgb(230, 170, 60)])
                     }
                     _ => None,

@@ -165,9 +165,10 @@ pub fn depth(model: &mut Model, img: &RgbImage, long_side: u32) -> Result<(Vec<f
     Ok((near.iter().map(|v| (v - lo) / span).collect(), ow as u32, oh as u32))
 }
 
-/// The model's long side for a depth map: what it was trained at. Twice that is finer
-/// but takes three to five times as long.
-const DEPTH_SIDE: u32 = 518;
+/// The model's long side for a depth map: twice what it was trained at (518), which gives
+/// sharper edges between near and far things and takes three to five times as long (8 s
+/// on a small GPU, half a minute on a CPU), once per photo.
+const DEPTH_SIDE: u32 = 1036;
 
 /// [`depth`] as a picture of the photo's size: white near, black far, as the square root
 /// of the nearness, which leaves more of the 256 steps to what is far away (where the

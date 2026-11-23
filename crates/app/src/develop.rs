@@ -172,6 +172,10 @@ pub enum ToolTarget {
     NewMask,
     /// A new component of the selected mask.
     Component(imaging::develop::CombineMode),
+    /// Not a mask at all: the photo's depth map, for Fog.
+    FogMap,
+    /// The same, made afresh although the photo has one.
+    FogMapAgain,
 }
 
 /// A tool waiting for a drag on the photo.
@@ -303,6 +307,9 @@ pub enum AiKind {
     People,
     /// Everything between two distances (a depth map of the photo, made by a model).
     Depth,
+    /// A Depth Range set to what is near, and one set to what is far.
+    DepthNear,
+    DepthFar,
 }
 
 impl AiKind {
@@ -316,7 +323,14 @@ impl AiKind {
             AiKind::Dust => "Dust & Scratches",
             AiKind::People => "People",
             AiKind::Depth => "Depth Range",
+            AiKind::DepthNear => "Foreground (Depth)",
+            AiKind::DepthFar => "Background (Depth)",
         }
+    }
+
+    /// Made from the photo's depth map.
+    pub fn is_depth(self) -> bool {
+        matches!(self, AiKind::Depth | AiKind::DepthNear | AiKind::DepthFar)
     }
 
     pub fn model(self) -> segment::AiModel {
@@ -327,7 +341,7 @@ impl AiKind {
             AiKind::Remove => segment::AiModel::Remove,
             AiKind::Dust => segment::AiModel::Scratches,
             AiKind::People => segment::AiModel::People,
-            AiKind::Depth => segment::AiModel::Depth,
+            AiKind::Depth | AiKind::DepthNear | AiKind::DepthFar => segment::AiModel::Depth,
         }
     }
 
@@ -443,7 +457,7 @@ fn run_ai(
     }
     set(
         -1.0,
-        if kind == AiKind::Depth {
+        if kind.is_depth() {
             "Working out how far away everything is…".to_owned()
         } else {
             format!("Finding the {}…", kind.label().to_lowercase())
@@ -1359,12 +1373,17 @@ fn worker(
         selects = waiting;
         for (photo_id, job, mut settings, rotation, gpu) in ready {
             // A photo's depth map is made once: another Depth Range uses the one there is.
-            if job.kind == AiKind::Depth
-                && let Some(id) =
-                    settings.masks.iter().flat_map(|m| &m.components).find_map(|c| match &c.shape {
+            if job.kind.is_depth()
+                && job.target != ToolTarget::FogMapAgain
+                && let Some(id) = settings
+                    .masks
+                    .iter()
+                    .flat_map(|m| &m.components)
+                    .find_map(|c| match &c.shape {
                         imaging::develop::Shape::Raster { id, range: Some(_), .. } => Some(id.clone()),
                         _ => None,
                     })
+                    .or_else(|| settings.effects.fog_depth.clone())
                 && imaging::develop::mask_picture(&id).is_some()
             {
                 let _ = tx.send(Reply::Selected { photo_id, result: Ok((id, "the map made before")) });
@@ -1670,6 +1689,11 @@ pub struct DevelopState {
     /// them all, so the panel doesn't flash a message per spot).
     pub fill_batch: Option<FillBatch>,
     fill_failed: Vec<u64>,
+    /// Fog's depth map was declined (its download) or could not be made for this photo:
+    /// not asked for again until another photo is opened.
+    pub fog_declined: bool,
+    /// Effects ▸ Fog ▸ Show Depth: the photo's depth map in place of the photo.
+    pub show_depth: bool,
     pub fill_allowed: bool,
     pub fill_declined: bool,
     /// Remove at best quality (big-LaMa) instead of fast (LaMa-Dilated).
@@ -1807,6 +1831,8 @@ impl DevelopState {
             fill_job: None,
             fill_batch: None,
             fill_failed: Vec::new(),
+            fog_declined: false,
+            show_depth: false,
             fill_allowed: false,
             fill_declined: false,
             remove_best: true,
@@ -1865,6 +1891,8 @@ impl DevelopState {
         self.fill_job = None;
         self.fill_batch = None;
         self.fill_failed.clear();
+        self.fog_declined = false;
+        self.show_depth = false;
         self.dust_job = None;
         self.dust_failed.clear();
         self.sensor_finding = false;
@@ -2031,6 +2059,7 @@ impl DevelopState {
             }
         }
         self.request_fills();
+        self.request_fog_depth();
         // The Masks panel's thumbnails, while it is open and the masks changed.
         if self.masking.is_some() && self.thumbs_sent.as_ref() != Some(&self.settings.masks) {
             self.thumbs_seq += 1;
@@ -2287,6 +2316,8 @@ impl DevelopState {
                         }
                         Err(e) => {
                             log::warn!("AI mask: {e}");
+                            self.fog_declined |=
+                                matches!(job.target, ToolTarget::FogMap | ToolTarget::FogMapAgain);
                             self.error =
                                 Some(format!("Couldn't select the {}: {e}", job.kind.label().to_lowercase()));
                         }
@@ -2516,6 +2547,27 @@ impl DevelopState {
         }
     }
 
+    /// Fog needs the photo's depth map: have it made when Fog is on and there is none
+    /// (asking before the model's first download, once).
+    fn request_fog_depth(&mut self) {
+        let e = &self.settings.effects;
+        if (e.fog_amount == 0.0 && !self.show_depth)
+            || e.fog_depth.is_some()
+            || self.ai_job.is_some()
+            || self.ai_consent.is_some()
+            || self.fog_declined
+        {
+            return;
+        }
+        self.request_ai(AiKind::Depth, ToolTarget::FogMap, None);
+    }
+
+    /// Make the photo's depth map again (after the photo changed a lot, or to get a map
+    /// from a newer version of the model).
+    pub fn remake_depth(&mut self) {
+        self.request_ai(AiKind::Depth, ToolTarget::FogMapAgain, None);
+    }
+
     /// Make an AI mask (downloading first whatever it still needs).
     pub fn start_ai(&mut self, kind: AiKind, target: ToolTarget, prompt: Option<ObjectPrompt>) {
         if kind == AiKind::People {
@@ -2548,13 +2600,27 @@ impl DevelopState {
     fn add_ai_mask(&mut self, catalog: &mut Catalog, job: &AiJob, id: String) -> Result<Changed> {
         use imaging::develop::{Component, Mask, Shape};
         let kind = job.kind;
-        let shape = if kind == AiKind::Depth {
-            Shape::Raster {
-                id,
-                selects: "Depth".into(),
-                model: kind.model_name().into(),
-                range: Some(Default::default()),
+        if matches!(job.target, ToolTarget::FogMap | ToolTarget::FogMapAgain) {
+            // The photo's depth map: Fog's, and every Depth Range's (one map a photo).
+            let again = job.target == ToolTarget::FogMapAgain;
+            let mut st = self.settings.clone();
+            for c in st.masks.iter_mut().flat_map(|m| &mut m.components) {
+                if let Shape::Raster { id: old, range: Some(_), .. } = &mut c.shape {
+                    old.clone_from(&id);
+                }
             }
+            st.effects.fog_depth = Some(id);
+            self.set_live(st);
+            return self.commit(catalog, Some(if again { "New Depth Map" } else { "Fog" }.into()));
+        }
+        let shape = if kind.is_depth() {
+            use imaging::develop::DepthRange;
+            let range = match kind {
+                AiKind::DepthNear => DepthRange { near: 0.0, far: 35.0, feather: 25.0 },
+                AiKind::DepthFar => DepthRange { near: 60.0, far: 100.0, feather: 25.0 },
+                _ => DepthRange::default(),
+            };
+            Shape::Raster { id, selects: "Depth".into(), model: kind.model_name().into(), range: Some(range) }
         } else {
             Shape::Raster { id, selects: kind.label().into(), model: kind.model_name().into(), range: None }
         };
@@ -2728,6 +2794,7 @@ impl DevelopState {
         if self.cropping.is_some() {
             s.transform.crop = s.transform.crop.uncropped();
         }
+        s.effects.fog_show = self.show_depth && !self.before;
         s
     }
 

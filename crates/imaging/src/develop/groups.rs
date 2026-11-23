@@ -24,6 +24,7 @@ pub enum SettingsGroup {
     Vignette,
     Grain,
     Glow,
+    Fog,
     LensProfile,
     ChromaticAberration,
     LensManual,
@@ -36,7 +37,7 @@ pub enum SettingsGroup {
 
 impl SettingsGroup {
     /// In panel order.
-    pub const ALL: [SettingsGroup; 22] = [
+    pub const ALL: [SettingsGroup; 23] = [
         Self::Treatment,
         Self::WhiteBalance,
         Self::BasicTone,
@@ -51,6 +52,7 @@ impl SettingsGroup {
         Self::Vignette,
         Self::Grain,
         Self::Glow,
+        Self::Fog,
         Self::LensProfile,
         Self::ChromaticAberration,
         Self::LensManual,
@@ -77,6 +79,7 @@ impl SettingsGroup {
             Self::Vignette => "Post-Crop Vignetting",
             Self::Grain => "Grain",
             Self::Glow => "Glow",
+            Self::Fog => "Fog",
             Self::LensProfile => "Lens Profile Corrections",
             Self::ChromaticAberration => "Chromatic Aberration",
             Self::LensManual => "Lens Distortion & Vignetting",
@@ -96,7 +99,7 @@ impl SettingsGroup {
             }
             Self::ToneCurve | Self::Hsl | Self::BwMix | Self::ColorGrading => "Color",
             Self::Sharpening | Self::NoiseReduction => "Detail",
-            Self::Vignette | Self::Grain | Self::Glow => "Effects",
+            Self::Vignette | Self::Grain | Self::Glow | Self::Fog => "Effects",
             Self::LensProfile | Self::ChromaticAberration | Self::LensManual => "Lens Corrections",
             Self::Transform | Self::Crop => "Geometry",
             Self::Masks | Self::Spots | Self::Dust => "Local",
@@ -162,6 +165,14 @@ fn copy_group(f: &DevelopSettings, t: &mut DevelopSettings, g: SettingsGroup) {
             let (e, s) = (&mut t.effects, &f.effects);
             (e.glow_amount, e.glow_range, e.glow_spread, e.glow_warmth) =
                 (s.glow_amount, s.glow_range, s.glow_spread, s.glow_warmth);
+        }
+        G::Fog => {
+            let (e, s) = (&mut t.effects, &f.effects);
+            (e.fog_amount, e.fog_distance, e.fog_density) = (s.fog_amount, s.fog_distance, s.fog_density);
+            (e.fog_height, e.fog_warmth) = (s.fog_height, s.fog_warmth);
+            // The depth map belongs to its photo: made again for this one. (Between two
+            // versions of one photo it would be the same; the cost is making it twice.)
+            e.fog_depth = None;
         }
         G::Transform => {
             // Everything of the Transform panel but the crop.
@@ -290,6 +301,13 @@ pub(super) fn every_field_changed() -> DevelopSettings {
             glow_range: 40.0,
             glow_spread: 60.0,
             glow_warmth: 5.0,
+            fog_amount: 30.0,
+            fog_distance: 20.0,
+            fog_density: 60.0,
+            fog_height: 15.0,
+            fog_warmth: -10.0,
+            fog_depth: Some("a-depth-map".into()),
+            fog_show: false,
         },
         transform: Transform {
             upright: Upright::Auto,
@@ -338,9 +356,11 @@ mod tests {
         for raw in [false, true] {
             let mut t = DevelopSettings::default_for(raw);
             copy_groups(&all, &mut t, &SettingsGroup::ALL);
-            // (Remove CA's measurement is made again for each photo.)
+            // (Remove CA's measurement is made again for each photo, and Fog's depth map.)
             assert_eq!(t.transform.lens.ca, None);
             t.transform.lens.ca = all.transform.lens.ca;
+            assert_eq!(t.effects.fog_depth, None);
+            t.effects.fog_depth = all.effects.fog_depth.clone();
             assert_eq!(t, all);
         }
     }

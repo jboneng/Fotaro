@@ -959,6 +959,65 @@ fn a_depth_range_mask_selects_between_near_and_far() {
     set_mask_store(None);
 }
 
+#[test]
+fn fog_thickens_with_distance_and_regions_still_match() {
+    // Dark grey everywhere, a little texture; near on the left, far on the right.
+    let img: RgbImage = ImageBuffer::from_fn(200, 100, |x, y| {
+        let n = ((x * 7 + y * 13) % 5) as u8;
+        // A strip of bright sky along the top gives the fog its colour.
+        if y < 12 { Rgb([225 + n, 228 + n, 232 + n]) } else { Rgb([50 + n, 50 + n, 50 + n]) }
+    });
+    let w = rendered(&img);
+    let picture = image::GrayImage::from_fn(50, 25, |x, _| image::Luma([255 - (x * 255 / 49) as u8]));
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("fog-depth", &picture).unwrap();
+    let fog = |amount: f32, distance: f32, density: f32, height: f32| DevelopSettings {
+        effects: Effects {
+            fog_amount: amount,
+            fog_distance: distance,
+            fog_density: density,
+            fog_height: height,
+            fog_depth: Some("fog-depth".into()),
+            ..Effects::default()
+        },
+        ..Default::default()
+    };
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    let lum = |i: &RgbImage, x: u32, y: u32| f32::from(i.get_pixel(x, y)[1]);
+    // A white-ish haze over a dark photo: lighter the farther, nothing before Distance.
+    let s = fog(100.0, 30.0, 50.0, 0.0);
+    let out = render_srgb8(&w, &s);
+    assert_eq!(out.get_pixel(20, 50), plain.get_pixel(20, 50), "in front of the fog");
+    let (mid, far) = (lum(&out, 130, 50) - lum(&plain, 130, 50), lum(&out, 195, 50) - lum(&plain, 195, 50));
+    assert!(mid > 20.0 && far > mid + 20.0, "thicker with distance: {mid} then {far}");
+    // More density thickens sooner; less amount is less of it.
+    assert!(lum(&render_srgb8(&w, &fog(100.0, 30.0, 100.0, 0.0)), 110, 50) > lum(&out, 110, 50));
+    assert!(lum(&render_srgb8(&w, &fog(40.0, 30.0, 50.0, 0.0)), 195, 50) < lum(&out, 195, 50));
+    // Height: it lies low (the bottom keeps more than the top).
+    let low = render_srgb8(&w, &fog(100.0, 30.0, 50.0, 80.0));
+    assert!(lum(&low, 195, 95) > lum(&low, 195, 25) + 10.0);
+    assert!(lum(&low, 195, 25) < lum(&out, 195, 25));
+    // An amount below zero (settings from when it cleared the distance) does nothing.
+    assert_eq!(render_srgb8(&w, &fog(-100.0, 30.0, 50.0, 0.0)), plain);
+    // Regions render like the whole.
+    let part = render_region_srgb8(&w, &s, Region { x: 90, y: 20, w: 100, h: 60 });
+    for (x, y, p) in part.enumerate_pixels() {
+        let q = out.get_pixel(x + 90, y + 20);
+        assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+    }
+    // Without the depth map (not made yet, or lost) nothing happens; and no amount is none.
+    let mut none = s.clone();
+    none.effects.fog_depth = None;
+    assert_eq!(render_srgb8(&w, &none), plain);
+    assert_eq!(render_srgb8(&w, &fog(0.0, 30.0, 50.0, 0.0)), plain);
+    assert_ne!(s.stable_hash(), none.stable_hash());
+    // Kept as written, and settings from before Fog still read.
+    assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap(), s);
+    set_mask_store(None);
+}
+
 /// A mask over the left part of the photo (full left of 45%, none right of 55%).
 fn left_mask(adjust: impl Fn(&mut LocalAdjust)) -> Mask {
     let mut m = Mask::new("Mask 1", Shape::Linear { start: [0.45, 0.5], end: [0.55, 0.5] });

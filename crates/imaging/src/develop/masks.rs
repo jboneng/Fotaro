@@ -779,49 +779,124 @@ fn refine_radius(source: (usize, usize), picture: (usize, usize)) -> usize {
     ((4.0 * scale).round() as usize).max(source.0.max(source.1) / 400).max(2)
 }
 
+/// The picture scaled up to `bbox` of the source, its edges fitted to the photo's: a guided
+/// filter with the photo's colour as the guide (He, Sun and Tang), so an edge between two
+/// things of the same lightness but another colour is found too. The filter's sums are
+/// made on a coarser grid (lined up with the photo, not the box) and its result scaled
+/// back up, as in their fast variant: a full-size photo would need gigabytes otherwise.
 fn refine(source: &WorkingImage, picture: &image::GrayImage, bbox: (usize, usize, usize, usize)) -> Raster {
+    use super::local::box_blur_par;
     let (sw, sh) = (source.width() as usize, source.height() as usize);
     let r = refine_radius((sw, sh), (picture.width() as usize, picture.height() as usize));
-    // Work on the box plus what the filter reaches into (two box blurs), so a part of the
-    // photo comes out exactly as it would in a whole one.
-    let pad = 2 * r + 2;
-    let (bx0, by0) = (bbox.0.saturating_sub(pad), bbox.1.saturating_sub(pad));
-    let (bx1, by1) = ((bbox.0 + bbox.2 + pad).min(sw), (bbox.1 + bbox.3 + pad).min(sh));
-    let (w, h) = (bx1.saturating_sub(bx0), by1.saturating_sub(by0));
-    if w == 0 || h == 0 || bbox.2 == 0 || bbox.3 == 0 {
+    if bbox.2 == 0 || bbox.3 == 0 || sw == 0 || sh == 0 {
         return Raster { x0: bbox.0, y0: bbox.1, w: 0, h: 0, data: Vec::new() };
     }
+    // The grid's step, and the radius in its cells.
+    let step = (r / 3).clamp(1, 8);
+    let rs = ((r as f32 / step as f32).round() as usize).max(1);
+    // Work on the box plus what the filter reaches into (two box blurs and the scaling
+    // back up), on whole cells, so a part of the photo comes out exactly as it would in a
+    // whole one.
+    let pad = (2 * rs + 3) * step;
+    let (bx0, by0) = (bbox.0.saturating_sub(pad) / step * step, bbox.1.saturating_sub(pad) / step * step);
+    let (bx1, by1) = ((bbox.0 + bbox.2 + pad).min(sw), (bbox.1 + bbox.3 + pad).min(sh));
+    let (gw, gh) = ((bx1 - bx0).div_ceil(step), (by1 - by0).div_ceil(step));
     let (pw, ph) = (picture.width() as usize, picture.height() as usize);
     let (kx, ky) = (pw as f32 / sw as f32, ph as f32 / sh as f32);
     let px = picture.as_raw();
     let src = source.pixels.as_raw();
-    // Guide: perceptual-ish lightness of the source; input: the picture, bilinear.
-    let (guide, input): (Vec<f32>, Vec<f32>) = (0..w * h)
+    // The guide: the photo's colour, each channel about as the eye spaces its tones.
+    let guide = |x: usize, y: usize| -> [f32; 3] {
+        let p = &src[(y * sw + x) * 3..(y * sw + x) * 3 + 3];
+        [p[0].clamp(0.0, 1.0).sqrt(), p[1].clamp(0.0, 1.0).sqrt(), p[2].clamp(0.0, 1.0).sqrt()]
+    };
+    let shown = |x: f32, y: f32| -> f32 {
+        let fx = (x * kx - 0.5).clamp(0.0, (pw - 1) as f32);
+        let fy = (y * ky - 0.5).clamp(0.0, (ph - 1) as f32);
+        let (x0, y0) = (fx as usize, fy as usize);
+        let (x1, y1) = ((x0 + 1).min(pw - 1), (y0 + 1).min(ph - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let at = |x: usize, y: usize| f32::from(px[y * pw + x]) / 255.0;
+        let top = at(x0, y0) + tx * (at(x1, y0) - at(x0, y0));
+        let bottom = at(x0, y1) + tx * (at(x1, y1) - at(x0, y1));
+        top + ty * (bottom - top)
+    };
+    // Per cell: the guide's mean colour, and the picture at its middle.
+    let cells: Vec<([f32; 3], f32)> = (0..gw * gh)
         .into_par_iter()
         .map(|k| {
-            let (x, y) = (bx0 + k % w, by0 + k / w);
-            let s = &src[(y * sw + x) * 3..(y * sw + x) * 3 + 3];
-            let l = (0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2]).clamp(0.0, 1.0).sqrt();
-            let fx = ((x as f32 + 0.5) * kx - 0.5).clamp(0.0, (pw - 1) as f32);
-            let fy = ((y as f32 + 0.5) * ky - 0.5).clamp(0.0, (ph - 1) as f32);
-            let (x0, y0) = (fx as usize, fy as usize);
-            let (x1, y1) = ((x0 + 1).min(pw - 1), (y0 + 1).min(ph - 1));
-            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-            let at = |x: usize, y: usize| f32::from(px[y * pw + x]) / 255.0;
-            let top = at(x0, y0) + tx * (at(x1, y0) - at(x0, y0));
-            let bottom = at(x0, y1) + tx * (at(x1, y1) - at(x0, y1));
-            (l, top + ty * (bottom - top))
+            let (cx, cy) = (bx0 + (k % gw) * step, by0 + (k / gw) * step);
+            let (ex, ey) = ((cx + step).min(sw), (cy + step).min(sh));
+            let mut sum = [0.0f32; 3];
+            for y in cy..ey {
+                for x in cx..ex {
+                    let g = guide(x, y);
+                    sum = [sum[0] + g[0], sum[1] + g[1], sum[2] + g[2]];
+                }
+            }
+            let n = ((ex - cx) * (ey - cy)) as f32;
+            (sum.map(|v| v / n), shown((cx + ex) as f32 / 2.0, (cy + ey) as f32 / 2.0))
         })
-        .unzip();
-    let (mi, mii) = super::detail::guide_stats(&guide, w, h, r);
-    let (ma, mb) = super::detail::guided_coeffs(&guide, &mi, &mii, &input, w, h, r, 1e-4);
-    let (ox, oy) = (bbox.0 - bx0, bbox.1 - by0);
+        .collect();
+    type Cell = ([f32; 3], f32);
+    let plane = |f: &(dyn Fn(&Cell) -> f32 + Sync)| -> Vec<f32> {
+        let v: Vec<f32> = cells.iter().map(f).collect();
+        box_blur_par(&v, gw, gh, rs)
+    };
+    let mean_g: [Vec<f32>; 3] = std::array::from_fn(|c| plane(&move |v| v.0[c]));
+    let mean_p = plane(&|v| v.1);
+    let mean_gp: [Vec<f32>; 3] = std::array::from_fn(|c| plane(&move |v| v.0[c] * v.1));
+    // The guide's channels by each other: rr, rg, rb, gg, gb, bb.
+    const PAIRS: [(usize, usize); 6] = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)];
+    let mean_gg: [Vec<f32>; 6] = std::array::from_fn(|n| plane(&move |v| v.0[PAIRS[n].0] * v.0[PAIRS[n].1]));
+    // Per cell: the picture as a line through the guide's colours, `a · colour + b`.
+    const EPS: f32 = 1e-4;
+    let lines: Vec<[f32; 4]> = (0..gw * gh)
+        .into_par_iter()
+        .map(|k| {
+            let m = [mean_g[0][k], mean_g[1][k], mean_g[2][k]];
+            let var = |n: usize| mean_gg[n][k] - m[PAIRS[n].0] * m[PAIRS[n].1];
+            let (rr, rg, rb, gg, gb, bb) = (var(0) + EPS, var(1), var(2), var(3) + EPS, var(4), var(5) + EPS);
+            let cov: [f32; 3] = std::array::from_fn(|c| mean_gp[c][k] - m[c] * mean_p[k]);
+            // The inverse of the (symmetric) 3 × 3 by its cofactors.
+            let (c00, c01, c02) = (gg * bb - gb * gb, rb * gb - rg * bb, rg * gb - rb * gg);
+            let (c11, c12, c22) = (rr * bb - rb * rb, rg * rb - rr * gb, rr * gg - rg * rg);
+            let det = rr * c00 + rg * c01 + rb * c02;
+            if det.abs() < 1e-20 {
+                return [0.0, 0.0, 0.0, mean_p[k]];
+            }
+            let a = [
+                (c00 * cov[0] + c01 * cov[1] + c02 * cov[2]) / det,
+                (c01 * cov[0] + c11 * cov[1] + c12 * cov[2]) / det,
+                (c02 * cov[0] + c12 * cov[1] + c22 * cov[2]) / det,
+            ];
+            [a[0], a[1], a[2], mean_p[k] - a[0] * m[0] - a[1] * m[1] - a[2] * m[2]]
+        })
+        .collect();
+    let line: [Vec<f32>; 4] = std::array::from_fn(|c| {
+        let v: Vec<f32> = lines.iter().map(|l| l[c]).collect();
+        box_blur_par(&v, gw, gh, rs)
+    });
     let mut data = vec![0.0f32; bbox.2 * bbox.3];
     data.par_chunks_mut(bbox.2).enumerate().for_each(|(j, row)| {
-        let base = (j + oy) * w + ox;
+        let y = bbox.1 + j;
+        let fy = ((y - by0) as f32 + 0.5) / step as f32 - 0.5;
+        let fy = fy.clamp(0.0, (gh - 1) as f32);
+        let (y0, ty) = (fy as usize, fy.fract());
+        let y1 = (y0 + 1).min(gh - 1);
         for (i, v) in row.iter_mut().enumerate() {
-            let k = base + i;
-            *v = (ma[k] * guide[k] + mb[k]).clamp(0.0, 1.0);
+            let x = bbox.0 + i;
+            let fx = (((x - bx0) as f32 + 0.5) / step as f32 - 0.5).clamp(0.0, (gw - 1) as f32);
+            let (x0, tx) = (fx as usize, fx.fract());
+            let x1 = (x0 + 1).min(gw - 1);
+            let at = |c: usize| {
+                let p = &line[c];
+                let top = p[y0 * gw + x0] + tx * (p[y0 * gw + x1] - p[y0 * gw + x0]);
+                let bottom = p[y1 * gw + x0] + tx * (p[y1 * gw + x1] - p[y1 * gw + x0]);
+                top + ty * (bottom - top)
+            };
+            let g = guide(x, y);
+            *v = (at(0) * g[0] + at(1) * g[1] + at(2) * g[2] + at(3)).clamp(0.0, 1.0);
         }
     });
     Raster { x0: bbox.0, y0: bbox.1, w: bbox.2, h: bbox.3, data }

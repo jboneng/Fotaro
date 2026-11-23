@@ -688,13 +688,20 @@ enum MenuPick {
 /// The AI selections first (as LrC lists them), then the tools with their keys, as menu
 /// rows; `pick` gets the chosen one.
 fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(MenuPick)) {
-    let ai = [AiKind::Subject, AiKind::Sky, AiKind::Background, AiKind::Depth]
-        .map(|k| (MenuPick::Ai(k), k.label(), ""));
+    let ai = [
+        AiKind::Subject,
+        AiKind::Sky,
+        AiKind::Background,
+        AiKind::DepthNear,
+        AiKind::DepthFar,
+        AiKind::Depth,
+    ]
+    .map(|k| (MenuPick::Ai(k), k.label(), ""));
     let object = [(MenuPick::Tool(ShapeKind::Object), "Object", "")];
     let tools = [(ShapeKind::Brush, "K"), (ShapeKind::Linear, "M"), (ShapeKind::Radial, "Shift+M")]
         .map(|(k, key)| (MenuPick::Tool(k), k.label(), key));
     for (n, (choice, label, key)) in ai.into_iter().chain(object).chain(tools).enumerate() {
-        if n == 5 {
+        if n == 7 {
             ui.separator();
         }
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(210.0, 26.0), egui::Sense::click());
@@ -769,7 +776,7 @@ pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
             AiKind::People => {
                 ("People".to_owned(), "the models that find people and outline them".to_owned())
             }
-            AiKind::Depth => (
+            AiKind::Depth | AiKind::DepthNear | AiKind::DepthFar => (
                 "Depth Range".to_owned(),
                 "the model that works out how far away everything in a photo is".to_owned(),
             ),
@@ -810,6 +817,7 @@ pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
         Some(false) if kind == AiKind::Dust => d.decline_dust_ai(),
         Some(false) => {
             d.fill_declined |= kind == AiKind::Remove;
+            d.fog_declined |= consent.target == ToolTarget::FogMap;
             d.ai_consent = None;
         }
         None => {}
