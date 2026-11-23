@@ -146,6 +146,38 @@ pub fn sky(model: &mut Model, img: &RgbImage) -> Result<GrayImage> {
     Ok(to_mask(&prob, w as u32, h as u32, img.dimensions()))
 }
 
+/// How near everything in the photo is (Depth Anything V2): the photo at `long_side`
+/// pixels (the model was trained at 518; larger gives a finer map, slower) in, with its
+/// shape kept and its sides multiples of 14; nearness out, 0 (the farthest in this
+/// photo) to 1 (the nearest), as `(values, width, height)` at the model's size. Relative
+/// only: there are no distances in it.
+pub fn depth(model: &mut Model, img: &RgbImage, long_side: u32) -> Result<(Vec<f32>, u32, u32)> {
+    let (iw, ih) = img.dimensions();
+    let k = long_side.clamp(140, 2800) as f32 / iw.max(ih).max(1) as f32;
+    let side = |v: u32| ((v as f32 * k / 14.0).round().max(1.0) as u32) * 14;
+    let (w, h) = (side(iw), side(ih));
+    let input = Tensor::from_array(([1usize, 3, h as usize, w as usize], normalised(img, w, h)))?;
+    let outputs = model.session.run(ort::inputs![input])?;
+    let (shape, near) = outputs[0].try_extract_tensor::<f32>()?;
+    let [.., oh, ow] = shape[..] else { bail!("unexpected depth output {shape:?}") };
+    let (lo, hi) = near.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    let span = (hi - lo).max(1e-6);
+    Ok((near.iter().map(|v| (v - lo) / span).collect(), ow as u32, oh as u32))
+}
+
+/// The model's long side for a depth map: what it was trained at. Twice that is finer
+/// but takes three to five times as long.
+const DEPTH_SIDE: u32 = 518;
+
+/// [`depth`] as a picture of the photo's size: white near, black far, as the square root
+/// of the nearness, which leaves more of the 256 steps to what is far away (where the
+/// nearness itself hardly changes).
+fn depth_picture(model: &mut Model, img: &RgbImage) -> Result<GrayImage> {
+    let (near, w, h) = depth(model, img, DEPTH_SIDE)?;
+    let coded: Vec<f32> = near.iter().map(|v| v.max(0.0).sqrt()).collect();
+    Ok(to_mask(&coded, w, h, img.dimensions()))
+}
+
 /// A photo encoded for Segment Anything: the encoder's outputs (fed to the decoder by
 /// name) and how its 1024-pixel frame maps to the photo.
 pub struct SamImage {
@@ -340,6 +372,7 @@ pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, D
         let result = match model {
             AiModel::Subject => subject_rmbg(session, img),
             AiModel::Sky => sky(session, img),
+            AiModel::Depth => depth_picture(session, img),
             AiModel::Object
             | AiModel::Remove
             | AiModel::RemoveBest

@@ -79,11 +79,32 @@ pub enum Shape {
     /// A mask made by a model (Select Subject, Select Sky): its picture is kept in the
     /// mask store (see [`set_mask_store`]) as `<id>.png`, covering the untransformed
     /// photo; `selects` is what it selects and `model` what made it, so it can be made again.
+    ///
+    /// With `range` the picture is a depth map (white near, see [`DepthRange`]) and the
+    /// mask is the part of the photo between two distances.
     Raster {
         id: String,
         selects: String,
         model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<DepthRange>,
     },
+}
+
+/// The part of a depth map a mask selects: from `near` to `far`, each 0 (the nearest
+/// thing in the photo) to 100 (the farthest), with `feather` (0..100) for how softly it
+/// ends at both. The scale is the model's, relative to this photo: there are no metres.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DepthRange {
+    pub near: f32,
+    pub far: f32,
+    pub feather: f32,
+}
+
+impl Default for DepthRange {
+    fn default() -> Self {
+        DepthRange { near: 0.0, far: 50.0, feather: 25.0 }
+    }
 }
 
 impl Shape {
@@ -97,6 +118,7 @@ impl Shape {
                 "Sky" => "Sky",
                 "Background" => "Background",
                 "Object" => "Object",
+                "Depth" => "Depth Range",
                 _ => "AI Mask",
             },
         }
@@ -442,9 +464,28 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 
 /// A component ready to evaluate at source pixels.
 enum Evaluator {
-    Linear { start: [f32; 2], dir: [f32; 2], inv_len2: f32 },
-    Radial { center: [f32; 2], cos: f32, sin: f32, inv_rx: f32, inv_ry: f32, inner: f32 },
+    Linear {
+        start: [f32; 2],
+        dir: [f32; 2],
+        inv_len2: f32,
+    },
+    Radial {
+        center: [f32; 2],
+        cos: f32,
+        sin: f32,
+        inv_rx: f32,
+        inv_ry: f32,
+        inner: f32,
+    },
     Brush(Arc<Raster>),
+    /// A depth map (1: near) and the part of it selected: how far (0..1) it starts and
+    /// ends, and half the width of the ramp at each.
+    Range {
+        depth: Arc<Raster>,
+        lo: f32,
+        hi: f32,
+        soft: f32,
+    },
 }
 
 impl Evaluator {
@@ -469,6 +510,13 @@ impl Evaluator {
                 }
             }
             Evaluator::Brush(r) => r.sample(u, v),
+            Evaluator::Range { depth, lo, hi, soft } => {
+                let far = 1.0 - depth.sample(u, v);
+                // An end at the very front or back takes everything there.
+                let from = if *lo <= 0.0 { 1.0 } else { smoothstep(lo - soft, lo + soft, far) };
+                let to = if *hi >= 1.0 { 1.0 } else { 1.0 - smoothstep(hi - soft, hi + soft, far) };
+                from * to
+            }
         }
     }
 }
@@ -878,6 +926,12 @@ impl MaskField {
                                 }
                             }
                             Shape::Brush { strokes } => Evaluator::Brush(brush_raster(source, strokes, bbox)),
+                            Shape::Raster { id, range: Some(r), .. } => Evaluator::Range {
+                                depth: ai_raster(source, id, bbox),
+                                lo: r.near.clamp(0.0, 100.0) / 100.0,
+                                hi: r.far.clamp(0.0, 100.0) / 100.0,
+                                soft: (r.feather.clamp(0.0, 100.0) / 100.0 * 0.2).max(0.004),
+                            },
                             Shape::Raster { id, .. } => Evaluator::Brush(ai_raster(source, id, bbox)),
                         };
                         (c.mode, c.invert, e)

@@ -301,6 +301,8 @@ pub enum AiKind {
     Dust,
     /// Distractions → People: the people in the photo found and outlined.
     People,
+    /// Everything between two distances (a depth map of the photo, made by a model).
+    Depth,
 }
 
 impl AiKind {
@@ -313,6 +315,7 @@ impl AiKind {
             AiKind::Remove => "Remove",
             AiKind::Dust => "Dust & Scratches",
             AiKind::People => "People",
+            AiKind::Depth => "Depth Range",
         }
     }
 
@@ -324,6 +327,7 @@ impl AiKind {
             AiKind::Remove => segment::AiModel::Remove,
             AiKind::Dust => segment::AiModel::Scratches,
             AiKind::People => segment::AiModel::People,
+            AiKind::Depth => segment::AiModel::Depth,
         }
     }
 
@@ -336,6 +340,7 @@ impl AiKind {
             segment::AiModel::RemoveBest => "big-LaMa",
             segment::AiModel::Scratches => "scratch detector",
             segment::AiModel::People => "RT-DETR",
+            segment::AiModel::Depth => "Depth Anything V2 Small",
         }
     }
 }
@@ -436,7 +441,14 @@ fn run_ai(
             }
         })?;
     }
-    set(-1.0, format!("Finding the {}…", kind.label().to_lowercase()));
+    set(
+        -1.0,
+        if kind == AiKind::Depth {
+            "Working out how far away everything is…".to_owned()
+        } else {
+            format!("Finding the {}…", kind.label().to_lowercase())
+        },
+    );
     let started = std::time::Instant::now();
     let (mask, device) = match &job.prompt {
         Some(prompt) if kind == AiKind::Object => {
@@ -1346,6 +1358,19 @@ fn worker(
             std::mem::take(&mut selects).into_iter().partition(|s| s.0 == *id);
         selects = waiting;
         for (photo_id, job, mut settings, rotation, gpu) in ready {
+            // A photo's depth map is made once: another Depth Range uses the one there is.
+            if job.kind == AiKind::Depth
+                && let Some(id) =
+                    settings.masks.iter().flat_map(|m| &m.components).find_map(|c| match &c.shape {
+                        imaging::develop::Shape::Raster { id, range: Some(_), .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                && imaging::develop::mask_picture(&id).is_some()
+            {
+                let _ = tx.send(Reply::Selected { photo_id, result: Ok((id, "the map made before")) });
+                ctx.request_repaint();
+                continue;
+            }
             settings.transform = Default::default();
             settings.effects = Default::default();
             settings.masks.clear();
@@ -2523,7 +2548,16 @@ impl DevelopState {
     fn add_ai_mask(&mut self, catalog: &mut Catalog, job: &AiJob, id: String) -> Result<Changed> {
         use imaging::develop::{Component, Mask, Shape};
         let kind = job.kind;
-        let shape = Shape::Raster { id, selects: kind.label().into(), model: kind.model_name().into() };
+        let shape = if kind == AiKind::Depth {
+            Shape::Raster {
+                id,
+                selects: "Depth".into(),
+                model: kind.model_name().into(),
+                range: Some(Default::default()),
+            }
+        } else {
+            Shape::Raster { id, selects: kind.label().into(), model: kind.model_name().into(), range: None }
+        };
         let mut st = self.settings.clone();
         let selected = self.masking.as_ref().and_then(|m| m.selected).filter(|&i| i < st.masks.len());
         let (label, at) = match (job.target, selected) {

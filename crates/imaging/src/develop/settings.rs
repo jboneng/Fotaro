@@ -200,8 +200,11 @@ pub enum Slider {
     Local(u8, LocalParam),
     /// A mask's Amount.
     MaskAmount(u8),
-    /// A radial gradient's Feather (mask index, component index).
+    /// A radial gradient's or a depth range's Feather (mask index, component index).
     MaskFeather(u8, u8),
+    /// A depth range's Near and Far.
+    MaskDepthNear(u8, u8),
+    MaskDepthFar(u8, u8),
     /// Crop & Straighten: the Angle.
     CropAngle,
 }
@@ -245,6 +248,8 @@ impl Slider {
             Self::Local(_, p) => p.label(),
             Self::MaskAmount(_) => "Amount",
             Self::MaskFeather(..) => "Feather",
+            Self::MaskDepthNear(..) => "Near",
+            Self::MaskDepthFar(..) => "Far",
             Self::CropAngle => "Angle",
         }
     }
@@ -260,7 +265,10 @@ impl Slider {
             Self::Transform(p) => p.range(),
             Self::CropAngle => (-super::transform::MAX_CROP_ANGLE, super::transform::MAX_CROP_ANGLE),
             Self::Local(_, p) => p.range(),
-            Self::MaskAmount(_) | Self::MaskFeather(..) => (0.0, 100.0),
+            Self::MaskAmount(_)
+            | Self::MaskFeather(..)
+            | Self::MaskDepthNear(..)
+            | Self::MaskDepthFar(..) => (0.0, 100.0),
             Self::Grade(_, GradeParam::Hue) => (0.0, 360.0),
             Self::Grade(_, GradeParam::Saturation) | Self::GradeBlending => (0.0, 100.0),
             _ => (-100.0, 100.0),
@@ -311,6 +319,15 @@ impl Slider {
             Self::MaskFeather(i, j) => {
                 match s.masks.get(usize::from(i)).and_then(|m| m.components.get(usize::from(j))) {
                     Some(Component { shape: Shape::Radial { feather, .. }, .. }) => *feather,
+                    Some(Component { shape: Shape::Raster { range: Some(r), .. }, .. }) => r.feather,
+                    _ => 0.0,
+                }
+            }
+            Self::MaskDepthNear(i, j) | Self::MaskDepthFar(i, j) => {
+                match s.masks.get(usize::from(i)).and_then(|m| m.components.get(usize::from(j))) {
+                    Some(Component { shape: Shape::Raster { range: Some(r), .. }, .. }) => {
+                        if matches!(self, Self::MaskDepthNear(..)) { r.near } else { r.far }
+                    }
                     _ => 0.0,
                 }
             }
@@ -335,8 +352,24 @@ impl Slider {
             }
             Self::MaskFeather(i, j) => {
                 let c = s.masks.get_mut(usize::from(i)).and_then(|m| m.components.get_mut(usize::from(j)));
-                if let Some(Component { shape: Shape::Radial { feather, .. }, .. }) = c {
-                    *feather = v;
+                match c {
+                    Some(Component { shape: Shape::Radial { feather, .. }, .. }) => *feather = v,
+                    Some(Component { shape: Shape::Raster { range: Some(r), .. }, .. }) => r.feather = v,
+                    _ => {}
+                }
+                return;
+            }
+            Self::MaskDepthNear(i, j) | Self::MaskDepthFar(i, j) => {
+                let c = s.masks.get_mut(usize::from(i)).and_then(|m| m.components.get_mut(usize::from(j)));
+                if let Some(Component { shape: Shape::Raster { range: Some(r), .. }, .. }) = c {
+                    // Near stays in front of Far: the one moved pushes the other along.
+                    if matches!(self, Self::MaskDepthNear(..)) {
+                        r.near = v;
+                        r.far = r.far.max(v);
+                    } else {
+                        r.far = v;
+                        r.near = r.near.min(v);
+                    }
                 }
                 return;
             }
@@ -371,7 +404,11 @@ impl Slider {
             Self::Effect(p) => p.get_mut(&mut s.effects),
             Self::Transform(p) => p.get_mut(&mut s.transform),
             Self::CropAngle => &mut s.transform.crop.angle,
-            Self::Local(..) | Self::MaskAmount(_) | Self::MaskFeather(..) => unreachable!("handled above"),
+            Self::Local(..)
+            | Self::MaskAmount(_)
+            | Self::MaskFeather(..)
+            | Self::MaskDepthNear(..)
+            | Self::MaskDepthFar(..) => unreachable!("handled above"),
         };
         *field = v;
     }
@@ -386,7 +423,11 @@ impl Slider {
             }
             Self::Detail(_) => format!("{v:.*}", self.decimals()),
             Self::Effect(p) if !p.signed() => format!("{v:.0}"),
-            Self::Transform(TransformParam::Scale) | Self::MaskAmount(_) | Self::MaskFeather(..) => {
+            Self::Transform(TransformParam::Scale)
+            | Self::MaskAmount(_)
+            | Self::MaskFeather(..)
+            | Self::MaskDepthNear(..)
+            | Self::MaskDepthFar(..) => {
                 format!("{v:.0}")
             }
             _ if v.abs() < 0.5 * 10f32.powi(-(self.decimals() as i32)) => {

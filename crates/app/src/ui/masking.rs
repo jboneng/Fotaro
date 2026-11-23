@@ -688,12 +688,13 @@ enum MenuPick {
 /// The AI selections first (as LrC lists them), then the tools with their keys, as menu
 /// rows; `pick` gets the chosen one.
 fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(MenuPick)) {
-    let ai = [AiKind::Subject, AiKind::Sky, AiKind::Background].map(|k| (MenuPick::Ai(k), k.label(), ""));
+    let ai = [AiKind::Subject, AiKind::Sky, AiKind::Background, AiKind::Depth]
+        .map(|k| (MenuPick::Ai(k), k.label(), ""));
     let object = [(MenuPick::Tool(ShapeKind::Object), "Object", "")];
     let tools = [(ShapeKind::Brush, "K"), (ShapeKind::Linear, "M"), (ShapeKind::Radial, "Shift+M")]
         .map(|(k, key)| (MenuPick::Tool(k), k.label(), key));
     for (n, (choice, label, key)) in ai.into_iter().chain(object).chain(tools).enumerate() {
-        if n == 4 {
+        if n == 5 {
             ui.separator();
         }
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(210.0, 26.0), egui::Sense::click());
@@ -768,6 +769,10 @@ pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
             AiKind::People => {
                 ("People".to_owned(), "the models that find people and outline them".to_owned())
             }
+            AiKind::Depth => (
+                "Depth Range".to_owned(),
+                "the model that works out how far away everything in a photo is".to_owned(),
+            ),
             k => (
                 format!("Select {}", k.label()),
                 format!("the model that finds the {}", k.label().to_lowercase()),
@@ -1224,6 +1229,7 @@ fn mask_row(ui: &mut egui::Ui, st: &mut imaging::develop::DevelopSettings, slide
     let default = match slider {
         Slider::MaskAmount(_) => 100.0,
         Slider::MaskFeather(..) => 50.0,
+        Slider::MaskDepthFar(..) => 50.0,
         _ => 0.0,
     };
     let gradient = match slider {
@@ -1304,6 +1310,19 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         });
         if kind == ShapeKind::Radial && mask_row(ui, &mut st, Slider::MaskFeather(idx, j as u8)) {
             done = Some(None);
+        }
+        // A depth range: where it starts and ends (0: the nearest thing in the photo,
+        // 100: the farthest), and how softly.
+        if matches!(st.masks[i].components[j].shape, imaging::develop::Shape::Raster { range: Some(_), .. }) {
+            for slider in [
+                Slider::MaskDepthNear(idx, j as u8),
+                Slider::MaskDepthFar(idx, j as u8),
+                Slider::MaskFeather(idx, j as u8),
+            ] {
+                if mask_row(ui, &mut st, slider) {
+                    done = Some(None);
+                }
+            }
         }
         // The brush's settings with a brush selected, or while the brush tool waits to paint a
         // new mask or component.

@@ -56,8 +56,8 @@ pub use lut::{
     parse_cube, set_lut_store,
 };
 pub use masks::{
-    CombineMode, Component, LocalAdjust, LocalParam, Mask, Shape, Stroke, mask_picture, save_fill_picture,
-    save_mask_picture, set_mask_store,
+    CombineMode, Component, DepthRange, LocalAdjust, LocalParam, Mask, Shape, Stroke, mask_picture,
+    save_fill_picture, save_mask_picture, set_mask_store,
 };
 pub use pipeline::{
     Region, auto_tone, render_linear16, render_mask, render_region_srgb8, render_region_srgb8_until,

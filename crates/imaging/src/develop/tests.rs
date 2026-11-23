@@ -869,7 +869,12 @@ fn ai_masks_follow_the_photos_edges_and_regions_still_match() {
     set_mask_store(Some(store.path().to_path_buf()));
     save_mask_picture("test-disc", &picture).unwrap();
     assert!(store.path().join("test-disc.png").exists());
-    let shape = Shape::Raster { id: "test-disc".into(), selects: "Subject".into(), model: "test".into() };
+    let shape = Shape::Raster {
+        id: "test-disc".into(),
+        selects: "Subject".into(),
+        model: "test".into(),
+        range: None,
+    };
     let mut mask = Mask::new("Mask 1", shape);
     mask.adjust.exposure = 1.0;
     let s = DevelopSettings { masks: vec![mask], ..Default::default() };
@@ -894,8 +899,63 @@ fn ai_masks_follow_the_photos_edges_and_regions_still_match() {
     // A missing picture selects nothing.
     let mut gone = s.clone();
     gone.masks[0].components[0].shape =
-        Shape::Raster { id: "not-there".into(), selects: "Sky".into(), model: "test".into() };
+        Shape::Raster { id: "not-there".into(), selects: "Sky".into(), model: "test".into(), range: None };
     assert_eq!(render_srgb8(&w, &gone), render_srgb8(&w, &DevelopSettings::default()));
+    set_mask_store(None);
+}
+
+#[test]
+fn a_depth_range_mask_selects_between_near_and_far() {
+    // A photo of even grey, and a depth map that runs from near (left) to far (right).
+    let img: RgbImage = ImageBuffer::from_pixel(200, 100, Rgb([120, 120, 120]));
+    let w = rendered(&img);
+    let picture = image::GrayImage::from_fn(50, 25, |x, _| image::Luma([255 - (x * 255 / 49) as u8]));
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("test-depth", &picture).unwrap();
+    let with = |near: f32, far: f32, feather: f32| {
+        let shape = Shape::Raster {
+            id: "test-depth".into(),
+            selects: "Depth".into(),
+            model: "test".into(),
+            range: Some(DepthRange { near, far, feather }),
+        };
+        assert_eq!(shape.label(), "Depth Range");
+        let mut mask = Mask::new("Mask 1", shape);
+        mask.adjust.exposure = 1.0;
+        DevelopSettings { masks: vec![mask], ..Default::default() }
+    };
+    let at =
+        |s: &DevelopSettings, x: u32| f32::from(render_mask(&w, s, 0).unwrap().get_pixel(x, 50)[0]) / 255.0;
+    // From the front to the middle: the left half, ending softly.
+    let front = with(0.0, 50.0, 25.0);
+    assert!(at(&front, 5) > 0.98 && at(&front, 60) > 0.95, "{} {}", at(&front, 5), at(&front, 60));
+    assert!((at(&front, 100) - 0.5).abs() < 0.12, "half way at Far: {}", at(&front, 100));
+    assert!(at(&front, 140) < 0.03 && at(&front, 195) == 0.0);
+    // A band in the middle, and less feather is a harder edge.
+    let band = with(40.0, 60.0, 0.0);
+    assert!(at(&band, 30) < 0.02 && at(&band, 100) > 0.98 && at(&band, 170) < 0.02);
+    assert!(at(&with(0.0, 50.0, 0.0), 105) < at(&front, 105));
+    // To the very back takes the back, too.
+    assert!(at(&with(50.0, 100.0, 25.0), 199) > 0.98);
+    // Near and Far push each other along, and regions render like the whole.
+    let mut s = front.clone();
+    Slider::MaskDepthNear(0, 0).set(&mut s, 70.0);
+    assert_eq!((Slider::MaskDepthNear(0, 0).get(&s), Slider::MaskDepthFar(0, 0).get(&s)), (70.0, 70.0));
+    Slider::MaskDepthFar(0, 0).set(&mut s, 20.0);
+    assert_eq!(Slider::MaskDepthNear(0, 0).get(&s), 20.0);
+    Slider::MaskFeather(0, 0).set(&mut s, 60.0);
+    assert_eq!(Slider::MaskFeather(0, 0).get(&s), 60.0);
+    let whole = render_srgb8(&w, &front);
+    let part = render_region_srgb8(&w, &front, Region { x: 70, y: 30, w: 90, h: 50 });
+    for (x, y, p) in part.enumerate_pixels() {
+        let q = whole.get_pixel(x + 70, y + 30);
+        assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+    }
+    // Kept as it was written, and masks from before (no range) still read.
+    let json = front.to_json();
+    assert_eq!(DevelopSettings::from_json(&json).unwrap(), front);
     set_mask_store(None);
 }
 

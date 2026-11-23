@@ -28,6 +28,8 @@ pub enum AiModel {
     /// Distractions → People: RT-DETR (R18) trained on COCO, finding people and what
     /// they carry.
     People,
+    /// Depth Range masks: Depth Anything V2 Small, how near everything in the photo is.
+    Depth,
 }
 
 impl AiModel {
@@ -40,6 +42,7 @@ impl AiModel {
             AiModel::RemoveBest => "Remove, best quality (big-LaMa)",
             AiModel::Scratches => "Dust & Scratches (old-photo scratch detector)",
             AiModel::People => "People (RT-DETR)",
+            AiModel::Depth => "Depth (Depth Anything V2 Small)",
         }
     }
 
@@ -52,6 +55,7 @@ impl AiModel {
             AiModel::RemoveBest => &REMOVE_BEST,
             AiModel::Scratches => &SCRATCHES,
             AiModel::People => &PEOPLE,
+            AiModel::Depth => &DEPTH,
         }
     }
 
@@ -84,6 +88,16 @@ const SUBJECT: [Asset; 1] = [Asset {
     sha256: "8cafcf770b06757c4eaced21b1a88e57fd2b66de01b8045f35f01535ba742e0f",
     size: 176_153_355,
     file: "rmbg-1.4.onnx",
+}];
+
+/// Depth Anything V2 Small (Apache-2.0; the larger ones are for non-commercial use only),
+/// as exported by the ONNX community. The half-size fp16 file is three times faster on a
+/// GPU but does not load on the CPU.
+const DEPTH: [Asset; 1] = [Asset {
+    url: "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx",
+    sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+    size: 99_060_839,
+    file: "depth-anything-v2-small.onnx",
 }];
 
 const SKY: [Asset; 1] = [Asset {
