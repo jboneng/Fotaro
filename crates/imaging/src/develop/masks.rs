@@ -181,6 +181,28 @@ pub fn mask_picture(id: &str) -> Option<Arc<image::GrayImage>> {
     }
 }
 
+/// How far away the depth map `id` says the point (x, y) of the untransformed photo
+/// (0..1) is: 0 (the nearest) to 100 (the farthest), as Lens Blur's Focus and a Depth
+/// Range's Near and Far count it. The middle value of a small area around the point, so
+/// a hair or a speck under it does not decide. `None` without the map.
+pub fn depth_at(id: &str, x: f32, y: f32) -> Option<f32> {
+    let p = mask_picture(id)?;
+    let (w, h) = (p.width() as i32, p.height() as i32);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (cx, cy) = ((x.clamp(0.0, 1.0) * w as f32) as i32, (y.clamp(0.0, 1.0) * h as f32) as i32);
+    let r = (w.max(h) / 200).max(1);
+    let mut around: Vec<u8> = Vec::new();
+    for yy in (cy - r).max(0)..=(cy + r).min(h - 1) {
+        for xx in (cx - r).max(0)..=(cx + r).min(w - 1) {
+            around.push(p.get_pixel(xx as u32, yy as u32)[0]);
+        }
+    }
+    around.sort_unstable();
+    Some(100.0 * (1.0 - f32::from(*around.get(around.len() / 2)?) / 255.0))
+}
+
 /// Remove fills' pictures already read (colour; in the same store as the masks').
 static FILL_PICTURES: Mutex<Vec<(String, Arc<image::RgbImage>)>> = Mutex::new(Vec::new());
 

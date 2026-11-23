@@ -587,6 +587,7 @@ fn basic(app: &mut FotaroApp, ui: &mut egui::Ui) {
     if toggle_picker {
         d.picking_wb = !d.picking_wb;
         d.picking_detail = false;
+        d.picking_focus = false;
     }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
@@ -850,6 +851,23 @@ pub fn center(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         return;
     }
+    if s.develop.picking_focus {
+        // Lens Blur's Focus Selector: click what should be sharp.
+        if over_photo {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if resp.clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && img_rect.contains(p)
+        {
+            let q = (p - img_rect.min) / img_rect.size();
+            let (x, y) = unrotate(q, photo.rotation);
+            if s.develop.pick_focus(x, y) {
+                app.run(Command::DevelopCommit(Some("Lens Blur: Focus".into())));
+            }
+        }
+        return;
+    }
     if removing {
         if super::remove::canvas(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter) {
             app.run(Command::DevelopCommit(None));
@@ -886,6 +904,7 @@ pub fn center(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         if resp.clicked() {
             s.develop.picking_detail = false;
+            s.develop.picking_focus = false;
         }
         return;
     }
@@ -1051,6 +1070,7 @@ pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &app.session else { return };
     let d = &s.develop;
     let (before, picking, busy) = (d.before, d.picking_wb, d.rendering());
+    let focusing = d.picking_focus;
     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
         if ui
             .add(egui::Button::new("Before / After").selected(before))
@@ -1069,6 +1089,9 @@ pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         if picking {
             ui.label(weak("Click something that should be neutral grey. Esc cancels."));
+        }
+        if focusing {
+            ui.label(weak("Click what should be sharp. Esc cancels."));
         }
         // The Remove tool's Visualize Spots, as in LrC's toolbar.
         if app.session.as_ref().is_some_and(|s| s.develop.removing.is_some()) {
@@ -1678,6 +1701,7 @@ fn detail_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         {
             d.picking_detail = !d.picking_detail;
             d.picking_wb = false;
+            d.picking_focus = false;
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let arrow = if d.detail_box_open { "⏷" } else { "⏴" };
@@ -1945,7 +1969,24 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         match n {
             1 => sub_header(ui, "Grain", |_| {}),
             2 => sub_header(ui, "Glow", |_| {}),
-            4 => sub_header(ui, "Lens Blur", |_| {}),
+            4 => {
+                // The Focus Selector: click the photo where it should be sharp.
+                let (picking, mapped) = (d.picking_focus, st.effects.fog_depth.is_some());
+                let mut toggle = false;
+                sub_header(ui, "Lens Blur", |ui| {
+                    let button = egui::Button::new(RichText::new("⊹").size(15.0)).selected(picking);
+                    toggle = ui
+                        .add_enabled(mapped, button)
+                        .on_hover_text("Focus Selector: click the photo where it should be sharp")
+                        .on_disabled_hover_text("Needs the photo's depth map: raise Amount to have it made")
+                        .clicked();
+                });
+                if toggle {
+                    d.picking_focus = !picking;
+                    d.picking_wb = false;
+                    d.picking_detail = false;
+                }
+            }
             3 => {
                 // Fog and Lens Blur go by a depth map of the photo.
                 sub_header(ui, "Depth", |_| {});

@@ -1056,15 +1056,28 @@ impl Detailed {
                 if let (Some(blur), Some(near)) = (blur, near) {
                     // In linear light, as a lens blurs.
                     let mut rgb: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; aw * ah]);
-                    for k in 0..aw * ah {
-                        let v = oklab_to_srgb([planes[0][k], planes[1][k], planes[2][k]]);
-                        (rgb[0][k], rgb[1][k], rgb[2][k]) = (v[0].max(0.0), v[1].max(0.0), v[2].max(0.0));
+                    {
+                        let [r, g, b] = &mut rgb;
+                        (r.par_iter_mut(), g.par_iter_mut(), b.par_iter_mut())
+                            .into_par_iter()
+                            .enumerate()
+                            .for_each(|(k, (r, g, b))| {
+                                let v = oklab_to_srgb([planes[0][k], planes[1][k], planes[2][k]]);
+                                (*r, *g, *b) = (v[0].max(0.0), v[1].max(0.0), v[2].max(0.0));
+                            });
                     }
+                    super::perf::mark("lens blur: to linear");
                     let (ax, ay) = (area.x as usize, area.y as usize);
                     blur.apply(&mut rgb, aw, ah, &|x, y| 1.0 - near.at(ax + x, ay + y)[0]);
-                    for k in 0..aw * ah {
-                        let lab = srgb_to_oklab([rgb[0][k], rgb[1][k], rgb[2][k]]);
-                        (planes[0][k], planes[1][k], planes[2][k]) = (lab[0], lab[1], lab[2]);
+                    {
+                        let [l, a, b] = &mut planes;
+                        (l.par_iter_mut(), a.par_iter_mut(), b.par_iter_mut())
+                            .into_par_iter()
+                            .enumerate()
+                            .for_each(|(k, (l, a, b))| {
+                                let lab = srgb_to_oklab([rgb[0][k], rgb[1][k], rgb[2][k]]);
+                                (*l, *a, *b) = (lab[0], lab[1], lab[2]);
+                            });
                     }
                     super::perf::mark("lens blur");
                 }

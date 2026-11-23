@@ -1541,6 +1541,7 @@ pub fn set_masking(d: &mut DevelopState, on: bool) {
     }
     d.picking_wb = false;
     d.picking_detail = false;
+    d.picking_focus = false;
     d.request_renders();
 }
 

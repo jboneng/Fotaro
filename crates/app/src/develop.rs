@@ -1648,6 +1648,9 @@ pub struct DevelopState {
     pub detail_box_open: bool,
     pub detail_focus: (f32, f32),
     pub picking_detail: bool,
+    /// Lens Blur's Focus Selector is active: the next click on the photo says what is to
+    /// be sharp.
+    pub picking_focus: bool,
     /// A Transform slider is being dragged: show a grid over the photo.
     pub transform_grid: bool,
     /// Masking mode (Shift+W), when on.
@@ -1806,6 +1809,7 @@ impl DevelopState {
             detail_box_open: true,
             detail_focus: (0.5, 0.5),
             picking_detail: false,
+            picking_focus: false,
             transform_grid: false,
             masking: None,
             brush: BrushSettings::default(),
@@ -1907,6 +1911,7 @@ impl DevelopState {
         self.regions.clear();
         self.detail_focus = (0.5, 0.5);
         self.picking_detail = false;
+        self.picking_focus = false;
         self.guide_drag = None;
         self.masking = None;
         self.cropping = None;
@@ -2742,6 +2747,27 @@ impl DevelopState {
         self.picking_wb = false;
         let op = Adjust::PickWb { x, y };
         let _ = self.tx.send(Request::Adjust { photo_id, op, settings: self.settings.clone() });
+    }
+
+    /// Lens Blur's Focus Selector click at (x, y), 0..1 of the image in file orientation:
+    /// Focus becomes how far away the photo's depth map says that point is (and the blur
+    /// is turned on, if it was off). False without a depth map; else to be saved.
+    pub fn pick_focus(&mut self, x: f32, y: f32) -> bool {
+        self.picking_focus = false;
+        let (Some(info), Some(id)) = (self.info.as_ref(), self.settings.effects.fog_depth.clone()) else {
+            return false;
+        };
+        // The click is on the transformed photo; the map covers the untransformed one.
+        let (w, h) = info.full_size;
+        let (u, v) = self.view_settings().transform.source_point(x, y, w, h);
+        let Some(far) = imaging::develop::depth_at(&id, u, v) else { return false };
+        let mut st = self.settings.clone();
+        st.effects.blur_focus = far.round();
+        if st.effects.blur_amount <= 0.0 {
+            st.effects.blur_amount = 50.0;
+        }
+        self.set_live(st);
+        true
     }
 
     /// An Upright button: the automatic modes analyse the photo (on the worker), Off and

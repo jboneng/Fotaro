@@ -57,7 +57,7 @@ pub use lut::{
     parse_cube, set_lut_store,
 };
 pub use masks::{
-    CombineMode, Component, DepthRange, LocalAdjust, LocalParam, Mask, Shape, Stroke, mask_picture,
+    CombineMode, Component, DepthRange, LocalAdjust, LocalParam, Mask, Shape, Stroke, depth_at, mask_picture,
     save_fill_picture, save_mask_picture, set_mask_store,
 };
 pub use pipeline::{

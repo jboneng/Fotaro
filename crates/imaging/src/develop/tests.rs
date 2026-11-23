@@ -1055,6 +1055,18 @@ fn lens_blur_blurs_what_is_out_of_focus_and_regions_still_match() {
         let q = out.get_pixel(x + 150, y + 40);
         assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
     }
+    // Focus on the far half: the near one is blurred, spreads over the edge, and regions
+    // still match.
+    let mut front = s.clone();
+    front.effects.blur_focus = 92.0;
+    let out = render_srgb8(&w, &front);
+    assert!(contrast(&out, 40) < contrast(&plain, 40) / 4, "in front: {}", contrast(&out, 40));
+    assert_eq!(contrast(&out, 300), contrast(&plain, 300), "in focus: as sharp as before");
+    let part = render_region_srgb8(&w, &front, Region { x: 150, y: 40, w: 180, h: 120 });
+    for (x, y, p) in part.enumerate_pixels() {
+        let q = out.get_pixel(x + 150, y + 40);
+        assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "in front, ({x}, {y}): {p:?} vs {q:?}");
+    }
     // Without the depth map nothing happens, and no amount is none.
     let mut none = s.clone();
     none.effects.fog_depth = None;

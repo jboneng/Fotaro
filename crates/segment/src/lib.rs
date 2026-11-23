@@ -161,7 +161,12 @@ pub fn depth(model: &mut Model, img: &RgbImage, long_side: u32) -> Result<(Vec<f
     let (shape, near) = outputs[0].try_extract_tensor::<f32>()?;
     let [.., oh, ow] = shape[..] else { bail!("unexpected depth output {shape:?}") };
     let (lo, hi) = near.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-    let span = (hi - lo).max(1e-6);
+    // A GPU in trouble can answer with nothing at all instead of an error: better to fail
+    // (and have the CPU do it) than to keep a map that says everything is as far.
+    let span = hi - lo;
+    if span.is_nan() || span <= 1e-6 {
+        bail!("the depth model gave an empty map");
+    }
     Ok((near.iter().map(|v| (v - lo) / span).collect(), ow as u32, oh as u32))
 }
 
