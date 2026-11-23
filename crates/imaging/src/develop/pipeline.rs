@@ -158,7 +158,8 @@ fn nearness(
     s: &DevelopSettings,
     region: Region,
 ) -> Option<Arc<MaskField>> {
-    let id = s.effects.fog_depth.as_ref().filter(|_| s.effects.fog_amount != 0.0 || s.effects.fog_show)?;
+    let e = &s.effects;
+    let id = e.fog_depth.as_ref().filter(|_| e.fog_amount != 0.0 || e.fog_show || e.blur_amount > 0.0)?;
     super::masks::mask_picture(id)?;
     let shape = super::masks::Shape::Raster {
         id: id.clone(),
@@ -993,8 +994,20 @@ impl Detailed {
     ) -> Option<Detailed> {
         // Rendered pixels per full-size pixel: the filters' radii are in full-size pixels.
         let scale = render_scale(img);
-        let m = s.detail.margin(scale) as u32;
-        let g = s.detail.grid(scale) as u32;
+        // Lens Blur reads further around a pixel than Detail, on a grid of its own.
+        let blur = super::lens_blur::LensBlur::new(&s.effects, scale, img.full_size.0.max(img.full_size.1));
+        let (bm, bg) = blur.map_or((0, 1), |b| (b.margin(), b.grid()));
+        let m = s.detail.margin(scale).max(bm) as u32;
+        let g = {
+            let dg = s.detail.grid(scale).max(1);
+            let gcd = |mut a: usize, mut b: usize| {
+                while b != 0 {
+                    (a, b) = (b, a % b);
+                }
+                a
+            };
+            (dg / gcd(dg, bg) * bg) as u32
+        };
         let (x0, y0) = (region.x.saturating_sub(m) / g * g, region.y.saturating_sub(m) / g * g);
         let area = Region {
             x: x0,
@@ -1020,7 +1033,8 @@ impl Detailed {
         let developed = match img.render_cache.planes.get(&key) {
             Some(planes) => planes,
             None => {
-                let prep = Prepared::new(img, s, area, field.clone(), nearness(source, img, s, area));
+                let near = nearness(source, img, s, area);
+                let prep = Prepared::new(img, s, area, field.clone(), near.clone());
                 if stop() {
                     return None;
                 }
@@ -1039,6 +1053,21 @@ impl Detailed {
                             (l[i], a[i], b[i]) = (lab[0], lab[1], lab[2]);
                         }
                     });
+                if let (Some(blur), Some(near)) = (blur, near) {
+                    // In linear light, as a lens blurs.
+                    let mut rgb: [Vec<f32>; 3] = std::array::from_fn(|_| vec![0.0; aw * ah]);
+                    for k in 0..aw * ah {
+                        let v = oklab_to_srgb([planes[0][k], planes[1][k], planes[2][k]]);
+                        (rgb[0][k], rgb[1][k], rgb[2][k]) = (v[0].max(0.0), v[1].max(0.0), v[2].max(0.0));
+                    }
+                    let (ax, ay) = (area.x as usize, area.y as usize);
+                    blur.apply(&mut rgb, aw, ah, &|x, y| 1.0 - near.at(ax + x, ay + y)[0]);
+                    for k in 0..aw * ah {
+                        let lab = srgb_to_oklab([rgb[0][k], rgb[1][k], rgb[2][k]]);
+                        (planes[0][k], planes[1][k], planes[2][k]) = (lab[0], lab[1], lab[2]);
+                    }
+                    super::perf::mark("lens blur");
+                }
                 let planes = Arc::new(planes);
                 img.render_cache.planes.put(key, planes.clone());
                 planes
@@ -1149,5 +1178,6 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
 /// a mask's Sharpness or Noise?
 fn uses_detail(s: &DevelopSettings) -> bool {
     s.detail.is_active()
+        || (s.effects.blur_amount > 0.0 && s.effects.fog_depth.is_some())
         || s.masks.iter().any(|m| m.is_active() && (m.adjust.sharpness != 0.0 || m.adjust.noise > 0.0))
 }

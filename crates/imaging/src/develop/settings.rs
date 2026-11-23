@@ -575,6 +575,7 @@ impl DevelopSettings {
                 .chain(EffectParam::GRAIN)
                 .chain(EffectParam::GLOW)
                 .chain(EffectParam::FOG)
+                .chain(EffectParam::BLUR)
             {
                 eat(p.get(&self.effects).to_bits());
             }
@@ -755,6 +756,7 @@ impl DevelopSettings {
                 .chain(EffectParam::GRAIN)
                 .chain(EffectParam::GLOW)
                 .chain(EffectParam::FOG)
+                .chain(EffectParam::BLUR)
                 .filter(|p| p.get(e) != p.get(o))
                 .collect();
             return match changed.as_slice() {

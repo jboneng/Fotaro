@@ -1934,14 +1934,21 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
         });
     });
-    let groups: [&[EffectParam]; 4] =
-        [&EffectParam::VIGNETTE, &EffectParam::GRAIN, &EffectParam::GLOW, &EffectParam::FOG];
+    let groups: [&[EffectParam]; 5] = [
+        &EffectParam::VIGNETTE,
+        &EffectParam::GRAIN,
+        &EffectParam::GLOW,
+        &EffectParam::FOG,
+        &EffectParam::BLUR,
+    ];
     for (n, params) in groups.into_iter().enumerate() {
         match n {
             1 => sub_header(ui, "Grain", |_| {}),
             2 => sub_header(ui, "Glow", |_| {}),
+            4 => sub_header(ui, "Lens Blur", |_| {}),
             3 => {
-                sub_header(ui, "Fog", |_| {});
+                // Fog and Lens Blur go by a depth map of the photo.
+                sub_header(ui, "Depth", |_| {});
                 let tip = "See the photo's depth map instead of the photo: white is near, black is far";
                 ui.horizontal(|ui| {
                     if ui.checkbox(&mut d.show_depth, "Show Depth").on_hover_text(tip).changed() {
@@ -1965,7 +1972,8 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     }
                 });
                 // Fog goes by a depth map of the photo, made by a model the first time.
-                if (st.effects.fog_amount != 0.0 || d.show_depth) && st.effects.fog_depth.is_none() {
+                let wanted = st.effects.fog_amount != 0.0 || st.effects.blur_amount > 0.0 || d.show_depth;
+                if wanted && st.effects.fog_depth.is_none() {
                     ui.horizontal(|ui| {
                         if d.ai_job.is_some() {
                             ui.add(egui::Spinner::new().size(11.0));
@@ -1978,6 +1986,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                         }
                     });
                 }
+                sub_header(ui, "Fog", |_| {});
             }
             _ => {}
         }
@@ -1991,7 +2000,10 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     e.vignette_amount < 0.0 && e.vignette_style != VignetteStyle::PaintOverlay
                 }
                 EffectParam::GrainSize | EffectParam::GrainRoughness => e.grain_amount > 0.0,
-                EffectParam::GlowAmount | EffectParam::FogAmount => true,
+                EffectParam::GlowAmount | EffectParam::FogAmount | EffectParam::BlurAmount => true,
+                EffectParam::BlurFocus | EffectParam::BlurRange | EffectParam::BlurHighlights => {
+                    e.blur_amount > 0.0
+                }
                 EffectParam::FogDistance
                 | EffectParam::FogDensity
                 | EffectParam::FogHeight

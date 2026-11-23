@@ -68,6 +68,13 @@ pub struct Effects {
     /// The photo's depth map (a picture in the mask store, white near), made by a model
     /// when Fog is first used on the photo. Belongs to its photo: not copied to others.
     pub fog_depth: Option<String>,
+    /// Lens Blur, by the same depth map: Amount 0..100; Focus 0..100 (the distance that
+    /// stays sharp, 0: the nearest thing in the photo); Range 0..100 (how deep the sharp
+    /// zone is); Highlights 0..100 (how much bright points stand out in the blur).
+    pub blur_amount: f32,
+    pub blur_focus: f32,
+    pub blur_range: f32,
+    pub blur_highlights: f32,
     /// For looking only (never kept): render the depth map in place of the photo.
     #[serde(skip)]
     pub fog_show: bool,
@@ -95,6 +102,10 @@ impl Default for Effects {
             fog_height: 0.0,
             fog_warmth: 0.0,
             fog_depth: None,
+            blur_amount: 0.0,
+            blur_focus: 15.0,
+            blur_range: 20.0,
+            blur_highlights: 0.0,
             fog_show: false,
         }
     }
@@ -167,6 +178,10 @@ pub enum EffectParam {
     FogDensity,
     FogHeight,
     FogWarmth,
+    BlurAmount,
+    BlurFocus,
+    BlurRange,
+    BlurHighlights,
 }
 
 impl EffectParam {
@@ -182,6 +197,8 @@ impl EffectParam {
         [Self::GlowAmount, Self::GlowRange, Self::GlowSpread, Self::GlowWarmth];
     pub const FOG: [EffectParam; 5] =
         [Self::FogAmount, Self::FogDistance, Self::FogDensity, Self::FogHeight, Self::FogWarmth];
+    pub const BLUR: [EffectParam; 4] =
+        [Self::BlurAmount, Self::BlurFocus, Self::BlurRange, Self::BlurHighlights];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -200,6 +217,10 @@ impl EffectParam {
             Self::FogDensity => "Density",
             Self::FogHeight => "Height",
             Self::FogWarmth => "Warmth",
+            Self::BlurAmount => "Amount",
+            Self::BlurFocus => "Focus",
+            Self::BlurRange => "Range",
+            Self::BlurHighlights => "Highlights",
         }
     }
 
@@ -211,6 +232,8 @@ impl EffectParam {
             "Glow"
         } else if Self::FOG.contains(&self) {
             "Fog"
+        } else if Self::BLUR.contains(&self) {
+            "Lens Blur"
         } else {
             "Grain"
         }
@@ -244,6 +267,10 @@ impl EffectParam {
             Self::FogDensity => &e.fog_density,
             Self::FogHeight => &e.fog_height,
             Self::FogWarmth => &e.fog_warmth,
+            Self::BlurAmount => &e.blur_amount,
+            Self::BlurFocus => &e.blur_focus,
+            Self::BlurRange => &e.blur_range,
+            Self::BlurHighlights => &e.blur_highlights,
         }
     }
 
@@ -266,6 +293,10 @@ impl EffectParam {
             Self::FogDensity => &mut e.fog_density,
             Self::FogHeight => &mut e.fog_height,
             Self::FogWarmth => &mut e.fog_warmth,
+            Self::BlurAmount => &mut e.blur_amount,
+            Self::BlurFocus => &mut e.blur_focus,
+            Self::BlurRange => &mut e.blur_range,
+            Self::BlurHighlights => &mut e.blur_highlights,
         }
     }
 }

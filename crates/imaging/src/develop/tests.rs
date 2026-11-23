@@ -1018,6 +1018,54 @@ fn fog_thickens_with_distance_and_regions_still_match() {
     set_mask_store(None);
 }
 
+#[test]
+fn lens_blur_blurs_what_is_out_of_focus_and_regions_still_match() {
+    // Fine stripes everywhere; near on the left half, far on the right.
+    let img: RgbImage = ImageBuffer::from_fn(400, 200, |x, y| {
+        let v = if (x / 3 + y / 5) % 2 == 0 { 200 } else { 60 };
+        Rgb([v, v, v])
+    });
+    let w = rendered(&img);
+    let picture = image::GrayImage::from_fn(100, 50, |x, _| image::Luma([if x < 50 { 230 } else { 20 }]));
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("blur-depth", &picture).unwrap();
+    let s = DevelopSettings {
+        effects: Effects {
+            blur_amount: 100.0,
+            blur_focus: 10.0,
+            blur_range: 20.0,
+            fog_depth: Some("blur-depth".into()),
+            ..Effects::default()
+        },
+        ..Default::default()
+    };
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    let out = render_srgb8(&w, &s);
+    let contrast = |i: &RgbImage, x0: u32| {
+        let v: Vec<u8> = (x0..x0 + 60).map(|x| i.get_pixel(x, 100)[1]).collect();
+        v.iter().max().unwrap() - v.iter().min().unwrap()
+    };
+    assert_eq!(contrast(&out, 40), contrast(&plain, 40), "in focus: as sharp as before");
+    assert!(contrast(&out, 300) < contrast(&plain, 300) / 4, "out of focus: {}", contrast(&out, 300));
+    // Regions render like the whole.
+    let part = render_region_srgb8(&w, &s, Region { x: 150, y: 40, w: 180, h: 120 });
+    for (x, y, p) in part.enumerate_pixels() {
+        let q = out.get_pixel(x + 150, y + 40);
+        assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+    }
+    // Without the depth map nothing happens, and no amount is none.
+    let mut none = s.clone();
+    none.effects.fog_depth = None;
+    assert_eq!(render_srgb8(&w, &none), plain);
+    let mut off = s.clone();
+    off.effects.blur_amount = 0.0;
+    assert_eq!(render_srgb8(&w, &off), plain);
+    assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap(), s);
+    set_mask_store(None);
+}
+
 /// A mask over the left part of the photo (full left of 45%, none right of 55%).
 fn left_mask(adjust: impl Fn(&mut LocalAdjust)) -> Mask {
     let mut m = Mask::new("Mask 1", Shape::Linear { start: [0.45, 0.5], end: [0.55, 0.5] });

@@ -2551,7 +2551,7 @@ impl DevelopState {
     /// (asking before the model's first download, once).
     fn request_fog_depth(&mut self) {
         let e = &self.settings.effects;
-        if (e.fog_amount == 0.0 && !self.show_depth)
+        if (e.fog_amount == 0.0 && e.blur_amount <= 0.0 && !self.show_depth)
             || e.fog_depth.is_some()
             || self.ai_job.is_some()
             || self.ai_consent.is_some()

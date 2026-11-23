@@ -13,6 +13,7 @@ mod groups;
 mod heal;
 mod hsl;
 mod lens;
+mod lens_blur;
 mod lightroom;
 mod local;
 mod lut;
