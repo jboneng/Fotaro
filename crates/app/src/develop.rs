@@ -357,6 +357,7 @@ impl AiKind {
             segment::AiModel::Scratches => "scratch detector",
             segment::AiModel::People => "RT-DETR",
             segment::AiModel::Depth => "Depth Anything V2 Small",
+            segment::AiModel::Surface => "MoGe-2 Small",
         }
     }
 }

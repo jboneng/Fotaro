@@ -30,6 +30,8 @@ pub enum AiModel {
     People,
     /// Depth Range masks: Depth Anything V2 Small, how near everything in the photo is.
     Depth,
+    /// Relight's Shaping: MoGe-2 (ViT-S), which way every surface in the photo faces.
+    Surface,
 }
 
 impl AiModel {
@@ -43,6 +45,7 @@ impl AiModel {
             AiModel::Scratches => "Dust & Scratches (old-photo scratch detector)",
             AiModel::People => "People (RT-DETR)",
             AiModel::Depth => "Depth (Depth Anything V2 Small)",
+            AiModel::Surface => "Surface (MoGe-2 Small)",
         }
     }
 
@@ -56,6 +59,7 @@ impl AiModel {
             AiModel::Scratches => &SCRATCHES,
             AiModel::People => &PEOPLE,
             AiModel::Depth => &DEPTH,
+            AiModel::Surface => &SURFACE,
         }
     }
 
@@ -98,6 +102,14 @@ const DEPTH: [Asset; 1] = [Asset {
     sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
     size: 99_060_839,
     file: "depth-anything-v2-small.onnx",
+}];
+
+/// MoGe-2 with normals, the small one (MIT), as exported by its authors.
+const SURFACE: [Asset; 1] = [Asset {
+    url: "https://huggingface.co/Ruicheng/moge-2-vits-normal-onnx/resolve/main/model.onnx",
+    sha256: "24eacb5dc7a2c54c7bc98f7de085ffbed79ad006ea5b664c2c2cdc02ff3a52f0",
+    size: 140_852_051,
+    file: "moge-2-vits-normal.onnx",
 }];
 
 const SKY: [Asset; 1] = [Asset {

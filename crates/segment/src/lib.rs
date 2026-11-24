@@ -184,6 +184,100 @@ fn depth_picture(model: &mut Model, img: &RgbImage) -> Result<GrayImage> {
     Ok(to_mask(&coded, w, h, img.dimensions()))
 }
 
+/// Which way every surface in the photo faces (MoGe-2): the photo at `long_side` pixels
+/// in, with its shape kept, and the number of `tokens` the model looks at it in (1200 to
+/// 2500; more is finer and slower); a unit direction out per pixel, as (x to the right, y
+/// down, z towards the camera), as `(values, width, height)` at the model's size. What
+/// the model says is nothing (the sky) faces the camera.
+pub fn surface(
+    model: &mut Model,
+    img: &RgbImage,
+    long_side: u32,
+    tokens: u32,
+) -> Result<(Vec<[f32; 3]>, u32, u32)> {
+    let (iw, ih) = img.dimensions();
+    let k = long_side.clamp(140, 2800) as f32 / iw.max(ih).max(1) as f32;
+    let side = |v: u32| ((v as f32 * k).round() as u32).max(28);
+    let (w, h) = (side(iw), side(ih));
+    let small = imageops::resize(img, w, h, imageops::FilterType::Triangle);
+    let n = (w * h) as usize;
+    let mut pixels = vec![0.0f32; 3 * n];
+    for (i, p) in small.pixels().enumerate() {
+        for c in 0..3 {
+            pixels[c * n + i] = f32::from(p[c]) / 255.0;
+        }
+    }
+    let image = Tensor::from_array(([1usize, 3, h as usize, w as usize], pixels))?;
+    let count = Tensor::from_array((Vec::<usize>::new(), vec![i64::from(tokens.clamp(256, 4000))]))?;
+    let outputs = model.session.run(ort::inputs!["image" => image, "num_tokens" => count])?;
+    let (shape, normal) = outputs["normal"].try_extract_tensor::<f32>()?;
+    let [_, oh, ow, 3] = shape[..] else { bail!("unexpected surface output {shape:?}") };
+    let (_, there) = outputs["mask"].try_extract_tensor::<f32>()?;
+    let count = (oh * ow) as usize;
+    if normal.len() != 3 * count || there.len() != count {
+        bail!("unexpected surface output {shape:?}");
+    }
+    let mut tilted = 0.0f32;
+    let out: Vec<[f32; 3]> = (0..count)
+        .map(|i| {
+            // The model's camera looks along +z: towards it is −z.
+            let (x, y, z) = (normal[3 * i], normal[3 * i + 1], -normal[3 * i + 2]);
+            let len = (x * x + y * y + z * z).sqrt();
+            if there[i] < 0.5 || !len.is_finite() || len < 1e-6 {
+                return [0.0, 0.0, 1.0];
+            }
+            tilted = tilted.max(x.abs().max(y.abs()) / len);
+            [x / len, y / len, z / len]
+        })
+        .collect();
+    // (As for depth: a GPU in trouble can answer with nothing at all.)
+    if tilted < 1e-3 {
+        bail!("the surface model gave an empty map");
+    }
+    Ok((out, ow as u32, oh as u32))
+}
+
+/// The model's long side and tokens for a surface map.
+pub const SURFACE_SIDE: u32 = 518;
+pub const SURFACE_TOKENS: u32 = 1200;
+
+/// [`surface`] as two pictures of the photo's size: how far each surface leans to the
+/// right (black: fully left, white: fully right, mid grey: not at all) and down. Lightly
+/// smoothed first: the model's blocks show as a faint grid.
+pub fn surface_pictures(
+    model: &mut Model,
+    img: &RgbImage,
+    long_side: u32,
+    tokens: u32,
+) -> Result<[GrayImage; 2]> {
+    let (faces, w, h) = surface(model, img, long_side, tokens)?;
+    let (w, h) = (w as usize, h as usize);
+    let plane = |c: usize| -> GrayImage {
+        let mut v: Vec<f32> = faces.iter().map(|f| f[c]).collect();
+        for _ in 0..2 {
+            let at = |x: isize, y: isize| {
+                v[y.clamp(0, h as isize - 1) as usize * w + x.clamp(0, w as isize - 1) as usize]
+            };
+            let across: Vec<f32> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as isize, (i / w) as isize);
+                    0.25 * at(x - 1, y) + 0.5 * at(x, y) + 0.25 * at(x + 1, y)
+                })
+                .collect();
+            let at = |x: isize, y: isize| across[y.clamp(0, h as isize - 1) as usize * w + x as usize];
+            v = (0..w * h)
+                .map(|i| {
+                    let (x, y) = ((i % w) as isize, (i / w) as isize);
+                    0.25 * at(x, y - 1) + 0.5 * at(x, y) + 0.25 * at(x, y + 1)
+                })
+                .collect();
+        }
+        let coded: Vec<f32> = v.iter().map(|v| 0.5 + 0.5 * v).collect();
+        to_mask(&coded, w as u32, h as u32, img.dimensions())
+    };
+    Ok([plane(0), plane(1)])
+}
+
 /// A photo encoded for Segment Anything: the encoder's outputs (fed to the decoder by
 /// name) and how its 1024-pixel frame maps to the photo.
 pub struct SamImage {
@@ -358,6 +452,30 @@ static LOADED: std::sync::Mutex<Option<(AiModel, Device, Model)>> = std::sync::M
 /// can't load or run it (too little memory, an unsupported operation). Returns the device
 /// it ran on.
 pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, Device)> {
+    on_device(model, gpu, |session| match model {
+        AiModel::Subject => subject_rmbg(session, img),
+        AiModel::Sky => sky(session, img),
+        AiModel::Depth => depth_picture(session, img),
+        AiModel::Object
+        | AiModel::Remove
+        | AiModel::RemoveBest
+        | AiModel::Scratches
+        | AiModel::People
+        | AiModel::Surface => {
+            bail!("{} isn't a selection", model.label())
+        }
+    })
+}
+
+/// Which way every surface in `img` faces (see [`surface_pictures`]), on the GPU when
+/// `gpu` and else, or if that fails, on the CPU. Returns the device it ran on.
+pub fn select_surface(img: &RgbImage, gpu: bool) -> Result<([GrayImage; 2], Device)> {
+    on_device(AiModel::Surface, gpu, |session| surface_pictures(session, img, SURFACE_SIDE, SURFACE_TOKENS))
+}
+
+/// `run` with `model` loaded (kept loaded for the next time): on the GPU (DirectML) when
+/// `gpu`, falling back to the CPU if the GPU can't load or run it.
+fn on_device<T>(model: AiModel, gpu: bool, run: impl Fn(&mut Model) -> Result<T>) -> Result<(T, Device)> {
     let devices: &[Device] =
         if gpu && cfg!(windows) { &[Device::DirectMl, Device::Cpu] } else { &[Device::Cpu] };
     let mut last = None;
@@ -375,19 +493,7 @@ pub fn select(model: AiModel, img: &RgbImage, gpu: bool) -> Result<(GrayImage, D
             }
         }
         let Some((_, _, session)) = loaded.as_mut() else { continue };
-        let result = match model {
-            AiModel::Subject => subject_rmbg(session, img),
-            AiModel::Sky => sky(session, img),
-            AiModel::Depth => depth_picture(session, img),
-            AiModel::Object
-            | AiModel::Remove
-            | AiModel::RemoveBest
-            | AiModel::Scratches
-            | AiModel::People => {
-                bail!("{} isn't a selection", model.label())
-            }
-        };
-        match result {
+        match run(session) {
             Ok(mask) => return Ok((mask, device)),
             Err(e) => {
                 log::warn!("AI masks: {} failed on {}: {e:#}", model.label(), device.label());

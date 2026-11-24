@@ -51,6 +51,46 @@ fn main() -> anyhow::Result<()> {
         imaging::develop::save_mask_picture(&id, &picture)?;
     }
 
+    // The surface model, tried: `surf=<long side>` (and `surftokens`), on both devices.
+    if let Some(side) = value("surf").and_then(|v| v.parse::<u32>().ok()) {
+        let tokens = number("surftokens", segment::SURFACE_TOKENS as f32) as u32;
+        let (img, _) = imaging::decode(&photo, kind, 2048)?;
+        for device in [Device::DirectMl, Device::Cpu] {
+            let t = Instant::now();
+            let made = Model::load(&models.join("surface.onnx"), device).and_then(|mut model| {
+                let load = t.elapsed();
+                let mut times = Vec::new();
+                let mut pictures = None;
+                for _ in 0..2 {
+                    let t = Instant::now();
+                    pictures = Some(segment::surface_pictures(&mut model, &img, side, tokens)?);
+                    times.push(t.elapsed());
+                }
+                println!("surface on {}: load {load:.2?}, runs {times:.2?}", device.label());
+                pictures.ok_or_else(|| anyhow::anyhow!("no map"))
+            });
+            match made {
+                Ok([x, y]) => {
+                    // As a picture: right red, up green, towards the camera blue.
+                    let view = image::RgbImage::from_fn(x.width(), x.height(), |i, j| {
+                        let (a, b) = (
+                            f32::from(x.get_pixel(i, j)[0]) / 127.5 - 1.0,
+                            f32::from(y.get_pixel(i, j)[0]) / 127.5 - 1.0,
+                        );
+                        let c = (1.0 - a * a - b * b).max(0.0).sqrt();
+                        let code = |v: f32| (127.5 + 127.5 * v).round().clamp(0.0, 255.0) as u8;
+                        image::Rgb([code(a), code(-b), code(c)])
+                    });
+                    let path = out.join(format!("{stem}_surface{side}_{}.png", device.label()));
+                    view.save(&path)?;
+                    println!("{}", path.display());
+                }
+                Err(e) => println!("surface on {}: {e:#}", device.label()),
+            }
+        }
+        return Ok(());
+    }
+
     let proxy = number("proxy", 2560.0) as u32;
     let (img, _) = WorkingImage::load(&photo, kind, (proxy > 0).then_some(proxy))?;
     let mut s = DevelopSettings::default();
