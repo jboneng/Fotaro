@@ -760,6 +760,17 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     std::thread::spawn(move || segment::warm_remove(best, gpu));
                 }
             });
+            ui.horizontal(|ui| {
+                ui.add_space(super::develop::LABEL_W - 40.0);
+                let mut refine = d.remove_depth;
+                let tip = "New fills of large areas take their fine detail from places as far \
+                           away as what is behind the removed thing, going by a depth map of \
+                           the photo (made first if the photo has none, which takes a little \
+                           longer). Found people are also listed nearest first";
+                if ui.checkbox(&mut refine, "Refine with depth").on_hover_text(tip).changed() {
+                    d.set_remove_depth(refine);
+                }
+            });
         }
         let defaults = RemoveSettings::default();
         let rows: [(&str, &mut f32, f32, f32, u8); 3] = [
@@ -888,6 +899,8 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             done = Some(Some(format!("Remove People ({n})")));
         }
     }
+    let refine = d.remove_depth;
+    app.ui.remove_depth = refine;
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
     }

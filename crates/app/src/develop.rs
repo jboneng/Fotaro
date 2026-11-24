@@ -406,6 +406,8 @@ pub struct AiJob {
     pub kind: AiKind,
     pub target: ToolTarget,
     pub prompt: Option<ObjectPrompt>,
+    /// Refine with depth: use the photo's depth map (made first if it has none).
+    pub refine: bool,
     pub progress: std::sync::Arc<std::sync::Mutex<(f32, String)>>,
 }
 
@@ -424,6 +426,63 @@ pub struct AiConsent {
     pub bytes: u64,
 }
 
+/// A Remove fill asked of the worker: the photo, the job, the spot's index and shape key,
+/// the settings, the photo's rotation, and whether on the GPU and at best quality.
+type FillAsk = (i64, AiJob, usize, u64, DevelopSettings, u8, bool, bool);
+
+/// The photo's depth map for a job that refines by it (`job.refine`; none otherwise): the
+/// one the photo `have`s, else made now from `rgb` (the photo developed, upright by
+/// `rotation`) and kept as a picture in file orientation. Also returns a new map's id,
+/// for the photo to keep.
+fn depth_for(
+    photo_id: i64,
+    job: &AiJob,
+    have: Option<Arc<image::GrayImage>>,
+    rgb: Option<&image::RgbImage>,
+    rotation: u8,
+    gpu: bool,
+    ctx: &egui::Context,
+) -> Result<(Option<Arc<image::GrayImage>>, Option<String>)> {
+    use image::imageops::{rotate90, rotate180, rotate270};
+    if !job.refine {
+        return Ok((None, None));
+    }
+    if have.is_some() {
+        return Ok((have, None));
+    }
+    let rgb = rgb.context("no picture to make the depth map from")?;
+    let set = |share: f32, what: String| {
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
+        ctx.request_repaint();
+    };
+    let before = job.progress();
+    let model = segment::AiModel::Depth;
+    if !segment::ready(&[model]) {
+        let mut last = std::time::Instant::now();
+        segment::ensure(&[model], &mut |share, what| {
+            if last.elapsed().as_millis() > 100 {
+                last = std::time::Instant::now();
+                set(share, format!("Downloading {what}"));
+            }
+        })?;
+    }
+    set(-1.0, "Working out how far away everything is…".to_owned());
+    let started = std::time::Instant::now();
+    let (map, device) = segment::select(model, rgb, gpu)?;
+    log::info!("Refine with depth: the map on {} in {:.0?}", device.label(), started.elapsed());
+    let map = match rotation % 4 {
+        1 => rotate270(&map),
+        2 => rotate180(&map),
+        3 => rotate90(&map),
+        _ => map,
+    };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let id = format!("{photo_id}-{:x}", stamp.as_nanos());
+    imaging::develop::save_mask_picture(&id, &map)?;
+    set(before.0, before.1);
+    Ok((Some(Arc::new(map)), Some(id)))
+}
+
 /// Make an AI mask of `rgb` (the photo as displayed, `rotation` quarter turns from the
 /// file, `size` pixels; empty when Select Object has it encoded as `key` already):
 /// download what is missing, run the model, save its picture. Returns the picture's id
@@ -437,6 +496,7 @@ fn run_ai(
     key: u64,
     rotation: u8,
     gpu: bool,
+    depth: Option<Arc<image::GrayImage>>,
     ctx: &egui::Context,
 ) -> Result<(String, &'static str)> {
     use image::imageops::{rotate90, rotate180, rotate270};
@@ -484,18 +544,26 @@ fn run_ai(
         _ => segment::select(model, rgb, gpu)?,
     };
     log::info!("AI mask: {} on {} in {:.0?}", kind.label(), device.label(), started.elapsed());
-    // Background is everything but the subject (its own picture, so Invert starts off).
-    let mut mask = mask;
-    if kind == AiKind::Background {
-        image::imageops::invert(&mut mask);
-    }
     // Back to the file's orientation, which masks are kept in.
-    let mask = match rotation % 4 {
+    let mut mask = match rotation % 4 {
         1 => rotate270(&mask),
         2 => rotate180(&mask),
         3 => rotate90(&mask),
         _ => mask,
     };
+    // Refine with depth: what is clearly behind the subject is not the subject.
+    if matches!(kind, AiKind::Subject | AiKind::Background)
+        && let Some(depth) = &depth
+    {
+        let out = imaging::develop::subject_by_depth(&mut mask, depth);
+        if out > 0.0 {
+            log::info!("AI mask: {:.1}% of the subject is behind it by the depth map: left out", out * 100.0);
+        }
+    }
+    // Background is everything but the subject (its own picture, so Invert starts off).
+    if kind == AiKind::Background {
+        image::imageops::invert(&mut mask);
+    }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let id = format!("{photo_id}-{:x}", stamp.as_nanos());
     imaging::develop::save_mask_picture(&id, &mask)?;
@@ -630,6 +698,7 @@ fn run_dust(
 /// Distractions → People: find the people in `rgb` (the photo developed, turned upright
 /// by `rotation`; `size` is its size in file orientation), keep each outline as a picture,
 /// and return them in file orientation.
+#[allow(clippy::too_many_arguments)]
 fn run_people(
     photo_id: i64,
     job: &AiJob,
@@ -637,6 +706,7 @@ fn run_people(
     size: (u32, u32),
     rotation: u8,
     gpu: bool,
+    depth: Option<Arc<image::GrayImage>>,
     ctx: &egui::Context,
 ) -> Result<Vec<FoundPerson>> {
     use image::imageops::{rotate90, rotate180, rotate270};
@@ -662,6 +732,8 @@ fn run_people(
     let stamp =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let mut out = Vec::new();
+    // Refine with depth: how near each is.
+    let mut near: Vec<Option<f32>> = Vec::new();
     for (k, p) in people.into_iter().enumerate() {
         // Back to the file's orientation (as AI masks are kept).
         let [l, t, r, b] = p.rect.map(|v| v as f32);
@@ -672,6 +744,7 @@ fn run_people(
             _ => ([l, t, r, b], p.mask),
         };
         let id = format!("{photo_id}-person-{stamp:x}-{k}");
+        near.push(depth.as_ref().and_then(|d| imaging::develop::mask_nearness(&mask, d)));
         imaging::develop::save_mask_picture(&id, &mask)?;
         // What outlining and clicking the person need, made here rather than while drawing.
         imaging::develop::prepare_area(&id);
@@ -686,6 +759,13 @@ fn run_people(
         };
         crate::ui::prepare_person(&person, size);
         out.push(person);
+    }
+    // Refine with depth: from the front of the photo to the back (Person 1 the nearest).
+    if !near.is_empty() && near.iter().all(Option::is_some) {
+        let mut order: Vec<usize> = (0..out.len()).collect();
+        order.sort_by(|a, b| near[*b].partial_cmp(&near[*a]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut found: Vec<Option<FoundPerson>> = out.into_iter().map(Some).collect();
+        out = order.into_iter().filter_map(|i| found[i].take()).collect();
     }
     Ok(out)
 }
@@ -743,6 +823,7 @@ enum Request {
         index: usize,
         key: u64,
         settings: DevelopSettings,
+        rotation: u8,
         gpu: bool,
         best: bool,
     },
@@ -918,6 +999,11 @@ enum Reply {
     Selected {
         photo_id: i64,
         result: std::result::Result<(String, &'static str), String>,
+    },
+    /// Refine with depth made the photo's depth map (picture `id`): the photo keeps it.
+    DepthMade {
+        photo_id: i64,
+        id: String,
     },
     /// The people found, or why finding failed.
     People {
@@ -1186,7 +1272,7 @@ fn worker(
     let mut overlay: Option<(i64, DevelopSettings, usize, u64)> = None;
     let mut selects: Vec<(i64, AiJob, DevelopSettings, u8, bool)> = Vec::new();
     let mut thumbs: Option<(i64, DevelopSettings, u64)> = None;
-    let mut fills: Vec<(i64, AiJob, usize, u64, DevelopSettings, bool, bool)> = Vec::new();
+    let mut fills: Vec<FillAsk> = Vec::new();
     let mut dusts: Vec<(i64, u64, imaging::develop::DustLayer, Option<IrFiles>, AiJob, bool)> = Vec::new();
     let mut dust_overlay: Option<(i64, DevelopSettings, u64)> = None;
     let mut finds: Vec<(i64, AiJob, DevelopSettings, u8, bool)> = Vec::new();
@@ -1230,8 +1316,8 @@ fn worker(
                     overlay = Some((photo_id, settings, index, seq))
                 }
                 Request::Thumbs { photo_id, settings, seq } => thumbs = Some((photo_id, settings, seq)),
-                Request::Fill { photo_id, job, index, key, settings, gpu, best } => {
-                    fills.push((photo_id, job, index, key, settings, gpu, best))
+                Request::Fill { photo_id, job, index, key, settings, rotation, gpu, best } => {
+                    fills.push((photo_id, job, index, key, settings, rotation, gpu, best))
                 }
                 Request::Select { photo_id, job, settings, rotation, gpu } => {
                     selects.push((photo_id, job, settings, rotation, gpu))
@@ -1390,6 +1476,7 @@ fn worker(
                 ctx.request_repaint();
                 continue;
             }
+            let depth = settings.depth_map().filter(|_| job.refine).and_then(imaging::develop::mask_picture);
             settings.transform = Default::default();
             settings.effects = Default::default();
             settings.masks.clear();
@@ -1417,7 +1504,13 @@ fn worker(
             std::thread::Builder::new()
                 .name("ai-mask".into())
                 .spawn(move || {
-                    let result = run_ai(photo_id, &job, &rgb, size, key, rotation, gpu, &ctx)
+                    let result = depth_for(photo_id, &job, depth, Some(&rgb), rotation, gpu, &ctx)
+                        .and_then(|(depth, made)| {
+                            if let Some(id) = made {
+                                let _ = tx.send(Reply::DepthMade { photo_id, id });
+                            }
+                            run_ai(photo_id, &job, &rgb, size, key, rotation, gpu, depth, &ctx)
+                        })
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Reply::Selected { photo_id, result });
                     ctx.request_repaint();
@@ -1479,6 +1572,7 @@ fn worker(
         }
         for (photo_id, job, mut settings, rotation, gpu) in ready {
             let Some((_, full_img)) = &full else { continue };
+            let depth = settings.depth_map().filter(|_| job.refine).and_then(imaging::develop::mask_picture);
             settings.transform = Default::default();
             settings.effects = Default::default();
             settings.masks.clear();
@@ -1494,7 +1588,13 @@ fn worker(
             std::thread::Builder::new()
                 .name("ai-people".into())
                 .spawn(move || {
-                    let result = run_people(photo_id, &job, &rgb, size, rotation, gpu, &ctx)
+                    let result = depth_for(photo_id, &job, depth, Some(&rgb), rotation, gpu, &ctx)
+                        .and_then(|(depth, made)| {
+                            if let Some(id) = made {
+                                let _ = tx.send(Reply::DepthMade { photo_id, id });
+                            }
+                            run_people(photo_id, &job, &rgb, size, rotation, gpu, depth, &ctx)
+                        })
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Reply::People { photo_id, result });
                     ctx.request_repaint();
@@ -1510,17 +1610,39 @@ fn worker(
         if let Some(f) = fills.first() {
             load_full(&mut full_loading, &source, f.0, &full_tx, &ctx);
         }
-        for (photo_id, job, index, key, settings, gpu, best) in ready {
+        for (photo_id, job, index, key, settings, rotation, gpu, best) in ready {
             let Some((_, full_img)) = &full else { continue };
             let wb = full_img.resolve_wb(&settings).multipliers;
             let input =
                 imaging::develop::fill_input(full_img, &settings.spots, settings.dust.as_ref(), index, wb);
+            let depth = settings.depth_map().filter(|_| job.refine).and_then(imaging::develop::mask_picture);
+            // Refine with depth on a photo without a depth map: the photo as AI masks see
+            // it, to make the map from.
+            let rgb = (job.refine && depth.is_none()).then(|| {
+                let mut plain = settings.clone();
+                plain.transform = Default::default();
+                plain.effects = Default::default();
+                plain.masks.clear();
+                let rgb = render_region_srgb8_view(full_img, &plain, Region::whole(full_img), None);
+                match rotation % 4 {
+                    1 => image::imageops::rotate90(&rgb),
+                    2 => image::imageops::rotate180(&rgb),
+                    3 => image::imageops::rotate270(&rgb),
+                    _ => rgb,
+                }
+            });
             let (tx, ctx) = (tx.clone(), ctx.clone());
             std::thread::Builder::new()
                 .name("ai-remove".into())
                 .spawn(move || {
                     let result = match input {
-                        Some(input) => run_fill(photo_id, &job, input, key, best, gpu, &ctx),
+                        Some(input) => depth_for(photo_id, &job, depth, rgb.as_ref(), rotation, gpu, &ctx)
+                            .and_then(|(depth, made)| {
+                                if let Some(id) = made {
+                                    let _ = tx.send(Reply::DepthMade { photo_id, id });
+                                }
+                                run_fill(photo_id, &job, input, key, best, gpu, depth, &ctx)
+                            }),
                         None => Err(anyhow::anyhow!("the spot is outside the photo")),
                     };
                     let _ = tx.send(Reply::Filled {
@@ -1701,6 +1823,12 @@ pub struct DevelopState {
     pub fill_declined: bool,
     /// Remove at best quality (big-LaMa) instead of fast (LaMa-Dilated).
     pub remove_best: bool,
+    /// Refine with depth, for Select Subject and Background: what the photo's depth map
+    /// says is behind the subject is left out.
+    pub mask_depth: bool,
+    /// Refine with depth, for Remove: fills take their detail from as far away as what
+    /// is behind the hole, and found people are listed nearest first.
+    pub remove_depth: bool,
     /// Distractions: the photo's infrared pass, if it is a scan that has one.
     pub ir_pass: Option<IrFiles>,
     /// Dust & Scratches: the detection running (for this layer key), and keys that failed
@@ -1840,6 +1968,8 @@ impl DevelopState {
             fill_allowed: false,
             fill_declined: false,
             remove_best: true,
+            mask_depth: false,
+            remove_depth: false,
             ir_pass: None,
             dust_job: None,
             dust_failed: Vec::new(),
@@ -2268,6 +2398,14 @@ impl DevelopState {
                     log::warn!("develop: {error}");
                     self.error = Some(error);
                 }
+                Reply::DepthMade { photo_id, id } if Some(photo_id) == self.photo => {
+                    if self.settings.depth_map().is_none() {
+                        let mut st = self.settings.clone();
+                        st.effects.fog_depth = Some(id);
+                        self.set_live(st);
+                        changed = changed.or(self.commit(catalog, Some("Depth Map".into()))?);
+                    }
+                }
                 Reply::People { photo_id, result } if Some(photo_id) == self.photo => {
                     self.people_job = None;
                     self.people_searched = true;
@@ -2357,9 +2495,13 @@ impl DevelopState {
             self.fill_batch = None;
             return;
         };
-        let model = if self.remove_best { segment::AiModel::RemoveBest } else { segment::AiModel::Remove };
-        if !self.fill_allowed && !segment::ready(&[model]) {
-            let bytes = segment::download_size(&[model]);
+        let mut models =
+            vec![if self.remove_best { segment::AiModel::RemoveBest } else { segment::AiModel::Remove }];
+        if self.remove_depth {
+            models.push(segment::AiModel::Depth);
+        }
+        if !self.fill_allowed && !segment::ready(&models) {
+            let bytes = segment::download_size(&models);
             self.ai_consent =
                 Some(AiConsent { kind: AiKind::Remove, target: ToolTarget::NewMask, prompt: None, bytes });
             return;
@@ -2370,6 +2512,7 @@ impl DevelopState {
                 kind: AiKind::Remove,
                 target: ToolTarget::NewMask,
                 prompt: None,
+                refine: self.remove_depth,
                 progress: Default::default(),
             },
             done: 0,
@@ -2383,10 +2526,12 @@ impl DevelopState {
         } else {
             (-1.0, format!("Removing{quality}…"))
         };
+        batch.job.refine = self.remove_depth;
         let job = batch.job.clone();
         let settings = self.settings.clone();
-        let (gpu, best) = (self.ai_gpu, self.remove_best);
-        let _ = self.tx.send(Request::Fill { photo_id, job: job.clone(), index, key, settings, gpu, best });
+        let (rotation, gpu, best) = (self.rotation, self.ai_gpu, self.remove_best);
+        let request = Request::Fill { photo_id, job: job.clone(), index, key, settings, rotation, gpu, best };
+        let _ = self.tx.send(request);
         self.fill_job = Some((job, key));
     }
 
@@ -2411,6 +2556,7 @@ impl DevelopState {
             kind: AiKind::Dust,
             target: ToolTarget::NewMask,
             prompt: None,
+            refine: false,
             progress: Default::default(),
         };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Finding dust & scratches…".into());
@@ -2426,7 +2572,10 @@ impl DevelopState {
         if self.people_job.is_some() {
             return;
         }
-        let models = [segment::AiModel::People, segment::AiModel::Object];
+        let mut models = vec![segment::AiModel::People, segment::AiModel::Object];
+        if self.remove_depth {
+            models.push(segment::AiModel::Depth);
+        }
         if !self.people_allowed && !segment::ready(&models) {
             let bytes = segment::download_size(&models);
             self.ai_consent =
@@ -2437,6 +2586,7 @@ impl DevelopState {
             kind: AiKind::People,
             target: ToolTarget::NewMask,
             prompt: None,
+            refine: self.remove_depth,
             progress: Default::default(),
         };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Finding people…".into());
@@ -2540,11 +2690,28 @@ impl DevelopState {
         self.request_ai(AiKind::Object, target, Some(prompt));
     }
 
+    /// Refine with depth is on and `kind` is one it refines.
+    fn refines(&self, kind: AiKind) -> bool {
+        self.mask_depth && matches!(kind, AiKind::Subject | AiKind::Background)
+    }
+
+    /// Remove's Refine with depth, switched: its model is another download, so ask again.
+    pub fn set_remove_depth(&mut self, on: bool) {
+        self.remove_depth = on;
+        if on {
+            (self.fill_allowed, self.people_allowed) = (false, false);
+        }
+    }
+
     fn request_ai(&mut self, kind: AiKind, target: ToolTarget, prompt: Option<ObjectPrompt>) {
         if self.ai_job.is_some() {
             return;
         }
-        let bytes = segment::download_size(&[kind.model()]);
+        let mut models = vec![kind.model()];
+        if self.refines(kind) {
+            models.push(segment::AiModel::Depth);
+        }
+        let bytes = segment::download_size(&models);
         if bytes > 0 {
             self.ai_consent = Some(AiConsent { kind, target, prompt, bytes });
         } else {
@@ -2593,7 +2760,7 @@ impl DevelopState {
         }
         let Some(photo_id) = self.photo else { return };
         self.ai_consent = None;
-        let job = AiJob { kind, target, prompt, progress: Default::default() };
+        let job = AiJob { kind, target, prompt, refine: self.refines(kind), progress: Default::default() };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Starting…".into());
         let settings = self.settings.clone();
         let (rotation, gpu) = (self.rotation, self.ai_gpu);
@@ -2994,6 +3161,7 @@ impl DevelopState {
 
 /// Remove: fill a spot with the model (downloading it first if needed), save the picture,
 /// and describe the fill for spot shape `key`.
+#[allow(clippy::too_many_arguments)]
 fn run_fill(
     photo_id: i64,
     job: &AiJob,
@@ -3001,6 +3169,7 @@ fn run_fill(
     key: u64,
     best: bool,
     gpu: bool,
+    depth: Option<Arc<image::GrayImage>>,
     ctx: &egui::Context,
 ) -> Result<imaging::develop::Fill> {
     use image::imageops::{FilterType, resize};
@@ -3033,7 +3202,8 @@ fn run_fill(
     log::info!("Remove: filled on {} in {:.0?}", device.label(), started.elapsed());
     // A large area gets the photo's own fine detail and grain over what the model drew.
     let started = std::time::Instant::now();
-    let done = imaging::develop::finish_fill(&input, &out, key);
+    // (Refine with depth: from places as far away as what is behind the hole.)
+    let done = imaging::develop::finish_fill_by_depth(&input, &out, key, depth.as_deref());
     if done.full {
         log::info!(
             "Remove: detail from the photo for {} x {} px in {:.0?}",

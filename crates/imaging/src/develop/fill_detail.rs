@@ -34,11 +34,24 @@ const MARGIN: usize = 8;
 /// module's notes) and a picture of the hole's box only, at the photo's size; a small one
 /// the model's picture as it is. `seed` picks among equally good places to copy from.
 pub fn finish_fill(input: &FillInput, out: &RgbImage, seed: u64) -> FinishedFill {
+    finish_fill_by_depth(input, out, seed, None)
+}
+
+/// [`finish_fill`] with the photo's depth map (white near, covering the whole untransformed
+/// photo), when it has one: the fine detail is then copied from places about as far away
+/// as what is behind the hole, so a wall's fill does not get its grain and texture from
+/// the grass in front of it.
+pub fn finish_fill_by_depth(
+    input: &FillInput,
+    out: &RgbImage,
+    seed: u64,
+    depth: Option<&image::GrayImage>,
+) -> FinishedFill {
     let side = input.image.width();
     let m = out.width();
     if side > PLAIN_SIDE
         && m > 0
-        && let Some(done) = with_detail(input, out, seed)
+        && let Some(done) = with_detail(input, out, seed, depth)
     {
         return done;
     }
@@ -46,7 +59,12 @@ pub fn finish_fill(input: &FillInput, out: &RgbImage, seed: u64) -> FinishedFill
     FinishedFill { picture, rect: input.rect, detail: (m as f32 / side as f32).min(1.0), full: false }
 }
 
-fn with_detail(input: &FillInput, out: &RgbImage, seed: u64) -> Option<FinishedFill> {
+fn with_detail(
+    input: &FillInput,
+    out: &RgbImage,
+    seed: u64,
+    depth: Option<&image::GrayImage>,
+) -> Option<FinishedFill> {
     let side = input.image.width() as usize;
     let m = out.width() as usize;
     let k = side as f32 / m as f32;
@@ -67,7 +85,8 @@ fn with_detail(input: &FillInput, out: &RgbImage, seed: u64) -> Option<FinishedF
     }
     let guide: Vec<[f32; 3]> =
         out.pixels().map(|p| [f32::from(p[0]), f32::from(p[1]), f32::from(p[2])]).collect();
-    let from = patch_match(&guide, &hole, m, seed)?;
+    let far = depth.and_then(|d| distances(input.rect, d, &hole, m));
+    let from = patch_match(&guide, &hole, m, seed, far.as_ref())?;
 
     // The photo's fine layer: each channel less its own blur at the size the model can
     // hold, the blur taken from outside the hole only (nothing of what is removed in it).
@@ -107,6 +126,59 @@ fn with_detail(input: &FillInput, out: &RgbImage, seed: u64) -> Option<FinishedF
     Some(FinishedFill { picture, rect, detail: 1.0, full: true })
 }
 
+/// The depth map's values (0..255, more is nearer) a cell of the crop `rect` at the model's
+/// size (`m` square): as the map has them, and as they would be without what is removed
+/// (in the hole, what is around it continued inward). `None` when there is nothing around.
+fn distances(
+    rect: [f32; 4],
+    depth: &image::GrayImage,
+    hole: &[bool],
+    m: usize,
+) -> Option<(Vec<f32>, Vec<f32>)> {
+    let (dw, dh) = depth.dimensions();
+    if dw == 0 || dh == 0 {
+        return None;
+    }
+    let [l, t, r, b] = rect;
+    let own: Vec<f32> = (0..m * m)
+        .map(|i| {
+            let u = l + ((i % m) as f32 + 0.5) / m as f32 * (r - l);
+            let v = t + ((i / m) as f32 + 0.5) / m as f32 * (b - t);
+            let x = ((u * dw as f32) as u32).min(dw - 1);
+            let y = ((v * dh as f32) as u32).min(dh - 1);
+            f32::from(depth.get_pixel(x, y)[0])
+        })
+        .collect();
+    // The map's edges are soft: what is right around the hole still has some of what is
+    // removed in it, and is left out.
+    let holes: Vec<f32> = hole.iter().map(|h| f32::from(u8::from(*h))).collect();
+    let grown = box_blur_par(&holes, m, m, 6);
+    let keep: Vec<f32> = grown.iter().map(|v| if *v > 1e-4 { 0.0 } else { 1.0 }).collect();
+    if keep.iter().all(|k| *k == 0.0) {
+        return None;
+    }
+    let kept: Vec<f32> = own.iter().zip(&keep).map(|(d, k)| d * k).collect();
+    let mut behind = own.clone();
+    let mut open: Vec<bool> = keep.iter().map(|k| *k == 0.0).collect();
+    let mut radius = 8;
+    while radius < m && open.iter().any(|o| *o) {
+        let (sum, n) = (box_blur_par(&kept, m, m, radius), box_blur_par(&keep, m, m, radius));
+        for i in 0..m * m {
+            if open[i] && n[i] > 0.02 {
+                (behind[i], open[i]) = (sum[i] / n[i], false);
+            }
+        }
+        radius *= 2;
+    }
+    Some((own, behind))
+}
+
+/// How much farther or nearer (in the depth map's 255 steps) a place may be than what is
+/// behind the hole before it costs, and what each step over costs (per step squared; a
+/// patch that looks quite alike costs a few thousand).
+const DEPTH_SLACK: f32 = 10.0;
+const DEPTH_COST: f32 = 30.0;
+
 /// The picture `g` (`m` square) at a place between its pixels, smoothly (Catmull-Rom).
 fn sample(g: &[[f32; 3]], m: usize, x: f32, y: f32) -> [f32; 3] {
     let weights = |t: f32| {
@@ -136,8 +208,15 @@ fn sample(g: &[[f32; 3]], m: usize, x: f32, y: f32) -> [f32; 3] {
 /// For each cell of the hole in `guide` (`m` square), how far away (in cells) the place
 /// outside the hole is whose surroundings look most like its own: PatchMatch, a few
 /// passes of taking a neighbour's answer when it is better and of looking at random ever
-/// nearer the best so far. `None` when there is nowhere to take from.
-fn patch_match(guide: &[[f32; 3]], hole: &[bool], m: usize, seed: u64) -> Option<Vec<(i16, i16)>> {
+/// nearer the best so far. With `depths` (see [`distances`]), places as far away as what
+/// is behind the hole are preferred. `None` when there is nowhere to take from.
+fn patch_match(
+    guide: &[[f32; 3]],
+    hole: &[bool],
+    m: usize,
+    seed: u64,
+    depths: Option<&(Vec<f32>, Vec<f32>)>,
+) -> Option<Vec<(i16, i16)>> {
     let mi = m as isize;
     // Places to take from: a patch and a little more with nothing of the hole in it.
     let reach = PATCH + 2;
@@ -179,6 +258,12 @@ fn patch_match(guide: &[[f32; 3]], hole: &[bool], m: usize, seed: u64) -> Option
         // In steps, so that places side by side cost the same: the nearest place of all
         // would be another for every cell, with a seam between each.
         let mut sum = 100.0 * (far / 48.0).floor();
+        if let Some((own, behind)) = depths {
+            let off = (own[(sy * mi + sx) as usize] - behind[(ty * mi + tx) as usize]).abs() - DEPTH_SLACK;
+            if off > 0.0 {
+                sum += DEPTH_COST * off * off;
+            }
+        }
         for dy in -PATCH..=PATCH {
             let t_row = (ty + dy).clamp(0, mi - 1) * mi;
             let s_row = (sy + dy) * mi;
@@ -312,6 +397,31 @@ mod tests {
         assert_eq!(done.picture.get_pixel(0, 0), input.image.get_pixel(at(done.rect[0]), at(done.rect[1])));
         assert_eq!(finish_fill(&input, &out, 1).picture, done.picture);
         assert_ne!(finish_fill(&input, &out, 2).picture, done.picture, "another seed, other places");
+    }
+
+    #[test]
+    fn with_a_depth_map_detail_comes_from_as_far_away() {
+        // The same grain everywhere, so looks cannot tell the halves apart; the left half
+        // is near, the right far, and the hole is in the left, by the border.
+        let m = 128usize;
+        let grain = super::super::heal::noise_plane(0, 0, m, m, 1.0, 3);
+        let guide: Vec<[f32; 3]> = grain.iter().map(|g| [120.0 + 30.0 * g; 3]).collect();
+        let hole: Vec<bool> =
+            (0..m * m).map(|i| (30..48).contains(&(i % m)) && (54..74).contains(&(i / m))).collect();
+        let depth = GrayImage::from_fn(256, 256, |x, _| Luma([if x < 128 { 200 } else { 50 }]));
+        let far = distances([0.0, 0.0, 1.0, 1.0], &depth, &hole, m).expect("there is a map");
+        assert!(
+            (far.1[64 * m + 40] - 200.0).abs() < 8.0,
+            "behind the hole: as around it ({})",
+            far.1[64 * m + 40]
+        );
+        let right = |from: &[(i16, i16)]| {
+            (0..m * m).filter(|i| hole[*i] && (i % m) as i16 + from[*i].0 >= 64).count()
+        };
+        let plain = patch_match(&guide, &hole, m, 1, None).unwrap();
+        let by_depth = patch_match(&guide, &hole, m, 1, Some(&far)).unwrap();
+        assert!(right(&plain) > 20, "by looks alone, from both halves ({})", right(&plain));
+        assert_eq!(right(&by_depth), 0, "by depth, from its own half only");
     }
 
     #[test]

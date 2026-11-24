@@ -470,6 +470,17 @@ impl DevelopSettings {
         serde_json::from_str(json).ok()
     }
 
+    /// The photo's depth map, if one was made: Fog's and Lens Blur's, or a Depth Range
+    /// mask's (its picture's id in the mask store).
+    pub fn depth_map(&self) -> Option<&str> {
+        self.effects.fog_depth.as_deref().or_else(|| {
+            self.masks.iter().flat_map(|m| &m.components).find_map(|c| match &c.shape {
+                super::masks::Shape::Raster { id, range: Some(_), .. } => Some(id.as_str()),
+                _ => None,
+            })
+        })
+    }
+
     /// A hash that stays the same across builds (for preview cache keys).
     pub fn stable_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;

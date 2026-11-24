@@ -191,6 +191,9 @@ pub struct UiState {
     pub show_version_strip: bool,
     /// Run AI masks on the GPU (DirectML) when it can.
     pub ai_gpu: bool,
+    /// Refine with depth: for Select Subject and Background, and for Remove.
+    pub mask_depth: bool,
+    pub remove_depth: bool,
     /// Help ▸ Check for Updates Automatically: at start and once a day.
     pub check_updates: bool,
     /// The release the user chose to skip (not offered again unless they check).
@@ -228,6 +231,8 @@ impl Default for UiState {
             edit_in: crate::editors::EditInPrefs::default(),
             show_version_strip: true,
             ai_gpu: true,
+            mask_depth: false,
+            remove_depth: false,
             check_updates: true,
             skipped_update: None,
             recent_lenses: Vec::new(),
@@ -1267,6 +1272,8 @@ impl FotaroApp {
         match result {
             Ok(mut session) => {
                 session.develop.ai_gpu = self.ui.ai_gpu;
+                session.develop.mask_depth = self.ui.mask_depth;
+                session.develop.remove_depth = self.ui.remove_depth;
                 log::info!("opened catalog {}", dir.display());
                 self.session = Some(session);
                 self.last_catalog = Some(dir.to_path_buf());

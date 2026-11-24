@@ -38,7 +38,7 @@ pub use dust::{
     render_dust_overlay, sensor_dust_spots,
 };
 pub use effects::{EffectParam, Effects, VignetteStyle};
-pub use fill_detail::{FinishedFill, finish_fill};
+pub use fill_detail::{FinishedFill, finish_fill, finish_fill_by_depth};
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use groups::{SettingsGroup, changed_groups, copy_groups};
 pub use heal::{
@@ -57,8 +57,8 @@ pub use lut::{
     parse_cube, set_lut_store,
 };
 pub use masks::{
-    CombineMode, Component, DepthRange, LocalAdjust, LocalParam, Mask, Shape, Stroke, depth_at, mask_picture,
-    save_fill_picture, save_mask_picture, set_mask_store,
+    CombineMode, Component, DepthRange, LocalAdjust, LocalParam, Mask, Shape, Stroke, depth_at,
+    mask_nearness, mask_picture, save_fill_picture, save_mask_picture, set_mask_store, subject_by_depth,
 };
 pub use pipeline::{
     Region, auto_tone, render_linear16, render_mask, render_region_srgb8, render_region_srgb8_until,

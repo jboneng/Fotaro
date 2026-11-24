@@ -1078,6 +1078,35 @@ fn lens_blur_blurs_what_is_out_of_focus_and_regions_still_match() {
     set_mask_store(None);
 }
 
+#[test]
+fn the_depth_map_takes_out_of_a_subject_what_is_behind_it_and_orders_what_is_found() {
+    use image::{GrayImage, Luma};
+    // Near on the left 60%, far on the right; a subject in the near part, with a piece
+    // of the far part taken along, and a few hairs of it reaching over the border.
+    let depth = GrayImage::from_fn(200, 100, |x, _| Luma([if x < 120 { 210 } else { 30 }]));
+    let subject = |x: u32, y: u32| (20..110).contains(&x) && (20..180).contains(&y);
+    let piece = |x: u32, y: u32| (280..360).contains(&x) && (60..140).contains(&y);
+    let hair = |x: u32, y: u32| (110..244).contains(&x) && y.is_multiple_of(40) && (20..180).contains(&y);
+    let mut mask = GrayImage::from_fn(400, 200, |x, y| {
+        Luma([if subject(x, y) || piece(x, y) || hair(x, y) { 255 } else { 0 }])
+    });
+    let out = subject_by_depth(&mut mask, &depth);
+    assert!(out > 0.2 && out < 0.4, "the piece is about 30% of it ({out})");
+    assert_eq!(mask.get_pixel(60, 100)[0], 255, "the subject stays");
+    assert_eq!(mask.get_pixel(320, 100)[0], 0, "the piece behind it goes");
+    assert_eq!(mask.get_pixel(242, 40)[0], 255, "hair just over the border stays");
+    // A subject that is itself deep is left alone.
+    let slope = GrayImage::from_fn(200, 100, |x, _| Luma([(250 - x) as u8]));
+    let mut whole = GrayImage::from_pixel(400, 200, Luma([255]));
+    assert_eq!(subject_by_depth(&mut whole, &slope), 0.0);
+    // How near a mask is: the map's mean under it.
+    let left = GrayImage::from_fn(400, 200, |x, _| Luma([if x < 100 { 255 } else { 0 }]));
+    let right = GrayImage::from_fn(400, 200, |x, _| Luma([if x > 300 { 255 } else { 0 }]));
+    assert!((mask_nearness(&left, &depth).unwrap() - 210.0).abs() < 1.0);
+    assert!((mask_nearness(&right, &depth).unwrap() - 30.0).abs() < 1.0);
+    assert_eq!(mask_nearness(&GrayImage::new(400, 200), &depth), None);
+}
+
 /// A mask over the left part of the photo (full left of 45%, none right of 55%).
 fn left_mask(adjust: impl Fn(&mut LocalAdjust)) -> Mask {
     let mut m = Mask::new("Mask 1", Shape::Linear { start: [0.45, 0.5], end: [0.55, 0.5] });

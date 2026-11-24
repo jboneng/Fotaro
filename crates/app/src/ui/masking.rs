@@ -859,6 +859,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
     let mut ai: Option<(AiKind, ToolTarget)> = None;
     let job = d.ai_job.clone();
     let mut gpu = d.ai_gpu;
+    let mut refine = d.mask_depth;
     let mut object_rect = d.object_rect;
     let thumbs = d.mask_thumbs.clone();
     let rotation = d.rotation();
@@ -1177,6 +1178,20 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                         }
                     });
                 });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Refine with depth").size(12.0).color(theme::TEXT));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        let switch = super::icons::toggle_switch(ui, refine, egui::vec2(24.0, 13.0));
+                        let tip = "New Subject and Background masks leave out what is clearly far \
+                                   behind the subject, going by a depth map of the photo (made \
+                                   first if the photo has none, which takes a little longer). \
+                                   Masks already made stay as they are";
+                        if switch.on_hover_text(tip).clicked() {
+                            refine = !refine;
+                        }
+                    });
+                });
                 ui.add_space(4.0);
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -1193,6 +1208,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
         });
     d.masking = Some(m);
     d.ai_gpu = gpu;
+    d.mask_depth = refine;
     d.object_rect = object_rect;
     if st != d.settings {
         d.set_live(st);
@@ -1202,6 +1218,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
     }
     d.request_renders();
     app.ui.ai_gpu = gpu;
+    app.ui.mask_depth = refine;
     if done {
         app.run(Command::DevelopCommit(None));
     }

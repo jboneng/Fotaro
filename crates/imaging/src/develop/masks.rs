@@ -203,6 +203,115 @@ pub fn depth_at(id: &str, x: f32, y: f32) -> Option<f32> {
     Some(100.0 * (1.0 - f32::from(*around.get(around.len() / 2)?) / 255.0))
 }
 
+/// The depth map's value (0..255, more is nearer) at (u, v), 0..1 of the photo.
+fn depth_value(depth: &image::GrayImage, u: f32, v: f32) -> u8 {
+    let (w, h) = depth.dimensions();
+    depth.get_pixel(((u * w as f32) as u32).min(w - 1), ((v * h as f32) as u32).min(h - 1))[0]
+}
+
+/// How near what `mask` selects is by the depth map (both over the whole untransformed
+/// photo, at any sizes): its mean value there, 0 (far) to 255. `None` for an empty mask.
+pub fn mask_nearness(mask: &image::GrayImage, depth: &image::GrayImage) -> Option<f32> {
+    let (w, h) = mask.dimensions();
+    if w == 0 || h == 0 || depth.width() == 0 || depth.height() == 0 {
+        return None;
+    }
+    let step = (w.max(h) / 256).max(1);
+    let (mut sum, mut n) = (0.0f64, 0.0f64);
+    for y in (step / 2..h).step_by(step as usize) {
+        for x in (step / 2..w).step_by(step as usize) {
+            let k = f64::from(mask.get_pixel(x, y)[0]);
+            if k > 0.0 {
+                let d = depth_value(depth, (x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                sum += k * f64::from(d);
+                n += k;
+            }
+        }
+    }
+    (n > 0.0).then(|| (sum / n) as f32)
+}
+
+/// Take out of a Subject mask what the depth map says is clearly behind the subject: a
+/// piece of the background the model took along with it. Careful on purpose: only what is
+/// far behind the subject for how deep the subject itself is, and only where
+/// everything close by is as far (the map's edges are soft and miss hair). Returns the
+/// share of the subject taken out.
+pub fn subject_by_depth(mask: &mut image::GrayImage, depth: &image::GrayImage) -> f32 {
+    const GRID: usize = 256;
+    let (w, h) = mask.dimensions();
+    if w == 0 || h == 0 || depth.width() == 0 || depth.height() == 0 {
+        return 0.0;
+    }
+    let k = GRID as f32 / w.max(h) as f32;
+    let (gw, gh) = (((w as f32 * k).round() as usize).max(1), ((h as f32 * k).round() as usize).max(1));
+    let at = |x: usize, y: usize| ((x as f32 + 0.5) / gw as f32, (y as f32 + 0.5) / gh as f32);
+    let near: Vec<u8> = (0..gw * gh)
+        .map(|i| {
+            let (u, v) = at(i % gw, i / gw);
+            depth_value(depth, u, v)
+        })
+        .collect();
+    // How far away the subject is (the middle of it, where the model is sure) and how deep
+    // (the middle of how far its parts are from that): neither moves until a piece of the
+    // background is half of what was selected.
+    let mut subject: Vec<u8> = (0..gw * gh)
+        .filter(|i| {
+            let (u, v) = at(i % gw, i / gw);
+            mask.get_pixel(((u * w as f32) as u32).min(w - 1), ((v * h as f32) as u32).min(h - 1))[0] > 200
+        })
+        .map(|i| near[i])
+        .collect();
+    if subject.len() < 50 {
+        return 0.0;
+    }
+    subject.sort_unstable();
+    let middle = f32::from(subject[subject.len() / 2]);
+    let mut off: Vec<f32> = subject.iter().map(|d| (f32::from(*d) - middle).abs()).collect();
+    off.sort_unstable_by(f32::total_cmp);
+    let hi = middle - 4.5 * off[off.len() / 2] - 16.0;
+    let lo = hi - 16.0;
+    if hi <= 0.0 {
+        return 0.0;
+    }
+    // The nearest thing close by (1.5% of the photo around).
+    let r = (GRID * 3 / 200).max(1) as isize;
+    let widest = |v: &[u8], along_x: bool| -> Vec<u8> {
+        (0..gw * gh)
+            .map(|i| {
+                let (x, y) = ((i % gw) as isize, (i / gw) as isize);
+                (-r..=r)
+                    .map(|d| {
+                        let (xx, yy) = if along_x { (x + d, y) } else { (x, y + d) };
+                        v[yy.clamp(0, gh as isize - 1) as usize * gw + xx.clamp(0, gw as isize - 1) as usize]
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+    let around = widest(&widest(&near, true), false);
+    let (mut before, mut after) = (0.0f64, 0.0f64);
+    for (x, y, p) in mask.enumerate_pixels_mut() {
+        if p[0] == 0 {
+            continue;
+        }
+        // Between the grid's cells, so the cut has no steps.
+        let fx = ((x as f32 + 0.5) / w as f32 * gw as f32 - 0.5).clamp(0.0, (gw - 1) as f32);
+        let fy = ((y as f32 + 0.5) / h as f32 * gh as f32 - 0.5).clamp(0.0, (gh - 1) as f32);
+        let (x0, y0) = (fx as usize, fy as usize);
+        let (x1, y1) = ((x0 + 1).min(gw - 1), (y0 + 1).min(gh - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let v = |x: usize, y: usize| f32::from(around[y * gw + x]);
+        let top = v(x0, y0) + tx * (v(x1, y0) - v(x0, y0));
+        let bottom = v(x0, y1) + tx * (v(x1, y1) - v(x0, y1));
+        let keep = smoothstep(lo, hi, top + ty * (bottom - top));
+        before += f64::from(p[0]);
+        p[0] = (f32::from(p[0]) * keep).round() as u8;
+        after += f64::from(p[0]);
+    }
+    if before > 0.0 { (1.0 - after / before) as f32 } else { 0.0 }
+}
+
 /// Remove fills' pictures already read (colour; in the same store as the masks').
 static FILL_PICTURES: Mutex<Vec<(String, Arc<image::RgbImage>)>> = Mutex::new(Vec::new());
 
