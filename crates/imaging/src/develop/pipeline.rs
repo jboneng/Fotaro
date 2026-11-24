@@ -186,15 +186,9 @@ fn relight_spot(
     if !e.relight_spots() {
         return None;
     }
-    // (Of half the photo's longer side: small steps where the area is small.)
-    let t = (e.relight_size / 100.0).clamp(0.0, 1.0);
-    let radius = 0.04 + 1.6 * t * t;
-    let shape = super::masks::Shape::Radial {
-        center: e.relight_at,
-        radii: [radius, radius],
-        angle: 0.0,
-        feather: 75.0,
-    };
+    let (radius, feather) = e.relight_area();
+    let shape =
+        super::masks::Shape::Radial { center: e.relight_at, radii: [radius, radius], angle: 0.0, feather };
     let map = [Mask::new("Light", shape)];
     MaskField::build_for(source, shown, &map, vec![0], region).map(Arc::new)
 }

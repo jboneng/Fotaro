@@ -1949,6 +1949,141 @@ fn transform_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
 /// LrC's Effects panel: Post-Crop Vignetting (Style, Amount, Midpoint, Roundness, Feather,
 /// Highlights) and Grain (Amount, Size, Roughness). There is no crop yet, so the vignette
 /// follows the whole frame.
+/// Relight's picture of where its light falls (white on the photo's shapes, by the depth
+/// map): dragged up and down, the light goes farther and nearer; a click puts it on what
+/// is clicked. With Shaping, a lamp around it shows where the light comes from, and is
+/// dragged around. Returns whether the light is being placed.
+fn relight_placer(
+    ui: &mut egui::Ui,
+    d: &mut DevelopState,
+    st: &mut imaging::develop::DevelopSettings,
+    done: &mut Option<Option<String>>,
+) -> bool {
+    use std::hash::{Hash, Hasher};
+    let rotation = d.rotation();
+    let Some(id) = st.effects.fog_depth.clone() else {
+        d.relight_preview = None;
+        ui.label(weak("Raise Amount to see where the light falls").size(11.5));
+        return false;
+    };
+    // The picture, made again when what it shows changes.
+    let e = &st.effects;
+    let key = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        for v in [e.relight_depth, e.relight_range, e.relight_feather, e.relight_size] {
+            v.to_bits().hash(&mut h);
+        }
+        e.relight_at.map(f32::to_bits).hash(&mut h);
+        h.finish()
+    };
+    if d.relight_preview.as_ref().is_none_or(|(k, _)| *k != key) {
+        d.relight_preview = imaging::develop::relight_preview(e, 256).map(|p| {
+            // Dark where unlit, so the photo's shapes still read.
+            let rgba: Vec<u8> =
+                p.as_raw().iter().flat_map(|v| [40 + (*v as u16 * 215 / 255) as u8; 3]).collect();
+            let image = egui::ColorImage::from_rgb([p.width() as usize, p.height() as usize], &rgba);
+            (key, ui.ctx().load_texture("relight_preview", image, egui::TextureOptions::LINEAR))
+        });
+    }
+    let Some((_, tex)) = d.relight_preview.clone() else { return false };
+    let shown = rotated_size(tex.size_vec2(), rotation);
+    let width = ui.available_width();
+    let scale = (width / shown.x).min(170.0 / shown.y);
+    let size = shown * scale;
+    let (outer, _) = ui.allocate_exact_size(egui::vec2(width, size.y), Sense::hover());
+    let rect = Rect::from_center_size(outer.center(), size);
+    let resp = ui
+        .interact(rect, ui.scope_id().with("relight_placer"), Sense::click_and_drag())
+        .on_hover_text("Drag up or down to move the light farther or nearer; click to put it on something");
+    let painter = ui.painter_at(outer);
+    painter.rect_filled(outer, 4.0, Color32::from_gray(24));
+    paint_image(&painter, &tex, rect, rotation, Color32::WHITE);
+
+    // The lamp: where the light comes from, on a ring inside the picture.
+    let turn = 90.0 * f32::from(rotation % 4);
+    let lamp = st.effects.relight_shapes().then(|| {
+        let a = (st.effects.relight_direction + turn).to_radians();
+        rect.center() + egui::vec2(a.sin() * rect.width(), -a.cos() * rect.height()) * 0.44
+    });
+    let pointer = resp.interact_pointer_pos();
+    if resp.drag_started() {
+        let on_lamp = lamp.zip(pointer).is_some_and(|(l, p)| l.distance(p) < 14.0);
+        d.relight_drag = Some(on_lamp);
+    }
+    if resp.dragged() {
+        match (d.relight_drag, pointer) {
+            (Some(true), Some(p)) => {
+                let v = (p - rect.center()) / rect.size();
+                if v.length() > 0.02 {
+                    let shown = v.x.atan2(-v.y).to_degrees();
+                    st.effects.relight_direction = ((shown - turn + 180.0).rem_euclid(360.0) - 180.0).round();
+                }
+            }
+            (Some(false), _) => {
+                // Up is farther, as things higher in a photo mostly are.
+                let depth = st.effects.relight_depth - 100.0 * resp.drag_delta().y / rect.height();
+                st.effects.relight_depth = depth.clamp(0.0, 100.0);
+            }
+            _ => {}
+        }
+    }
+    if resp.drag_stopped() {
+        st.effects.relight_depth = st.effects.relight_depth.round();
+        d.relight_drag = None;
+        *done = Some(None);
+    }
+    if resp.clicked()
+        && let Some(p) = pointer
+    {
+        // (The picture is the whole photo, untransformed.)
+        let (u, v) = unrotate((p - rect.min) / rect.size(), rotation);
+        if let Some(far) = imaging::develop::depth_at(&id, u, v) {
+            let e = &mut st.effects;
+            (e.relight_depth, e.relight_at) = (far.round(), [u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)]);
+            if !e.relight_lights() {
+                e.relight_amount = 40.0;
+            }
+            *done = Some(Some("Relight: Light".into()));
+        }
+    }
+    if resp.hovered() || resp.dragged() {
+        let on_lamp = d.relight_drag == Some(true)
+            || (d.relight_drag.is_none()
+                && lamp.zip(resp.hover_pos()).is_some_and(|(l, p)| l.distance(p) < 14.0));
+        ui.ctx().set_cursor_icon(if on_lamp {
+            egui::CursorIcon::Grab
+        } else {
+            egui::CursorIcon::ResizeVertical
+        });
+    }
+
+    // The handle, where the light was put: a disc with an arrow up and one down.
+    let at = rotate((st.effects.relight_at[0], st.effects.relight_at[1]), rotation);
+    let c = rect.min + egui::vec2(at.0, at.1) * rect.size();
+    let c = egui::pos2(
+        c.x.clamp(rect.left() + 10.0, rect.right() - 10.0),
+        c.y.clamp(rect.top() + 10.0, rect.bottom() - 10.0),
+    );
+    painter.circle(c, 9.0, Color32::from_gray(245), egui::Stroke::new(1.0, Color32::from_gray(40)));
+    let ink = egui::Stroke::new(1.5, Color32::from_gray(40));
+    for dir in [-1.0f32, 1.0] {
+        let tip = c + egui::vec2(0.0, 5.5 * dir);
+        painter.line_segment([c + egui::vec2(0.0, 1.5 * dir), tip], ink);
+        painter.line_segment([tip, tip + egui::vec2(-2.5, -2.5 * dir)], ink);
+        painter.line_segment([tip, tip + egui::vec2(2.5, -2.5 * dir)], ink);
+    }
+    if let Some(l) = lamp {
+        // A small sun, and a line from it towards the middle.
+        let warm = Color32::from_rgb(255, 205, 90);
+        painter.line_segment([l, l + (rect.center() - l).normalized() * 16.0], egui::Stroke::new(1.5, warm));
+        painter.circle(l, 6.0, warm, egui::Stroke::new(1.0, Color32::from_gray(40)));
+    }
+    ui.add_space(2.0);
+    // (Turning the lamp is seen in the photo itself: only moving the light dims the rest.)
+    resp.dragged() && d.relight_drag == Some(false)
+}
+
 fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let Some(s) = &mut app.session else { return };
     let d = &mut s.develop;
@@ -2096,6 +2231,30 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             _ => {}
         }
         for p in params {
+            // Relight: Amount, where the light falls, Softness and Warmth; the rest under
+            // Advanced Settings.
+            let advanced = EffectParam::RELIGHT.contains(p)
+                && !matches!(
+                    p,
+                    EffectParam::RelightAmount | EffectParam::RelightFeather | EffectParam::RelightWarmth
+                );
+            if *p == EffectParam::RelightDepth {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let title = weak("Advanced Settings").size(12.0);
+                    let open = d.relight_advanced;
+                    let clicked = ui.add(egui::Label::new(title).sense(Sense::click())).clicked();
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let arrow = if open { "⏷" } else { "⏴" };
+                        if ui.add(egui::Button::new(arrow).frame(false)).clicked() || clicked {
+                            d.relight_advanced = !open;
+                        }
+                    });
+                });
+            }
+            if advanced && !d.relight_advanced {
+                continue;
+            }
             // As in LrC, the shape sliders only matter once there is an amount; Highlights
             // only when darkening in a style that protects them.
             let e = &st.effects;
@@ -2114,7 +2273,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 | EffectParam::RelightWarmthNear
                 | EffectParam::RelightWarmthFar => true,
                 EffectParam::RelightDepth | EffectParam::RelightRange | EffectParam::RelightFeather => {
-                    e.relights()
+                    e.relights() || e.fog_depth.is_some()
                 }
                 EffectParam::RelightSize | EffectParam::RelightShaping => e.relight_lights(),
                 EffectParam::RelightDirection => e.relight_shapes(),
@@ -2177,6 +2336,9 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
             if row.inner.done {
                 done = Some(None);
+            }
+            if *p == EffectParam::RelightAmount {
+                placing |= relight_placer(ui, d, &mut st, &mut done);
             }
             // Where the light falls shows while its place is being dragged.
             placing |= row.inner.held

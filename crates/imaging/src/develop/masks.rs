@@ -203,6 +203,34 @@ pub fn depth_at(id: &str, x: f32, y: f32) -> Option<f32> {
     Some(100.0 * (1.0 - f32::from(*around.get(around.len() / 2)?) / 255.0))
 }
 
+/// Where Relight's light falls, as a small picture (`long_side` pixels) of the whole
+/// untransformed photo in the file's orientation: white where the slice's light is full,
+/// black where there is none, by the depth map alone (its edges not fitted to the photo's;
+/// Shaping left out). For showing where the light is while it is placed. `None` without
+/// the depth map.
+pub fn relight_preview(e: &super::effects::Effects, long_side: u32) -> Option<image::GrayImage> {
+    let depth = mask_picture(e.fog_depth.as_ref()?)?;
+    let (w, h) = depth.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let k = long_side.max(16) as f32 / w.max(h) as f32;
+    let (pw, ph) = (((w as f32 * k).round() as u32).max(1), ((h as f32 * k).round() as u32).max(1));
+    let (radius, feather) = e.relight_area();
+    let (rounded, inner) = (e.relight_size < 100.0, 1.0 - feather / 100.0);
+    let half = w.max(h) as f32 / 2.0;
+    Some(image::GrayImage::from_fn(pw, ph, |x, y| {
+        let (u, v) = ((x as f32 + 0.5) / pw as f32, (y as f32 + 0.5) / ph as f32);
+        let mut lit = e.relight_weight(1.0 - f32::from(depth_value(&depth, u, v)) / 255.0);
+        if rounded {
+            let (dx, dy) = ((u - e.relight_at[0]) * w as f32, (v - e.relight_at[1]) * h as f32);
+            let d = (dx * dx + dy * dy).sqrt() / (radius * half);
+            lit *= 1.0 - smoothstep(inner, 1.0, d);
+        }
+        image::Luma([(lit * 255.0).round().clamp(0.0, 255.0) as u8])
+    }))
+}
+
 /// The depth map's value (0..255, more is nearer) at (u, v), 0..1 of the photo.
 fn depth_value(depth: &image::GrayImage, u: f32, v: f32) -> u8 {
     let (w, h) = depth.dimensions();

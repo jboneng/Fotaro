@@ -1843,6 +1843,13 @@ pub struct DevelopState {
     pub picking_light: bool,
     /// Show where Relight's light falls (while its place is being dragged).
     pub relight_view: bool,
+    /// The Relight panel's picture of where the light falls (and what it was made for).
+    pub relight_preview: Option<(u64, egui::TextureHandle)>,
+    /// A drag on that picture: of the lamp around it (the light's Direction), else of the
+    /// light nearer and farther.
+    pub relight_drag: Option<bool>,
+    /// Relight's Advanced Settings are open.
+    pub relight_advanced: bool,
     /// A Transform slider is being dragged: show a grid over the photo.
     pub transform_grid: bool,
     /// Masking mode (Shift+W), when on.
@@ -2015,6 +2022,9 @@ impl DevelopState {
             picking_focus: false,
             picking_light: false,
             relight_view: false,
+            relight_preview: None,
+            relight_drag: None,
+            relight_advanced: false,
             transform_grid: false,
             masking: None,
             brush: BrushSettings::default(),

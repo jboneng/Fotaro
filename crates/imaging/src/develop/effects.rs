@@ -181,6 +181,29 @@ impl Effects {
         self.relight_lights() && self.relight_shaping > 0.0
     }
 
+    /// Where Relight's slice begins and ends (0..1 far), each the middle of a turn as wide
+    /// as the second value to either side: Range is how deep the slice is fully lit.
+    pub(super) fn relight_slice(&self) -> ([f32; 2], f32) {
+        let depth = self.relight_depth.clamp(0.0, 100.0) / 100.0;
+        let half = 0.005 + 0.12 * self.relight_feather.clamp(0.0, 100.0) / 100.0;
+        let reach = 0.5 * self.relight_range.clamp(0.0, 100.0) / 100.0 + half;
+        ([depth - reach, depth + reach], half)
+    }
+
+    /// How much of the slice's light something `far` away gets (0: the nearest thing in
+    /// the photo, 1: the farthest), before Size and Shaping: 0..1.
+    pub fn relight_weight(&self, far: f32) -> f32 {
+        let ([front, back], half) = self.relight_slice();
+        smoothstep(front - half, front + half, far) * (1.0 - smoothstep(back - half, back + half, far))
+    }
+
+    /// The round area Size keeps the light to: its radius (of half the photo's longer
+    /// side: small steps where the area is small) and the share of it that fades (0..100).
+    pub fn relight_area(&self) -> (f32, f32) {
+        let t = (self.relight_size / 100.0).clamp(0.0, 1.0);
+        (0.04 + 1.6 * t * t, 75.0)
+    }
+
     /// That light is kept to a round area.
     pub fn relight_spots(&self) -> bool {
         self.relight_lights() && self.relight_size < 100.0
@@ -235,9 +258,7 @@ impl Relight {
             let grey = luma[0] * tint[0] + luma[1] * tint[1] + luma[2] * tint[2];
             tint.map(|t| gain * t / grey)
         };
-        let depth = e.relight_depth.clamp(0.0, 100.0) / 100.0;
-        let half = 0.005 + 0.12 * e.relight_feather.clamp(0.0, 100.0) / 100.0;
-        let reach = 0.5 * e.relight_range.clamp(0.0, 100.0) / 100.0 + half;
+        let (edges, half) = e.relight_slice();
         let light = gains(e.relight_amount, e.relight_warmth);
         // From above at 0°, from the right at 90°.
         let (turn, up) = (e.relight_direction.to_radians(), RELIGHT_HEIGHT.to_radians());
@@ -247,7 +268,7 @@ impl Relight {
                 light,
                 gains(e.relight_far, e.relight_warmth_far),
             ],
-            edges: [depth - reach, depth + reach],
+            edges,
             half,
             spot: e.relight_spots(),
             show: e.relight_show,
@@ -414,10 +435,10 @@ impl EffectParam {
         [Self::BlurAmount, Self::BlurFocus, Self::BlurRange, Self::BlurHighlights];
     pub const RELIGHT: [EffectParam; 12] = [
         Self::RelightAmount,
+        Self::RelightFeather,
         Self::RelightWarmth,
         Self::RelightDepth,
         Self::RelightRange,
-        Self::RelightFeather,
         Self::RelightSize,
         Self::RelightShaping,
         Self::RelightDirection,
@@ -454,10 +475,10 @@ impl EffectParam {
             Self::RelightSize => "Size",
             Self::RelightShaping => "Shaping",
             Self::RelightDirection => "Direction",
-            Self::RelightNear => "Near",
-            Self::RelightFar => "Far",
+            Self::RelightNear => "Brightness Near",
+            Self::RelightFar => "Brightness Far",
             Self::RelightDepth => "Depth",
-            Self::RelightFeather => "Feather",
+            Self::RelightFeather => "Softness",
             Self::RelightWarmthNear => "Warmth Near",
             Self::RelightWarmthFar => "Warmth Far",
         }

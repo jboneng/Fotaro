@@ -58,8 +58,8 @@ pub use lut::{
 };
 pub use masks::{
     CombineMode, Component, DepthRange, LocalAdjust, LocalParam, Mask, Shape, Stroke, depth_at,
-    mask_depth_span, mask_nearness, mask_picture, save_fill_picture, save_mask_picture, set_mask_store,
-    subject_by_depth,
+    mask_depth_span, mask_nearness, mask_picture, relight_preview, save_fill_picture, save_mask_picture,
+    set_mask_store, subject_by_depth,
 };
 pub use pipeline::{
     Region, auto_tone, render_linear16, render_mask, render_region_srgb8, render_region_srgb8_until,
