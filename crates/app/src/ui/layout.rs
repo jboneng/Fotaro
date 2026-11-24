@@ -654,7 +654,12 @@ pub fn draw(app: &mut FotaroApp, ui: &mut egui::Ui) {
             app.panel_rects.push(r.response.rect);
         }
         match app.view {
-            _ if develop => super::develop::center(app, ui),
+            _ if develop => {
+                super::develop::center(app, ui);
+                // Asking before a model's first download, whatever tool is open (Relight's
+                // surface map and the depth map are asked for from the panels).
+                super::masking::ai_consent(app, ui.ctx());
+            }
             View::Grid => timed("grid", || views::grid(app, ui)),
             View::Loupe => views::loupe(app, ui),
             View::Compare => views::compare(app, ui),

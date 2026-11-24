@@ -890,7 +890,6 @@ pub fn center(app: &mut FotaroApp, ui: &mut egui::Ui) {
         if super::remove::canvas(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter) {
             app.run(Command::DevelopCommit(None));
         }
-        super::masking::ai_consent(app, ui.ctx());
         return;
     }
     if cropping {
@@ -902,7 +901,6 @@ pub fn center(app: &mut FotaroApp, ui: &mut egui::Ui) {
     if masking {
         let commit = super::masking::canvas(ui, &resp, &mut s.develop, photo.rotation, img_rect, &painter);
         super::masking::masks_panel(app, ui.ctx(), rect);
-        super::masking::ai_consent(app, ui.ctx());
         if commit {
             app.run(Command::DevelopCommit(None));
         }
