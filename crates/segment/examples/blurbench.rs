@@ -5,6 +5,9 @@
 //! `range`, `highlights` (Lens Blur's sliders), `light`, `warm`, `depth`, `lrange`,
 //! `feather`, `size`, `near`, `far`, `warmnear`, `warmfar` (Relight's), `lat=x,y` (put
 //! Relight's light on that point of the photo, 0..1), `lshow` (show where it falls),
+//! `shape` and `dir` (Relight's Shaping and Direction; needs `surface.onnx`, MoGe-2 Small,
+//! in the models dir), `surfshow` (the surface map in place of the photo), `surf=<side>`
+//! (only try the surface model at that size, on both devices),
 //! `show` (the depth map in place of the photo), `proxy` (the long side rendered, default
 //! 2560; 0 for full size), `at=x,y` (take Focus from that point of the photo, 0..1),
 //! `crop=x,y,w,h` (render only that part, in pixels) and `name` (the output's name:
@@ -105,6 +108,30 @@ fn main() -> anyhow::Result<()> {
     s.effects.relight_range = number("lrange", s.effects.relight_range);
     s.effects.relight_size = number("size", s.effects.relight_size);
     s.effects.relight_show = value("lshow").is_some();
+    // Shaping: `shape` (and `dir`, degrees) with the photo's surface map, made once and
+    // kept in the out dir like the depth map; `surfshow` shows it.
+    if value("shape").is_some() || value("surfshow").is_some() {
+        let surface = format!("{stem}_surface");
+        if imaging::develop::mask_picture(&format!("{surface}-x")).is_none() {
+            let (img, _) = imaging::decode(&photo, kind, 2048)?;
+            let [x, y] = [Device::DirectMl, Device::Cpu]
+                .into_iter()
+                .find_map(|device| {
+                    let made = Model::load(&models.join("surface.onnx"), device).and_then(|mut model| {
+                        let (side, tokens) = (segment::SURFACE_SIDE, segment::SURFACE_TOKENS);
+                        segment::surface_pictures(&mut model, &img, side, tokens)
+                    });
+                    made.inspect_err(|e| println!("surface on {}: {e:#}", device.label())).ok()
+                })
+                .ok_or_else(|| anyhow::anyhow!("no surface map"))?;
+            imaging::develop::save_mask_picture(&format!("{surface}-x"), &x)?;
+            imaging::develop::save_mask_picture(&format!("{surface}-y"), &y)?;
+        }
+        s.effects.relight_surface = Some(surface);
+        s.effects.relight_shaping = number("shape", 0.0);
+        s.effects.relight_direction = number("dir", 0.0);
+        s.effects.surface_show = value("surfshow").is_some();
+    }
     s.effects.relight_near = number("near", 0.0);
     s.effects.relight_far = number("far", 0.0);
     s.effects.relight_depth = number("depth", s.effects.relight_depth);

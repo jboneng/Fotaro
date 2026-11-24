@@ -780,6 +780,10 @@ pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
                 "Depth Range".to_owned(),
                 "the model that works out how far away everything in a photo is".to_owned(),
             ),
+            AiKind::Surface => (
+                "Relight".to_owned(),
+                "the model that works out which way every surface in a photo faces".to_owned(),
+            ),
             k => (
                 format!("Select {}", k.label()),
                 format!("the model that finds the {}", k.label().to_lowercase()),
@@ -818,6 +822,7 @@ pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
         Some(false) => {
             d.fill_declined |= kind == AiKind::Remove;
             d.fog_declined |= consent.target == ToolTarget::FogMap;
+            d.surface_declined |= consent.target == ToolTarget::SurfaceMap;
             d.ai_consent = None;
         }
         None => {}

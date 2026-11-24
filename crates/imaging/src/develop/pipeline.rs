@@ -199,11 +199,57 @@ fn relight_spot(
     MaskField::build_for(source, shown, &map, vec![0], region).map(Arc::new)
 }
 
-/// What Relight needs of the photo around a region: how near everything is, and where its
-/// light's round area is.
+/// Which way every surface in `region` of `shown` faces, for Relight's Shaping: the
+/// photo's surface map read as two masks (how far each surface leans right, and down:
+/// half is not at all), so it follows the crop and the transform and has its edges fitted
+/// to the photo's. `None` when nothing asks for it, or without a surface map.
+fn surface(
+    source: &WorkingImage,
+    shown: &WorkingImage,
+    s: &DevelopSettings,
+    region: Region,
+) -> Option<Arc<MaskField>> {
+    let e = &s.effects;
+    let id = e.relight_surface.as_ref().filter(|_| e.relight_shapes() || e.surface_show)?;
+    let lean = |axis: &str| {
+        let id = format!("{id}-{axis}");
+        super::masks::mask_picture(&id)?;
+        let shape =
+            super::masks::Shape::Raster { id, selects: "Surface".into(), model: String::new(), range: None };
+        Some(Mask::new("Surface", shape))
+    };
+    let map = [lean("x")?, lean("y")?];
+    let field = MaskField::build_for(source, shown, &map, vec![0, 1], region).map(Arc::new);
+    super::perf::mark("surface for relight");
+    field
+}
+
+/// A direction across the developed photo `shown` (x to the right, y down), as the same
+/// direction across the untransformed photo: turned and mirrored as the Transform turns
+/// and mirrors the photo (taken at its middle; perspective is not followed).
+fn across_source(shown: &WorkingImage, v: [f32; 2]) -> [f32; 2] {
+    let Some(m) = shown.warp_source else { return v };
+    let (cx, cy) = (f64::from(shown.width()) / 2.0, f64::from(shown.height()) / 2.0);
+    let (Some(o), Some(a), Some(b)) = (m.source(cx, cy), m.source(cx + 8.0, cy), m.source(cx, cy + 8.0))
+    else {
+        return v;
+    };
+    // Where a step right, and a step down, in the developed photo lead in the source.
+    let unit = |p: (f64, f64)| {
+        let (x, y) = (p.0 - o.0, p.1 - o.1);
+        let len = (x * x + y * y).sqrt().max(1e-9);
+        [(x / len) as f32, (y / len) as f32]
+    };
+    let (right, down) = (unit(a), unit(b));
+    [v[0] * right[0] + v[1] * down[0], v[0] * right[1] + v[1] * down[1]]
+}
+
+/// What Relight needs of the photo around a region: how near everything is, where its
+/// light's round area is, and which way everything faces.
 struct Lights<'a> {
     depth: &'a dyn Fn(Region) -> Option<Arc<MaskField>>,
     spot: &'a dyn Fn(Region) -> Option<Arc<MaskField>>,
+    surface: &'a dyn Fn(Region) -> Option<Arc<MaskField>>,
 }
 
 /// Relight looks at what is around each pixel on a coarser grid: a cell's side in pixels,
@@ -261,6 +307,8 @@ struct Prepared {
     /// Show Depth: the depth map (how near each pixel of the region is) in place of the
     /// photo.
     depth_shown: Option<Arc<MaskField>>,
+    /// Show Surface: the surface map (how each pixel of the region leans) likewise.
+    surface_shown: Option<Arc<MaskField>>,
     /// Profile: a 3D LUT after the base tone, when set (and its file is there).
     lut: Option<super::lut::PreparedLut>,
     /// Lens Corrections' Defringe, when on.
@@ -279,6 +327,9 @@ struct Relit {
     shares: [Option<Arc<Vec<f32>>>; 2],
     /// How much of the slice's light reaches each pixel, when kept to a round area.
     spot: Option<Arc<MaskField>>,
+    /// With Shaping: how each pixel of the region leans (right, down: half is not at
+    /// all), and where the light comes from across the untransformed photo.
+    facing: Option<(Arc<MaskField>, [f32; 2])>,
 }
 
 impl Prepared {
@@ -341,6 +392,7 @@ impl Prepared {
             fog: None,
             relight: None,
             depth_shown: nearness.clone().filter(|_| s.effects.fog_show),
+            surface_shown: if s.effects.surface_show { (lights.surface)(region) } else { None },
             lut: s.profile.as_ref().and_then(super::lut::PreparedLut::new),
             fringe: None,
         };
@@ -377,7 +429,9 @@ impl Prepared {
                         .then(|| Arc::new(prep.light_share(img, &relight, edge, region, &wide, around)))
                 });
                 let spot = (lights.spot)(region);
-                prep.relight = Some(Relit { relight, near: near.clone(), shares, spot });
+                let facing = if relight.shapes() { (lights.surface)(region) } else { None };
+                let facing = facing.map(|f| (f, across_source(img, relight.from())));
+                prep.relight = Some(Relit { relight, near: near.clone(), shares, spot, facing });
             }
             super::perf::mark("relight");
         }
@@ -411,10 +465,11 @@ impl Prepared {
         if s.effects.glow_amount > 0.0 {
             let (gains, locals, fog) = (prep.gains.take(), prep.locals.take(), prep.fog.take());
             let (shown, relight) = (prep.depth_shown.take(), prep.relight.take());
+            let surface = prep.surface_shown.take();
             let (w, h) = (img.width() as usize, img.height() as usize);
             prep.glow = Glow::new(&s.effects, w, h, prep.luma, |x, y| prep.pixel(input_at(img, x, y), x, y));
             (prep.gains, prep.locals, prep.fog, prep.depth_shown) = (gains, locals, fog, shown);
-            prep.relight = relight;
+            (prep.relight, prep.surface_shown) = (relight, surface);
             super::perf::mark("glow");
         }
         prep
@@ -694,6 +749,12 @@ impl Prepared {
             let v = near.at(x, y)[0];
             return [v * v; 3];
         }
+        if let Some(lean) = &self.surface_shown {
+            // As such maps are drawn: leaning right redder, up greener, facing bluer.
+            let (x, y) = (2.0 * lean.at(x, y)[0] - 1.0, 2.0 * lean.at(x, y)[1] - 1.0);
+            let z = (1.0 - x * x - y * y).max(0.0).sqrt();
+            return [x, -y, z].map(|v| (0.5 + 0.5 * v).powi(2));
+        }
         let mut lin = self.linear(p);
         // Masks: how much of each active mask applies here.
         let masks = self.locals.as_ref().map(|l| (l, l.field.at(x, y)));
@@ -720,7 +781,11 @@ impl Prepared {
                 None => lit.relight.nearer(edge, far),
             });
             let spot = lit.spot.as_ref().map_or(1.0, |s| s.at(x, y)[0]);
-            let mut by = lit.relight.gains(front, back, spot);
+            let facing = lit.facing.as_ref().map(|(lean, from)| {
+                let lean = lean.at(x, y);
+                lit.relight.facing([2.0 * lean[0] - 1.0, 2.0 * lean[1] - 1.0], *from)
+            });
+            let mut by = lit.relight.gains(front, back, spot, facing);
             if lit.relight.show {
                 // What the slice's light does not reach, dimmed.
                 let dim = 0.25 + 0.75 * ((back - front) * spot).clamp(0.0, 1.0);
@@ -1090,8 +1155,11 @@ pub fn render_region_srgb8_until(
     if stop() {
         return None;
     }
-    let lights =
-        Lights { depth: &|r| nearness(source, img, s, r), spot: &|r| relight_spot(source, img, s, r) };
+    let lights = Lights {
+        depth: &|r| nearness(source, img, s, r),
+        spot: &|r| relight_spot(source, img, s, r),
+        surface: &|r| surface(source, img, s, r),
+    };
     let prep = Prepared::new(img, s, region, field, &lights);
     if stop() {
         return None;
@@ -1183,8 +1251,11 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
         });
         return out;
     }
-    let lights =
-        Lights { depth: &|r| nearness(source, img, s, r), spot: &|r| relight_spot(source, img, s, r) };
+    let lights = Lights {
+        depth: &|r| nearness(source, img, s, r),
+        spot: &|r| relight_spot(source, img, s, r),
+        surface: &|r| surface(source, img, s, r),
+    };
     let prep = Prepared::new(img, s, region, MaskField::build(source, img, &s.masks, region), &lights);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         o.copy_from_slice(&finish.apply(prep.pixel(p, x, y), x, y).map(to_u16));
@@ -1254,7 +1325,11 @@ impl Detailed {
             None => {
                 let near = nearness(source, img, s, area);
                 let depth = |r: Region| if r == area { near.clone() } else { nearness(source, img, s, r) };
-                let lights = Lights { depth: &depth, spot: &|r| relight_spot(source, img, s, r) };
+                let lights = Lights {
+                    depth: &depth,
+                    spot: &|r| relight_spot(source, img, s, r),
+                    surface: &|r| surface(source, img, s, r),
+                };
                 let prep = Prepared::new(img, s, area, field.clone(), &lights);
                 if stop() {
                     return None;
@@ -1365,7 +1440,7 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
         effects: Effects::default(),
         ..s.clone()
     };
-    let none = Lights { depth: &|_| None, spot: &|_| None };
+    let none = Lights { depth: &|_| None, spot: &|_| None, surface: &|_| None };
     let prep = Prepared::new(img, &neutral, Region::whole(img), None, &none);
     // Luminance in stops from middle grey, on a sample of pixels.
     let px = img.pixels.as_raw().as_chunks::<3>().0;

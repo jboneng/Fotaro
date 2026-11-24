@@ -1176,6 +1176,90 @@ fn relight_lights_a_slice_of_the_depth_and_keeps_it_to_a_round_area() {
 }
 
 #[test]
+fn relight_shapes_its_light_by_which_way_surfaces_face() {
+    // Mid grey with a little texture, all of it as far away.
+    let img: RgbImage = ImageBuffer::from_fn(200, 100, |x, y| {
+        let n = ((x * 7 + y * 13) % 5) as u8;
+        Rgb([110 + n, 110 + n, 110 + n])
+    });
+    let w = rendered(&img);
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("flat-depth", &image::GrayImage::from_pixel(50, 25, image::Luma([128]))).unwrap();
+    // The left half leans left, the right half right; a band along the top faces the
+    // camera (as the sky is taken to).
+    let leans = image::GrayImage::from_fn(100, 50, |x, y| {
+        image::Luma([if y < 14 {
+            128
+        } else if x < 50 {
+            50
+        } else {
+            205
+        }])
+    });
+    save_mask_picture("faces-x", &leans).unwrap();
+    save_mask_picture("faces-y", &image::GrayImage::from_pixel(100, 50, image::Luma([128]))).unwrap();
+    let far = depth_at("flat-depth", 0.5, 0.5).unwrap();
+    let relight = |change: &dyn Fn(&mut Effects)| {
+        let mut e = Effects {
+            relight_amount: 50.0,
+            relight_depth: far,
+            relight_shaping: 80.0,
+            relight_direction: -90.0,
+            fog_depth: Some("flat-depth".into()),
+            relight_surface: Some("faces".into()),
+            ..Effects::default()
+        };
+        change(&mut e);
+        DevelopSettings { effects: e, ..Default::default() }
+    };
+    let lum = |i: &RgbImage, x: u32, y: u32| f32::from(i.get_pixel(x, y)[1]);
+    let even = render_srgb8(&w, &relight(&|e| e.relight_shaping = 0.0));
+    // From the left: what leans left gets more of the light, what leans right less; what
+    // faces the camera gets what it got.
+    let s = relight(&|_| {});
+    let out = render_srgb8(&w, &s);
+    assert!(lum(&out, 40, 70) > lum(&even, 40, 70) + 10.0, "facing the light");
+    assert!(lum(&out, 160, 70) < lum(&even, 160, 70) - 10.0, "facing away");
+    assert!((lum(&out, 100, 6) - lum(&even, 100, 6)).abs() <= 2.0, "facing the camera");
+    // From the right: the other way round. From above: neither side differs.
+    let right = render_srgb8(&w, &relight(&|e| e.relight_direction = 90.0));
+    assert!(lum(&right, 160, 70) > lum(&even, 160, 70) + 10.0);
+    assert!(lum(&right, 40, 70) < lum(&even, 40, 70) - 10.0);
+    let above = render_srgb8(&w, &relight(&|e| e.relight_direction = 0.0));
+    assert!((lum(&above, 40, 70) - lum(&above, 160, 70)).abs() <= 2.0);
+    // More Shaping, more of it.
+    let less = render_srgb8(&w, &relight(&|e| e.relight_shaping = 30.0));
+    assert!(lum(&less, 40, 70) < lum(&out, 40, 70) && lum(&less, 40, 70) > lum(&even, 40, 70));
+    // Without the surface map, or without the light, Shaping does nothing.
+    assert_eq!(render_srgb8(&w, &relight(&|e| e.relight_surface = None)), even);
+    let dark = relight(&|e| e.relight_amount = 0.0);
+    assert_eq!(render_srgb8(&w, &dark), render_srgb8(&w, &DevelopSettings::default()));
+    // Shown: the map itself, leaning left less red than leaning right.
+    let shown = render_srgb8(&w, &relight(&|e| e.surface_show = true));
+    assert!(shown.get_pixel(40, 70)[0] + 60 < shown.get_pixel(160, 70)[0], "the map is shown");
+    // Regions render like the whole.
+    let part = render_region_srgb8(&w, &s, Region { x: 60, y: 5, w: 100, h: 80 });
+    for (x, y, p) in part.enumerate_pixels() {
+        let q = out.get_pixel(x + 60, y + 5);
+        assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+    }
+    // Each of them counts in the hash, and all are kept as written.
+    for other in [
+        relight(&|e| e.relight_shaping = 81.0),
+        relight(&|e| e.relight_direction = -89.0),
+        relight(&|e| e.relight_surface = Some("other".into())),
+        relight(&|e| e.surface_show = true),
+    ] {
+        assert_ne!(s.stable_hash(), other.stable_hash());
+    }
+    assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap(), s);
+    assert_eq!(EffectParam::RelightDirection.range(), (-180.0, 180.0));
+    set_mask_store(None);
+}
+
+#[test]
 fn lens_blur_blurs_what_is_out_of_focus_and_regions_still_match() {
     // Fine stripes everywhere; near on the left half, far on the right.
     let img: RgbImage = ImageBuffer::from_fn(400, 200, |x, y| {

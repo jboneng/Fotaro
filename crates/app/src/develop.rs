@@ -178,6 +178,10 @@ pub enum ToolTarget {
     FogMapAgain,
     /// Not kept as a mask: Relight's light is put on what it selects.
     Light,
+    /// Not a mask either: the photo's surface map, for Relight's Shaping.
+    SurfaceMap,
+    /// The same, made afresh although the photo has one.
+    SurfaceMapAgain,
 }
 
 /// A tool waiting for a drag on the photo.
@@ -312,6 +316,8 @@ pub enum AiKind {
     /// A Depth Range set to what is near, and one set to what is far.
     DepthNear,
     DepthFar,
+    /// Which way everything in the photo faces (a surface map, made by a model).
+    Surface,
 }
 
 impl AiKind {
@@ -327,6 +333,7 @@ impl AiKind {
             AiKind::Depth => "Depth Range",
             AiKind::DepthNear => "Foreground (Depth)",
             AiKind::DepthFar => "Background (Depth)",
+            AiKind::Surface => "Surface",
         }
     }
 
@@ -344,6 +351,7 @@ impl AiKind {
             AiKind::Dust => segment::AiModel::Scratches,
             AiKind::People => segment::AiModel::People,
             AiKind::Depth | AiKind::DepthNear | AiKind::DepthFar => segment::AiModel::Depth,
+            AiKind::Surface => segment::AiModel::Surface,
         }
     }
 
@@ -484,6 +492,56 @@ fn depth_for(
     imaging::develop::save_mask_picture(&id, &map)?;
     set(before.0, before.1);
     Ok((Some(Arc::new(map)), Some(id)))
+}
+
+/// Make the surface map of `rgb` (the photo developed, upright by `rotation`): download
+/// what is missing, run the model, and keep its two pictures in the file's orientation
+/// (the directions in them turned back with the pictures). Returns the map's id and the
+/// device that ran it.
+fn run_surface(
+    photo_id: i64,
+    job: &AiJob,
+    rgb: &image::RgbImage,
+    rotation: u8,
+    gpu: bool,
+    ctx: &egui::Context,
+) -> Result<(String, &'static str)> {
+    use image::imageops::{invert, rotate90, rotate180, rotate270};
+    let set = |share: f32, what: String| {
+        *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (share, what);
+        ctx.request_repaint();
+    };
+    let model = segment::AiModel::Surface;
+    if !segment::ready(&[model]) {
+        let mut last = std::time::Instant::now();
+        segment::ensure(&[model], &mut |share, what| {
+            if last.elapsed().as_millis() > 100 {
+                last = std::time::Instant::now();
+                set(share, format!("Downloading {what}"));
+            }
+        })?;
+    }
+    set(-1.0, "Working out which way everything faces…".to_owned());
+    let started = std::time::Instant::now();
+    let ([right, down], device) = segment::select_surface(rgb, gpu)?;
+    log::info!("Surface map on {} in {:.0?}", device.label(), started.elapsed());
+    // Back to the file's orientation: the pictures turned, and what leans right in the
+    // upright photo leans some other way in the file.
+    let negated = |mut picture: image::GrayImage| {
+        invert(&mut picture);
+        picture
+    };
+    let (x, y) = match rotation % 4 {
+        1 => (rotate270(&down), rotate270(&negated(right))),
+        2 => (rotate180(&negated(right)), rotate180(&negated(down))),
+        3 => (rotate90(&negated(down)), rotate90(&right)),
+        _ => (right, down),
+    };
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let id = format!("{photo_id}-{:x}", stamp.as_nanos());
+    imaging::develop::save_mask_picture(&format!("{id}-x"), &x)?;
+    imaging::develop::save_mask_picture(&format!("{id}-y"), &y)?;
+    Ok((id, device.label()))
 }
 
 /// Make an AI mask of `rgb` (the photo as displayed, `rotation` quarter turns from the
@@ -1507,14 +1565,19 @@ fn worker(
             std::thread::Builder::new()
                 .name("ai-mask".into())
                 .spawn(move || {
-                    let result = depth_for(photo_id, &job, depth, Some(&rgb), rotation, gpu, &ctx)
-                        .and_then(|(depth, made)| {
-                            if let Some(id) = made {
-                                let _ = tx.send(Reply::DepthMade { photo_id, id });
-                            }
-                            run_ai(photo_id, &job, &rgb, size, key, rotation, gpu, depth, &ctx)
-                        })
-                        .map_err(|e| format!("{e:#}"));
+                    let result = if job.kind == AiKind::Surface {
+                        run_surface(photo_id, &job, &rgb, rotation, gpu, &ctx)
+                    } else {
+                        depth_for(photo_id, &job, depth, Some(&rgb), rotation, gpu, &ctx).and_then(
+                            |(depth, made)| {
+                                if let Some(id) = made {
+                                    let _ = tx.send(Reply::DepthMade { photo_id, id });
+                                }
+                                run_ai(photo_id, &job, &rgb, size, key, rotation, gpu, depth, &ctx)
+                            },
+                        )
+                    }
+                    .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Reply::Selected { photo_id, result });
                     ctx.request_repaint();
                 })
@@ -1826,6 +1889,11 @@ pub struct DevelopState {
     pub fog_declined: bool,
     /// Effects ▸ Fog ▸ Show Depth: the photo's depth map in place of the photo.
     pub show_depth: bool,
+    /// The same for the photo's surface map (Relight's Shaping), and Show Surface.
+    pub surface_declined: bool,
+    pub show_surface: bool,
+    /// The surface map is to be made again once the depth map has been.
+    surface_again: bool,
     pub fill_allowed: bool,
     pub fill_declined: bool,
     /// Remove at best quality (big-LaMa) instead of fast (LaMa-Dilated).
@@ -1974,6 +2042,9 @@ impl DevelopState {
             fill_failed: Vec::new(),
             fog_declined: false,
             show_depth: false,
+            surface_declined: false,
+            show_surface: false,
+            surface_again: false,
             fill_allowed: false,
             fill_declined: false,
             remove_best: true,
@@ -2036,6 +2107,7 @@ impl DevelopState {
         self.fill_failed.clear();
         self.fog_declined = false;
         self.show_depth = false;
+        (self.surface_declined, self.show_surface, self.surface_again) = (false, false, false);
         self.dust_job = None;
         self.dust_failed.clear();
         self.sensor_finding = false;
@@ -2205,6 +2277,7 @@ impl DevelopState {
         }
         self.request_fills();
         self.request_fog_depth();
+        self.request_surface();
         // The Masks panel's thumbnails, while it is open and the masks changed.
         if self.masking.is_some() && self.thumbs_sent.as_ref() != Some(&self.settings.masks) {
             self.thumbs_seq += 1;
@@ -2471,6 +2544,8 @@ impl DevelopState {
                             log::warn!("AI mask: {e}");
                             self.fog_declined |=
                                 matches!(job.target, ToolTarget::FogMap | ToolTarget::FogMapAgain);
+                            self.surface_declined |=
+                                matches!(job.target, ToolTarget::SurfaceMap | ToolTarget::SurfaceMapAgain);
                             self.error =
                                 Some(format!("Couldn't select the {}: {e}", job.kind.label().to_lowercase()));
                         }
@@ -2747,7 +2822,27 @@ impl DevelopState {
     /// Make the photo's depth map again (after the photo changed a lot, or to get a map
     /// from a newer version of the model).
     pub fn remake_depth(&mut self) {
+        self.surface_again = self.settings.effects.relight_surface.is_some();
         self.request_ai(AiKind::Depth, ToolTarget::FogMapAgain, None);
+    }
+
+    /// Relight's Shaping needs the photo's surface map: have it made when Shaping is on
+    /// (or Show Surface) and there is none, or when it is to be made again (asking before
+    /// the model's first download, once).
+    fn request_surface(&mut self) {
+        if self.ai_job.is_some() || self.ai_consent.is_some() {
+            return;
+        }
+        if self.surface_again {
+            self.surface_again = false;
+            self.request_ai(AiKind::Surface, ToolTarget::SurfaceMapAgain, None);
+            return;
+        }
+        let e = &self.settings.effects;
+        if (e.relight_shapes() || self.show_surface) && e.relight_surface.is_none() && !self.surface_declined
+        {
+            self.request_ai(AiKind::Surface, ToolTarget::SurfaceMap, None);
+        }
     }
 
     /// Make an AI mask (downloading first whatever it still needs).
@@ -2796,6 +2891,13 @@ impl DevelopState {
             st.effects.fog_depth = Some(id);
             self.set_live(st);
             return self.commit(catalog, Some(if again { "New Depth Map" } else { "Depth Map" }.into()));
+        }
+        if matches!(job.target, ToolTarget::SurfaceMap | ToolTarget::SurfaceMapAgain) {
+            let again = job.target == ToolTarget::SurfaceMapAgain;
+            let mut st = self.settings.clone();
+            st.effects.relight_surface = Some(id);
+            self.set_live(st);
+            return self.commit(catalog, Some(if again { "New Surface Map" } else { "Surface Map" }.into()));
         }
         if job.target == ToolTarget::Light {
             // Relight's light on the subject: its slice where the subject is and as deep,
@@ -3044,6 +3146,7 @@ impl DevelopState {
         }
         s.effects.fog_show = self.show_depth && !self.before;
         s.effects.relight_show = self.relight_view && !self.before;
+        s.effects.surface_show = self.show_surface && !self.before;
         s
     }
 

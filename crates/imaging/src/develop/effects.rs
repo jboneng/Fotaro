@@ -68,6 +68,10 @@ pub struct Effects {
     /// The photo's depth map (a picture in the mask store, white near), made by a model
     /// when Fog is first used on the photo. Belongs to its photo: not copied to others.
     pub fog_depth: Option<String>,
+    /// The photo's surface map (two pictures in the mask store, `<id>-x` and `<id>-y`:
+    /// how far each surface leans right and down, mid grey not at all), made by a model
+    /// when Relight's Shaping is first used on the photo. Belongs to its photo too.
+    pub relight_surface: Option<String>,
     /// Lens Blur, by the same depth map: Amount 0..100; Focus 0..100 (the distance that
     /// stays sharp, 0: the nearest thing in the photo); Range 0..100 (how deep the sharp
     /// zone is); Highlights 0..100 (how much bright points stand out in the blur).
@@ -82,6 +86,11 @@ pub struct Effects {
     /// gradually it turns to near and far); Size 0..100 (the round area around
     /// `relight_at` its light is kept to, 100: the whole photo); Near, Far and their
     /// Warmths −100..+100.
+    /// Shaping 0..100 (how much the slice's light goes by which way a surface faces, by
+    /// the surface map) and Direction −180..+180 degrees (where that light comes from in
+    /// the developed photo: 0 from above, 90 from the right).
+    pub relight_shaping: f32,
+    pub relight_direction: f32,
     pub relight_amount: f32,
     pub relight_warmth: f32,
     pub relight_range: f32,
@@ -100,6 +109,9 @@ pub struct Effects {
     /// For looking only (never kept): dim what Relight's slice does not light.
     #[serde(skip)]
     pub relight_show: bool,
+    /// For looking only (never kept): render the surface map in place of the photo.
+    #[serde(skip)]
+    pub surface_show: bool,
 }
 
 impl Default for Effects {
@@ -124,6 +136,9 @@ impl Default for Effects {
             fog_height: 0.0,
             fog_warmth: 0.0,
             fog_depth: None,
+            relight_surface: None,
+            relight_shaping: 0.0,
+            relight_direction: 0.0,
             blur_amount: 0.0,
             blur_focus: 15.0,
             blur_range: 20.0,
@@ -141,6 +156,7 @@ impl Default for Effects {
             relight_warmth_far: 0.0,
             fog_show: false,
             relight_show: false,
+            surface_show: false,
         }
     }
 }
@@ -160,6 +176,11 @@ impl Effects {
         self.relight_amount != 0.0 || self.relight_warmth != 0.0
     }
 
+    /// That light goes by which way surfaces face (which needs the photo's surface map).
+    pub fn relight_shapes(&self) -> bool {
+        self.relight_lights() && self.relight_shaping > 0.0
+    }
+
     /// That light is kept to a round area.
     pub fn relight_spots(&self) -> bool {
         self.relight_lights() && self.relight_size < 100.0
@@ -174,6 +195,9 @@ impl Effects {
 /// Stops of exposure for Relight's Amount, Near or Far at ±100.
 const RELIGHT_STOPS: f32 = 2.0;
 
+/// How far off the picture's plane Relight's light is, towards the camera (degrees).
+const RELIGHT_HEIGHT: f32 = 35.0;
+
 /// Relight as the settings ask for it: what each distance's light is multiplied by.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Relight {
@@ -187,11 +211,18 @@ pub(super) struct Relight {
     pub spot: bool,
     /// Show where the slice's light falls.
     pub show: bool,
+    /// Shaping, 0..1: how much the slice's light goes by which way a surface faces.
+    shaping: f32,
+    /// Where that light comes from, as seen in the developed photo: a unit direction (x
+    /// to the right, y down, z towards the camera).
+    from: [f32; 3],
+    /// The slice's gains' natural logarithms (for more and less of its light).
+    ln_light: [f32; 3],
 }
 
 impl Relight {
     pub fn new(e: &Effects, luma: [f32; 3]) -> Option<Relight> {
-        if !e.relights() || e.fog_show {
+        if !e.relights() || e.fog_show || e.surface_show {
             return None;
         }
         let part = |v: f32| (v / 100.0).clamp(-1.0, 1.0);
@@ -207,17 +238,44 @@ impl Relight {
         let depth = e.relight_depth.clamp(0.0, 100.0) / 100.0;
         let half = 0.005 + 0.12 * e.relight_feather.clamp(0.0, 100.0) / 100.0;
         let reach = 0.5 * e.relight_range.clamp(0.0, 100.0) / 100.0 + half;
+        let light = gains(e.relight_amount, e.relight_warmth);
+        // From above at 0°, from the right at 90°.
+        let (turn, up) = (e.relight_direction.to_radians(), RELIGHT_HEIGHT.to_radians());
         Some(Relight {
             gains: [
                 gains(e.relight_near, e.relight_warmth_near),
-                gains(e.relight_amount, e.relight_warmth),
+                light,
                 gains(e.relight_far, e.relight_warmth_far),
             ],
             edges: [depth - reach, depth + reach],
             half,
             spot: e.relight_spots(),
             show: e.relight_show,
+            shaping: if e.relight_shapes() { part(e.relight_shaping).max(0.0) } else { 0.0 },
+            from: [turn.sin() * up.cos(), -turn.cos() * up.cos(), up.sin()],
+            ln_light: light.map(f32::ln),
         })
+    }
+
+    /// The slice's light goes by which way surfaces face.
+    pub fn shapes(&self) -> bool {
+        self.shaping > 0.0
+    }
+
+    /// Where the light comes from in the developed photo, across it (x, y: not a unit).
+    pub fn from(&self) -> [f32; 2] {
+        [self.from[0], self.from[1]]
+    }
+
+    /// How much of the slice's light a surface gets (1: what one facing the camera gets,
+    /// which is the light without Shaping; 0: none; up to 2) that leans (x, y) to the
+    /// right and down (a unit direction's, the rest towards the camera), with the light
+    /// coming from `from` across the photo (see [`Self::from`], turned as the photo is).
+    #[inline]
+    pub fn facing(&self, lean: [f32; 2], from: [f32; 2]) -> f32 {
+        let towards = (1.0 - lean[0] * lean[0] - lean[1] * lean[1]).max(0.0).sqrt();
+        let lit = lean[0] * from[0] + lean[1] * from[1] + towards * self.from[2];
+        (1.0 + self.shaping * 2.0 * (lit - self.from[2])).clamp(0.0, 2.0)
     }
 
     /// How much of something `far` away (0: the nearest thing in the photo, 1: the
@@ -232,16 +290,21 @@ impl Relight {
     pub fn divides(&self, edge: usize) -> bool {
         let [near, light, far] = self.gains;
         let side = if edge == 0 { near } else { far };
-        self.show || side != light || (self.spot && side != [1.0; 3])
+        self.show || side != light || ((self.spot || self.shapes()) && side != [1.0; 3])
     }
 
     /// What scene-linear RGB is multiplied by where `front` of the light comes off what
     /// is nearer than the slice, `back` off what is nearer than its far side (so
     /// `back − front` off the slice itself), with `spot` of the slice's light reaching
-    /// here.
+    /// here, and `facing` of it falling on the surface (see [`Self::facing`]; `None`: as
+    /// on one that faces the camera).
     #[inline]
-    pub fn gains(&self, front: f32, back: f32, spot: f32) -> [f32; 3] {
+    pub fn gains(&self, front: f32, back: f32, spot: f32, facing: Option<f32>) -> [f32; 3] {
         let [near, light, far] = self.gains;
+        let light = match facing {
+            Some(f) => self.ln_light.map(|l| (f * l).exp()),
+            None => light,
+        };
         [0, 1, 2].map(|c| {
             let lit = 1.0 + spot * (light[c] - 1.0);
             far[c] + back * (lit - far[c]) + front * (near[c] - lit)
@@ -326,6 +389,8 @@ pub enum EffectParam {
     RelightRange,
     RelightFeather,
     RelightSize,
+    RelightShaping,
+    RelightDirection,
     RelightNear,
     RelightWarmthNear,
     RelightFar,
@@ -347,13 +412,15 @@ impl EffectParam {
         [Self::FogAmount, Self::FogDistance, Self::FogDensity, Self::FogHeight, Self::FogWarmth];
     pub const BLUR: [EffectParam; 4] =
         [Self::BlurAmount, Self::BlurFocus, Self::BlurRange, Self::BlurHighlights];
-    pub const RELIGHT: [EffectParam; 10] = [
+    pub const RELIGHT: [EffectParam; 12] = [
         Self::RelightAmount,
         Self::RelightWarmth,
         Self::RelightDepth,
         Self::RelightRange,
         Self::RelightFeather,
         Self::RelightSize,
+        Self::RelightShaping,
+        Self::RelightDirection,
         Self::RelightNear,
         Self::RelightWarmthNear,
         Self::RelightFar,
@@ -385,6 +452,8 @@ impl EffectParam {
             Self::RelightWarmth => "Warmth",
             Self::RelightRange => "Range",
             Self::RelightSize => "Size",
+            Self::RelightShaping => "Shaping",
+            Self::RelightDirection => "Direction",
             Self::RelightNear => "Near",
             Self::RelightFar => "Far",
             Self::RelightDepth => "Depth",
@@ -420,6 +489,7 @@ impl EffectParam {
                 | Self::GlowWarmth
                 | Self::FogWarmth
                 | Self::RelightAmount
+                | Self::RelightDirection
                 | Self::RelightWarmth
                 | Self::RelightNear
                 | Self::RelightFar
@@ -429,7 +499,12 @@ impl EffectParam {
     }
 
     pub fn range(self) -> (f32, f32) {
-        if self.signed() { (-100.0, 100.0) } else { (0.0, 100.0) }
+        match self {
+            // Degrees around the photo.
+            Self::RelightDirection => (-180.0, 180.0),
+            _ if self.signed() => (-100.0, 100.0),
+            _ => (0.0, 100.0),
+        }
     }
 
     pub fn get(self, e: &Effects) -> f32 {
@@ -459,6 +534,8 @@ impl EffectParam {
             Self::RelightWarmth => &e.relight_warmth,
             Self::RelightRange => &e.relight_range,
             Self::RelightSize => &e.relight_size,
+            Self::RelightShaping => &e.relight_shaping,
+            Self::RelightDirection => &e.relight_direction,
             Self::RelightNear => &e.relight_near,
             Self::RelightFar => &e.relight_far,
             Self::RelightDepth => &e.relight_depth,
@@ -495,6 +572,8 @@ impl EffectParam {
             Self::RelightWarmth => &mut e.relight_warmth,
             Self::RelightRange => &mut e.relight_range,
             Self::RelightSize => &mut e.relight_size,
+            Self::RelightShaping => &mut e.relight_shaping,
+            Self::RelightDirection => &mut e.relight_direction,
             Self::RelightNear => &mut e.relight_near,
             Self::RelightFar => &mut e.relight_far,
             Self::RelightDepth => &mut e.relight_depth,

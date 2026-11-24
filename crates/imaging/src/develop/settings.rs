@@ -596,6 +596,10 @@ impl DevelopSettings {
             }
             eat(u32::from(self.effects.fog_show));
             eat(u32::from(self.effects.relight_show));
+            eat(u32::from(self.effects.surface_show));
+            for b in self.effects.relight_surface.iter().flat_map(|id| id.bytes()) {
+                eat(u32::from(b) + 0x100);
+            }
             for v in self.effects.relight_at {
                 eat(v.to_bits());
             }

@@ -189,6 +189,9 @@ fn copy_group(f: &DevelopSettings, t: &mut DevelopSettings, g: SettingsGroup) {
         G::Relight => {
             let (e, s) = (&mut t.effects, &f.effects);
             (e.relight_amount, e.relight_warmth) = (s.relight_amount, s.relight_warmth);
+            (e.relight_shaping, e.relight_direction) = (s.relight_shaping, s.relight_direction);
+            // (The surface map, `relight_surface`, belongs to its photo as the depth map
+            // does.)
             (e.relight_range, e.relight_size, e.relight_at) = (s.relight_range, s.relight_size, s.relight_at);
             (e.relight_near, e.relight_far) = (s.relight_near, s.relight_far);
             (e.relight_depth, e.relight_feather) = (s.relight_depth, s.relight_feather);
@@ -327,6 +330,9 @@ pub(super) fn every_field_changed() -> DevelopSettings {
             fog_height: 15.0,
             fog_warmth: -10.0,
             fog_depth: Some("a-depth-map".into()),
+            relight_surface: Some("a-surface-map".into()),
+            relight_shaping: 45.0,
+            relight_direction: -70.0,
             blur_amount: 40.0,
             blur_focus: 25.0,
             blur_range: 30.0,
@@ -344,6 +350,7 @@ pub(super) fn every_field_changed() -> DevelopSettings {
             relight_at: [0.3, 0.6],
             fog_show: false,
             relight_show: false,
+            surface_show: false,
         },
         transform: Transform {
             upright: Upright::Auto,
@@ -397,6 +404,8 @@ mod tests {
             t.transform.lens.ca = all.transform.lens.ca;
             assert_eq!(t.effects.fog_depth, None);
             t.effects.fog_depth = all.effects.fog_depth.clone();
+            assert_eq!(t.effects.relight_surface, None);
+            t.effects.relight_surface = all.effects.relight_surface.clone();
             assert_eq!(t, all);
         }
     }

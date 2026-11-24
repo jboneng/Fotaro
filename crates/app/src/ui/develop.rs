@@ -1960,6 +1960,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut st = d.settings.clone();
     let mut done: Option<Option<String>> = None;
     let mut placing = false;
+    let rotation = d.rotation();
 
     sub_header(ui, "Post-Crop Vignetting", |_| {});
     ui.horizontal(|ui| {
@@ -2049,6 +2050,13 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 let tip = "See the photo's depth map instead of the photo: white is near, black is far";
                 ui.horizontal(|ui| {
                     if ui.checkbox(&mut d.show_depth, "Show Depth").on_hover_text(tip).changed() {
+                        d.show_surface = false;
+                        d.request_renders();
+                    }
+                    let tip = "See which way the photo's surfaces face instead of the photo: \
+                               redder leans right, greener up, bluer faces the camera";
+                    if ui.checkbox(&mut d.show_surface, "Show Surface").on_hover_text(tip).changed() {
+                        d.show_depth = false;
                         d.request_renders();
                     }
                     if st.effects.fog_depth.is_some() {
@@ -2091,6 +2099,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             // As in LrC, the shape sliders only matter once there is an amount; Highlights
             // only when darkening in a style that protects them.
             let e = &st.effects;
+            let (wants_surface, has_surface) = (e.relight_shapes(), e.relight_surface.is_some());
             let enabled = match p {
                 EffectParam::VignetteAmount | EffectParam::GrainAmount => true,
                 EffectParam::VignetteHighlights => {
@@ -2107,7 +2116,8 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 EffectParam::RelightDepth | EffectParam::RelightRange | EffectParam::RelightFeather => {
                     e.relights()
                 }
-                EffectParam::RelightSize => e.relight_lights(),
+                EffectParam::RelightSize | EffectParam::RelightShaping => e.relight_lights(),
+                EffectParam::RelightDirection => e.relight_shapes(),
                 EffectParam::BlurFocus | EffectParam::BlurRange | EffectParam::BlurHighlights => {
                     e.blur_amount > 0.0
                 }
@@ -2142,10 +2152,28 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 },
                 kelvin: false,
             };
-            let mut v = slider.get(&st);
+            // Direction is kept as in the file, and shown as in the photo turned upright.
+            let turn = if *p == EffectParam::RelightDirection { 90.0 * f32::from(rotation % 4) } else { 0.0 };
+            let around = |v: f32| if turn == 0.0 { v } else { (v + 180.0).rem_euclid(360.0) - 180.0 };
+            let mut v = around(slider.get(&st) + turn);
             let row = ui.add_enabled_ui(enabled, |ui| slider_row(ui, &spec, &mut v));
             if row.inner.changed {
-                slider.set(&mut st, v);
+                slider.set(&mut st, around(v - turn));
+            }
+            if *p == EffectParam::RelightDirection && (wants_surface || d.show_surface) && !has_surface {
+                // Shaping goes by a surface map of the photo, made by a model the first time.
+                ui.horizontal(|ui| {
+                    if d.ai_job.is_some() {
+                        ui.add(egui::Spinner::new().size(11.0));
+                        ui.label(weak("Working out which way everything faces…").size(11.5));
+                    } else {
+                        ui.label(weak("Needs a surface map of the photo").size(11.5));
+                        if d.surface_declined && ui.small_button("Make It").clicked() {
+                            d.surface_declined = false;
+                            d.request_renders();
+                        }
+                    }
+                });
             }
             if row.inner.done {
                 done = Some(None);
