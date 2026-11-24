@@ -176,6 +176,8 @@ pub enum ToolTarget {
     FogMap,
     /// The same, made afresh although the photo has one.
     FogMapAgain,
+    /// Not kept as a mask: Relight's light is put on what it selects.
+    Light,
 }
 
 /// A tool waiting for a drag on the photo.
@@ -1773,6 +1775,10 @@ pub struct DevelopState {
     /// Lens Blur's Focus Selector is active: the next click on the photo says what is to
     /// be sharp.
     pub picking_focus: bool,
+    /// Relight's Light Selector: the next click on the photo puts the light there.
+    pub picking_light: bool,
+    /// Show where Relight's light falls (while its place is being dragged).
+    pub relight_view: bool,
     /// A Transform slider is being dragged: show a grid over the photo.
     pub transform_grid: bool,
     /// Masking mode (Shift+W), when on.
@@ -1938,6 +1944,8 @@ impl DevelopState {
             detail_focus: (0.5, 0.5),
             picking_detail: false,
             picking_focus: false,
+            picking_light: false,
+            relight_view: false,
             transform_grid: false,
             masking: None,
             brush: BrushSettings::default(),
@@ -2042,6 +2050,7 @@ impl DevelopState {
         self.detail_focus = (0.5, 0.5);
         self.picking_detail = false;
         self.picking_focus = false;
+        self.picking_light = false;
         self.guide_drag = None;
         self.masking = None;
         self.cropping = None;
@@ -2708,7 +2717,7 @@ impl DevelopState {
             return;
         }
         let mut models = vec![kind.model()];
-        if self.refines(kind) {
+        if self.refines(kind) || target == ToolTarget::Light {
             models.push(segment::AiModel::Depth);
         }
         let bytes = segment::download_size(&models);
@@ -2760,7 +2769,9 @@ impl DevelopState {
         }
         let Some(photo_id) = self.photo else { return };
         self.ai_consent = None;
-        let job = AiJob { kind, target, prompt, refine: self.refines(kind), progress: Default::default() };
+        // (A light is put by the depth map whatever Refine with depth says.)
+        let refine = self.refines(kind) || target == ToolTarget::Light;
+        let job = AiJob { kind, target, prompt, refine, progress: Default::default() };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Starting…".into());
         let settings = self.settings.clone();
         let (rotation, gpu) = (self.rotation, self.ai_gpu);
@@ -2784,6 +2795,27 @@ impl DevelopState {
             st.effects.fog_depth = Some(id);
             self.set_live(st);
             return self.commit(catalog, Some(if again { "New Depth Map" } else { "Depth Map" }.into()));
+        }
+        if job.target == ToolTarget::Light {
+            // Relight's light on the subject: its slice where the subject is and as deep,
+            // its round area around the subject's middle.
+            let depth = self.settings.depth_map().and_then(imaging::develop::mask_picture);
+            let found = imaging::develop::mask_picture(&id)
+                .zip(depth)
+                .and_then(|(mask, depth)| imaging::develop::mask_depth_span(&mask, &depth));
+            let Some((far, deep, at)) = found else {
+                self.error = Some("Couldn't find a subject to put the light on".into());
+                return Ok(None);
+            };
+            let mut st = self.settings.clone();
+            let e = &mut st.effects;
+            (e.relight_depth, e.relight_range, e.relight_at) =
+                (far.round(), deep.round().clamp(5.0, 60.0), at);
+            if !e.relight_lights() {
+                e.relight_amount = 40.0;
+            }
+            self.set_live(st);
+            return self.commit(catalog, Some("Relight: Subject".into()));
         }
         let shape = if kind.is_depth() {
             use imaging::develop::DepthRange;
@@ -2919,8 +2951,30 @@ impl DevelopState {
     /// Lens Blur's Focus Selector click at (x, y), 0..1 of the image in file orientation:
     /// Focus becomes how far away the photo's depth map says that point is (and the blur
     /// is turned on, if it was off). False without a depth map; else to be saved.
+    /// Put Relight's light on what is at (x, y) of the developed photo (0..1, file
+    /// orientation): its slice at that distance, its round area around that point.
+    /// `false` without a depth map.
+    pub fn pick_light(&mut self, x: f32, y: f32) -> bool {
+        self.picking_light = false;
+        let (Some(info), Some(id)) = (self.info.as_ref(), self.settings.effects.fog_depth.clone()) else {
+            return false;
+        };
+        let (w, h) = info.full_size;
+        let (u, v) = self.view_settings().transform.source_point(x, y, w, h);
+        let Some(far) = imaging::develop::depth_at(&id, u, v) else { return false };
+        let mut st = self.settings.clone();
+        st.effects.relight_depth = far.round();
+        st.effects.relight_at = [u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)];
+        if !st.effects.relight_lights() {
+            st.effects.relight_amount = 40.0;
+        }
+        self.set_live(st);
+        true
+    }
+
     pub fn pick_focus(&mut self, x: f32, y: f32) -> bool {
         self.picking_focus = false;
+        self.picking_light = false;
         let (Some(info), Some(id)) = (self.info.as_ref(), self.settings.effects.fog_depth.clone()) else {
             return false;
         };
@@ -2988,6 +3042,7 @@ impl DevelopState {
             s.transform.crop = s.transform.crop.uncropped();
         }
         s.effects.fog_show = self.show_depth && !self.before;
+        s.effects.relight_show = self.relight_view && !self.before;
         s
     }
 

@@ -75,10 +75,19 @@ pub struct Effects {
     pub blur_focus: f32,
     pub blur_range: f32,
     pub blur_highlights: f32,
-    /// Relight, by the same depth map: what is near and what is far lit separately.
-    /// Near and Far −100..+100 (darker .. brighter); Depth 0..100 (the distance where
-    /// near turns to far, 0: the nearest thing in the photo); Feather 0..100 (how
-    /// gradually); Warmth Near and Far −100..+100.
+    /// Relight, by the same depth map: a light on a slice of the photo's depth, and what
+    /// is in front of the slice and behind it lit separately. Amount −100..+100 (darker ..
+    /// brighter) and Warmth −100..+100 for the slice; Depth 0..100 (where it is, 0: the
+    /// nearest thing in the photo); Range 0..100 (how deep); Feather 0..100 (how
+    /// gradually it turns to near and far); Size 0..100 (the round area around
+    /// `relight_at` its light is kept to, 100: the whole photo); Near, Far and their
+    /// Warmths −100..+100.
+    pub relight_amount: f32,
+    pub relight_warmth: f32,
+    pub relight_range: f32,
+    pub relight_size: f32,
+    /// The middle of the light's round area, 0..1 of the untransformed photo.
+    pub relight_at: [f32; 2],
     pub relight_near: f32,
     pub relight_far: f32,
     pub relight_depth: f32,
@@ -88,6 +97,9 @@ pub struct Effects {
     /// For looking only (never kept): render the depth map in place of the photo.
     #[serde(skip)]
     pub fog_show: bool,
+    /// For looking only (never kept): dim what Relight's slice does not light.
+    #[serde(skip)]
+    pub relight_show: bool,
 }
 
 impl Default for Effects {
@@ -116,6 +128,11 @@ impl Default for Effects {
             blur_focus: 15.0,
             blur_range: 20.0,
             blur_highlights: 0.0,
+            relight_amount: 0.0,
+            relight_warmth: 0.0,
+            relight_range: 20.0,
+            relight_size: 100.0,
+            relight_at: [0.5, 0.5],
             relight_near: 0.0,
             relight_far: 0.0,
             relight_depth: 45.0,
@@ -123,6 +140,7 @@ impl Default for Effects {
             relight_warmth_near: 0.0,
             relight_warmth_far: 0.0,
             fog_show: false,
+            relight_show: false,
         }
     }
 }
@@ -130,10 +148,21 @@ impl Default for Effects {
 impl Effects {
     /// Relight changes something.
     pub fn relights(&self) -> bool {
-        self.relight_near != 0.0
+        self.relight_lights()
+            || self.relight_near != 0.0
             || self.relight_far != 0.0
             || self.relight_warmth_near != 0.0
             || self.relight_warmth_far != 0.0
+    }
+
+    /// Relight's slice has a light of its own.
+    pub fn relight_lights(&self) -> bool {
+        self.relight_amount != 0.0 || self.relight_warmth != 0.0
+    }
+
+    /// That light is kept to a round area.
+    pub fn relight_spots(&self) -> bool {
+        self.relight_lights() && self.relight_size < 100.0
     }
 
     /// Something here goes by the photo's depth map (which is made when first needed).
@@ -142,17 +171,22 @@ impl Effects {
     }
 }
 
-/// Stops of exposure for Relight's Near or Far at ±100.
+/// Stops of exposure for Relight's Amount, Near or Far at ±100.
 const RELIGHT_STOPS: f32 = 2.0;
 
 /// Relight as the settings ask for it: what each distance's light is multiplied by.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Relight {
-    /// What near light, and far light, is multiplied by (R, G, B).
-    gains: [[f32; 3]; 2],
-    /// Where near turns to far (0..1 far), and half the width of the turn.
-    depth: f32,
+    /// What light is multiplied by (R, G, B): in front of the slice, in it, behind it.
+    gains: [[f32; 3]; 3],
+    /// Where the slice begins and ends (0..1 far), each the middle of a turn `half` wide
+    /// to either side: Range is how deep the slice is fully lit.
+    edges: [f32; 2],
     half: f32,
+    /// The slice's light is kept to a round area on the photo.
+    pub spot: bool,
+    /// Show where the slice's light falls.
+    pub show: bool,
 }
 
 impl Relight {
@@ -170,26 +204,48 @@ impl Relight {
             let grey = luma[0] * tint[0] + luma[1] * tint[1] + luma[2] * tint[2];
             tint.map(|t| gain * t / grey)
         };
+        let depth = e.relight_depth.clamp(0.0, 100.0) / 100.0;
+        let half = 0.005 + 0.12 * e.relight_feather.clamp(0.0, 100.0) / 100.0;
+        let reach = 0.5 * e.relight_range.clamp(0.0, 100.0) / 100.0 + half;
         Some(Relight {
-            gains: [gains(e.relight_near, e.relight_warmth_near), gains(e.relight_far, e.relight_warmth_far)],
-            depth: e.relight_depth.clamp(0.0, 100.0) / 100.0,
-            half: 0.01 + 0.34 * e.relight_feather.clamp(0.0, 100.0) / 100.0,
+            gains: [
+                gains(e.relight_near, e.relight_warmth_near),
+                gains(e.relight_amount, e.relight_warmth),
+                gains(e.relight_far, e.relight_warmth_far),
+            ],
+            edges: [depth - reach, depth + reach],
+            half,
+            spot: e.relight_spots(),
+            show: e.relight_show,
         })
     }
 
-    /// How much of "near" something `far` away is (0: the nearest thing in the photo,
-    /// 1: the farthest): all of it well before Depth, none well beyond.
+    /// How much of something `far` away (0: the nearest thing in the photo, 1: the
+    /// farthest) is nearer than the slice's front (`edge` 0) or its back (1).
     #[inline]
-    pub fn near(&self, far: f32) -> f32 {
-        1.0 - smoothstep(self.depth - self.half, self.depth + self.half, far)
+    pub fn nearer(&self, edge: usize, far: f32) -> f32 {
+        1.0 - smoothstep(self.edges[edge] - self.half, self.edges[edge] + self.half, far)
     }
 
-    /// What scene-linear RGB is multiplied by where `share` of the light comes off what
-    /// is near and the rest off what is far.
+    /// Whether what is on the two sides of an edge is lit differently at all (else the
+    /// border there needs no care).
+    pub fn divides(&self, edge: usize) -> bool {
+        let [near, light, far] = self.gains;
+        let side = if edge == 0 { near } else { far };
+        self.show || side != light || (self.spot && side != [1.0; 3])
+    }
+
+    /// What scene-linear RGB is multiplied by where `front` of the light comes off what
+    /// is nearer than the slice, `back` off what is nearer than its far side (so
+    /// `back − front` off the slice itself), with `spot` of the slice's light reaching
+    /// here.
     #[inline]
-    pub fn gains(&self, share: f32) -> [f32; 3] {
-        let [n, f] = self.gains;
-        [0, 1, 2].map(|c| f[c] + share * (n[c] - f[c]))
+    pub fn gains(&self, front: f32, back: f32, spot: f32) -> [f32; 3] {
+        let [near, light, far] = self.gains;
+        [0, 1, 2].map(|c| {
+            let lit = 1.0 + spot * (light[c] - 1.0);
+            far[c] + back * (lit - far[c]) + front * (near[c] - lit)
+        })
     }
 }
 
@@ -264,11 +320,15 @@ pub enum EffectParam {
     BlurFocus,
     BlurRange,
     BlurHighlights,
-    RelightNear,
-    RelightFar,
+    RelightAmount,
+    RelightWarmth,
     RelightDepth,
+    RelightRange,
     RelightFeather,
+    RelightSize,
+    RelightNear,
     RelightWarmthNear,
+    RelightFar,
     RelightWarmthFar,
 }
 
@@ -287,12 +347,16 @@ impl EffectParam {
         [Self::FogAmount, Self::FogDistance, Self::FogDensity, Self::FogHeight, Self::FogWarmth];
     pub const BLUR: [EffectParam; 4] =
         [Self::BlurAmount, Self::BlurFocus, Self::BlurRange, Self::BlurHighlights];
-    pub const RELIGHT: [EffectParam; 6] = [
-        Self::RelightNear,
-        Self::RelightFar,
+    pub const RELIGHT: [EffectParam; 10] = [
+        Self::RelightAmount,
+        Self::RelightWarmth,
         Self::RelightDepth,
+        Self::RelightRange,
         Self::RelightFeather,
+        Self::RelightSize,
+        Self::RelightNear,
         Self::RelightWarmthNear,
+        Self::RelightFar,
         Self::RelightWarmthFar,
     ];
 
@@ -317,6 +381,10 @@ impl EffectParam {
             Self::BlurFocus => "Focus",
             Self::BlurRange => "Range",
             Self::BlurHighlights => "Highlights",
+            Self::RelightAmount => "Amount",
+            Self::RelightWarmth => "Warmth",
+            Self::RelightRange => "Range",
+            Self::RelightSize => "Size",
             Self::RelightNear => "Near",
             Self::RelightFar => "Far",
             Self::RelightDepth => "Depth",
@@ -351,6 +419,8 @@ impl EffectParam {
                 | Self::VignetteRoundness
                 | Self::GlowWarmth
                 | Self::FogWarmth
+                | Self::RelightAmount
+                | Self::RelightWarmth
                 | Self::RelightNear
                 | Self::RelightFar
                 | Self::RelightWarmthNear
@@ -385,6 +455,10 @@ impl EffectParam {
             Self::BlurFocus => &e.blur_focus,
             Self::BlurRange => &e.blur_range,
             Self::BlurHighlights => &e.blur_highlights,
+            Self::RelightAmount => &e.relight_amount,
+            Self::RelightWarmth => &e.relight_warmth,
+            Self::RelightRange => &e.relight_range,
+            Self::RelightSize => &e.relight_size,
             Self::RelightNear => &e.relight_near,
             Self::RelightFar => &e.relight_far,
             Self::RelightDepth => &e.relight_depth,
@@ -417,6 +491,10 @@ impl EffectParam {
             Self::BlurFocus => &mut e.blur_focus,
             Self::BlurRange => &mut e.blur_range,
             Self::BlurHighlights => &mut e.blur_highlights,
+            Self::RelightAmount => &mut e.relight_amount,
+            Self::RelightWarmth => &mut e.relight_warmth,
+            Self::RelightRange => &mut e.relight_range,
+            Self::RelightSize => &mut e.relight_size,
             Self::RelightNear => &mut e.relight_near,
             Self::RelightFar => &mut e.relight_far,
             Self::RelightDepth => &mut e.relight_depth,

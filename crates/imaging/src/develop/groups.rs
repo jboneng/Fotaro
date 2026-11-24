@@ -188,6 +188,8 @@ fn copy_group(f: &DevelopSettings, t: &mut DevelopSettings, g: SettingsGroup) {
         }
         G::Relight => {
             let (e, s) = (&mut t.effects, &f.effects);
+            (e.relight_amount, e.relight_warmth) = (s.relight_amount, s.relight_warmth);
+            (e.relight_range, e.relight_size, e.relight_at) = (s.relight_range, s.relight_size, s.relight_at);
             (e.relight_near, e.relight_far) = (s.relight_near, s.relight_far);
             (e.relight_depth, e.relight_feather) = (s.relight_depth, s.relight_feather);
             (e.relight_warmth_near, e.relight_warmth_far) = (s.relight_warmth_near, s.relight_warmth_far);
@@ -335,7 +337,13 @@ pub(super) fn every_field_changed() -> DevelopSettings {
             relight_feather: 30.0,
             relight_warmth_near: 15.0,
             relight_warmth_far: -25.0,
+            relight_amount: 35.0,
+            relight_warmth: 20.0,
+            relight_range: 30.0,
+            relight_size: 60.0,
+            relight_at: [0.3, 0.6],
             fog_show: false,
+            relight_show: false,
         },
         transform: Transform {
             upright: Upright::Auto,

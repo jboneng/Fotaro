@@ -174,6 +174,38 @@ fn nearness(
     field
 }
 
+/// How much of Relight's light reaches each pixel of `region` of `shown`, when it is kept
+/// to a round area: that area read as a mask is, so it follows the crop and the transform.
+fn relight_spot(
+    source: &WorkingImage,
+    shown: &WorkingImage,
+    s: &DevelopSettings,
+    region: Region,
+) -> Option<Arc<MaskField>> {
+    let e = &s.effects;
+    if !e.relight_spots() {
+        return None;
+    }
+    // (Of half the photo's longer side: small steps where the area is small.)
+    let t = (e.relight_size / 100.0).clamp(0.0, 1.0);
+    let radius = 0.04 + 1.6 * t * t;
+    let shape = super::masks::Shape::Radial {
+        center: e.relight_at,
+        radii: [radius, radius],
+        angle: 0.0,
+        feather: 75.0,
+    };
+    let map = [Mask::new("Light", shape)];
+    MaskField::build_for(source, shown, &map, vec![0], region).map(Arc::new)
+}
+
+/// What Relight needs of the photo around a region: how near everything is, and where its
+/// light's round area is.
+struct Lights<'a> {
+    depth: &'a dyn Fn(Region) -> Option<Arc<MaskField>>,
+    spot: &'a dyn Fn(Region) -> Option<Arc<MaskField>>,
+}
+
 /// Relight looks at what is around each pixel on a coarser grid: a cell's side in pixels,
 /// and how many cells its blur reaches (about 2% of the image's longer side in all).
 fn relight_grid(img: &WorkingImage) -> (usize, usize) {
@@ -224,9 +256,8 @@ struct Prepared {
     /// Fog, when on and the photo has its depth map: how near each pixel of the region
     /// is, the fog's colour, and the image's height.
     fog: Option<(Fog, Arc<MaskField>, [f32; 3], f32)>,
-    /// Relight, when on and the photo has its depth map: of the light at each pixel of
-    /// the region, the share that comes off what is near.
-    relight: Option<(Relight, Arc<Vec<f32>>)>,
+    /// Relight, when on and the photo has its depth map.
+    relight: Option<Relit>,
     /// Show Depth: the depth map (how near each pixel of the region is) in place of the
     /// photo.
     depth_shown: Option<Arc<MaskField>>,
@@ -236,9 +267,24 @@ struct Prepared {
     fringe: Option<super::lens::Defringe>,
 }
 
+/// Relight over a region.
+#[derive(Clone)]
+struct Relit {
+    relight: Relight,
+    /// How near each pixel of the region is.
+    near: Arc<MaskField>,
+    /// Of the light at each pixel of the region, the share that comes off what is nearer
+    /// than the slice's front, and than its back; where the two sides of one are lit
+    /// alike, nothing.
+    shares: [Option<Arc<Vec<f32>>>; 2],
+    /// How much of the slice's light reaches each pixel, when kept to a round area.
+    spot: Option<Arc<MaskField>>,
+}
+
 impl Prepared {
     /// Prepare to render `region` of `img`, with the masks' values over it (`field`), and
-    /// `depth` to tell how near everything in a region is (see [`nearness`]). Local
+    /// `lights` to tell how near everything in a region is (see [`nearness`]) and where
+    /// Relight's round area is. Local
     /// adjustments look at the whole image, so a region renders exactly like that part of
     /// a full render.
     fn new(
@@ -246,9 +292,9 @@ impl Prepared {
         s: &DevelopSettings,
         region: Region,
         field: Option<Arc<MaskField>>,
-        depth: &dyn Fn(Region) -> Option<Arc<MaskField>>,
+        lights: &Lights,
     ) -> Prepared {
-        let nearness = depth(region);
+        let nearness = (lights.depth)(region);
         let wb = img.resolve_wb(s);
         let input = match &img.color {
             SourceColor::Camera(c) => Input::Camera { m: wb.multipliers, mat: c.cam_to_work },
@@ -323,10 +369,15 @@ impl Prepared {
                 ((y1 + pad) * step).min(img.height() as usize),
             );
             let around = Region { x: x0 as u32, y: y0 as u32, w: (x1 - x0) as u32, h: (y1 - y0) as u32 };
-            let near = if around == region { Some(near.clone()) } else { depth(around) };
-            if let Some(near) = near {
-                prep.relight =
-                    Some((relight, Arc::new(prep.light_share(img, &relight, region, &near, around))));
+            let wide = if around == region { Some(near.clone()) } else { (lights.depth)(around) };
+            if let Some(wide) = wide {
+                let shares = [0, 1].map(|edge| {
+                    relight
+                        .divides(edge)
+                        .then(|| Arc::new(prep.light_share(img, &relight, edge, region, &wide, around)))
+                });
+                let spot = (lights.spot)(region);
+                prep.relight = Some(Relit { relight, near: near.clone(), shares, spot });
             }
             super::perf::mark("relight");
         }
@@ -505,7 +556,7 @@ impl Prepared {
     }
 
     /// Relight: of the light at each pixel of `region`, the share that comes off what is
-    /// near (`near`: how near everything in `around`, the region and what this looks at
+    /// nearer than one `edge` of its slice (`near`: how near everything in `around`, the region and what this looks at
     /// around it, is).
     ///
     /// Where something near meets something far, a pixel is a mix of the two (the lens
@@ -523,6 +574,7 @@ impl Prepared {
         &self,
         img: &WorkingImage,
         relight: &Relight,
+        edge: usize,
         region: Region,
         near: &MaskField,
         around: Region,
@@ -532,7 +584,7 @@ impl Prepared {
         let (ax, ay) = (around.x as usize, around.y as usize);
         let (ex, ey) = (ax + around.w as usize, ay + around.h as usize);
         let (gw, gh) = ((ex - ax).div_ceil(step), (ey - ay).div_ceil(step));
-        let nearly = |x: usize, y: usize| relight.near(1.0 - near.at(x, y)[0]);
+        let nearly = |x: usize, y: usize| relight.nearer(edge, 1.0 - near.at(x, y)[0]);
         // Per cell: how much of it is near, and far, and the light of each.
         let cells: Vec<[f32; 6]> = (0..gw * gh)
             .into_par_iter()
@@ -657,10 +709,23 @@ impl Prepared {
                 lin = add_haze(lin, (-amount).min(1.0), haze.airlight);
             }
         }
-        // Relight: the light on what is near and on what is far (then any fog over it).
-        if let Some((relight, share)) = &self.relight {
+        // Relight: the light on its slice of the depth, and on what is in front of that
+        // and behind it (then any fog over it).
+        if let Some(lit) = &self.relight {
             let r = &self.region;
-            let by = relight.gains(share[(y - r.y as usize) * r.w as usize + (x - r.x as usize)]);
+            let k = (y - r.y as usize) * r.w as usize + (x - r.x as usize);
+            let far = 1.0 - lit.near.at(x, y)[0];
+            let [front, back] = [0, 1].map(|edge| match &lit.shares[edge] {
+                Some(share) => share[k],
+                None => lit.relight.nearer(edge, far),
+            });
+            let spot = lit.spot.as_ref().map_or(1.0, |s| s.at(x, y)[0]);
+            let mut by = lit.relight.gains(front, back, spot);
+            if lit.relight.show {
+                // What the slice's light does not reach, dimmed.
+                let dim = 0.25 + 0.75 * ((back - front) * spot).clamp(0.0, 1.0);
+                by = by.map(|g| g * dim);
+            }
             lin = [lin[0] * by[0], lin[1] * by[1], lin[2] * by[2]];
         }
         if let Some((fog, near, color, height)) = &self.fog {
@@ -1025,7 +1090,9 @@ pub fn render_region_srgb8_until(
     if stop() {
         return None;
     }
-    let prep = Prepared::new(img, s, region, field, &|r| nearness(source, img, s, r));
+    let lights =
+        Lights { depth: &|r| nearness(source, img, s, r), spot: &|r| relight_spot(source, img, s, r) };
+    let prep = Prepared::new(img, s, region, field, &lights);
     if stop() {
         return None;
     }
@@ -1116,9 +1183,9 @@ pub fn render_linear16(img: &WorkingImage, s: &DevelopSettings) -> ImageBuffer<R
         });
         return out;
     }
-    let prep = Prepared::new(img, s, region, MaskField::build(source, img, &s.masks, region), &|r| {
-        nearness(source, img, s, r)
-    });
+    let lights =
+        Lights { depth: &|r| nearness(source, img, s, r), spot: &|r| relight_spot(source, img, s, r) };
+    let prep = Prepared::new(img, s, region, MaskField::build(source, img, &s.masks, region), &lights);
     render_rows(img, region, &mut out, 3, |o, p, x, y| {
         o.copy_from_slice(&finish.apply(prep.pixel(p, x, y), x, y).map(to_u16));
     });
@@ -1187,7 +1254,8 @@ impl Detailed {
             None => {
                 let near = nearness(source, img, s, area);
                 let depth = |r: Region| if r == area { near.clone() } else { nearness(source, img, s, r) };
-                let prep = Prepared::new(img, s, area, field.clone(), &depth);
+                let lights = Lights { depth: &depth, spot: &|r| relight_spot(source, img, s, r) };
+                let prep = Prepared::new(img, s, area, field.clone(), &lights);
                 if stop() {
                     return None;
                 }
@@ -1297,7 +1365,8 @@ pub fn auto_tone(img: &WorkingImage, s: &DevelopSettings) -> DevelopSettings {
         effects: Effects::default(),
         ..s.clone()
     };
-    let prep = Prepared::new(img, &neutral, Region::whole(img), None, &|_| None);
+    let none = Lights { depth: &|_| None, spot: &|_| None };
+    let prep = Prepared::new(img, &neutral, Region::whole(img), None, &none);
     // Luminance in stops from middle grey, on a sample of pixels.
     let px = img.pixels.as_raw().as_chunks::<3>().0;
     let step = (px.len() / 200_000).max(1);

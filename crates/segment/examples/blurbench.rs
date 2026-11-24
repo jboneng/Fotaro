@@ -2,11 +2,14 @@
 //! `cargo run -p segment --example blurbench --release -- <models dir> <out dir> <photo> [key=value ...]`
 //!
 //! The models dir holds Depth Anything V2 Small's `model.onnx`. Keys: `amount`, `focus`,
-//! `range`, `highlights` (Lens Blur's sliders), `near`, `far`, `depth`, `feather`, `warmnear`,
-//! `warmfar` (Relight's), `proxy` (the long side rendered, default 2560; 0
-//! for full size), `at=x,y` (take Focus from that point of the photo, 0..1), and
-//! `crop=x,y,w,h` (render only that part, in pixels). The photo's depth map is made once
-//! and kept in the out dir. Writes `<photo>_blur.png` and prints the time the render took.
+//! `range`, `highlights` (Lens Blur's sliders), `light`, `warm`, `depth`, `lrange`,
+//! `feather`, `size`, `near`, `far`, `warmnear`, `warmfar` (Relight's), `lat=x,y` (put
+//! Relight's light on that point of the photo, 0..1), `lshow` (show where it falls),
+//! `show` (the depth map in place of the photo), `proxy` (the long side rendered, default
+//! 2560; 0 for full size), `at=x,y` (take Focus from that point of the photo, 0..1),
+//! `crop=x,y,w,h` (render only that part, in pixels) and `name` (the output's name:
+//! `<photo>_<name>.png`, `blur` unless given). The photo's depth map is made once and
+//! kept in the out dir. Prints the time the render took.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -57,7 +60,11 @@ fn main() -> anyhow::Result<()> {
     s.effects.blur_range = number("range", s.effects.blur_range);
     s.effects.blur_highlights = number("highlights", 0.0);
     s.effects.fog_show = value("show").is_some();
-    // Relight: near, far, depth, feather, warmnear, warmfar.
+    s.effects.relight_amount = number("light", 0.0);
+    s.effects.relight_warmth = number("warm", 0.0);
+    s.effects.relight_range = number("lrange", s.effects.relight_range);
+    s.effects.relight_size = number("size", s.effects.relight_size);
+    s.effects.relight_show = value("lshow").is_some();
     s.effects.relight_near = number("near", 0.0);
     s.effects.relight_far = number("far", 0.0);
     s.effects.relight_depth = number("depth", s.effects.relight_depth);
@@ -68,6 +75,13 @@ fn main() -> anyhow::Result<()> {
         let far = imaging::develop::depth_at(&id, x.parse()?, y.parse()?);
         println!("at {x}, {y}: {far:?}");
         s.effects.blur_focus = far.unwrap_or(s.effects.blur_focus);
+    }
+    if let Some((x, y)) = value("lat").and_then(|v| v.split_once(',')) {
+        let (x, y): (f32, f32) = (x.parse()?, y.parse()?);
+        let far = imaging::develop::depth_at(&id, x, y);
+        println!("light at {x}, {y}: {far:?}");
+        s.effects.relight_depth = far.unwrap_or(s.effects.relight_depth);
+        s.effects.relight_at = [x, y];
     }
     let crop: Option<Vec<u32>> = value("crop").map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect());
     let render = |s: &DevelopSettings| match crop.as_deref() {

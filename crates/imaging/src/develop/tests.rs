@@ -1058,7 +1058,8 @@ fn relight_lights_near_and_far_separately_and_regions_still_match() {
     assert!(lum(&deep, 120, 50) > mid + 15.0, "the border moved back");
     // Feather: a hard border keeps the near side fully lit closer to it.
     let hard = render_srgb8(&w, &relight(|e| (e.relight_near, e.relight_feather) = (60.0, 0.0)));
-    assert!(lum(&hard, 90, 50) > lum(&out, 90, 50), "a harder border");
+    let full = |i: &RgbImage| (0..200).filter(|&x| lum(i, x, 50) > lum(&plain, x, 50) + 25.0).count();
+    assert!(full(&hard) > full(&out) + 3, "a harder border: {} from {}", full(&hard), full(&out));
     // Warmth: redder and less blue near, about as bright; far untouched.
     let warm = render_srgb8(&w, &relight(|e| e.relight_warmth_near = 80.0));
     let (p, q) = (warm.get_pixel(15, 50), plain.get_pixel(15, 50));
@@ -1079,6 +1080,98 @@ fn relight_lights_near_and_far_separately_and_regions_still_match() {
     assert_ne!(s.stable_hash(), relight(|e| e.relight_near = 61.0).stable_hash());
     // Kept as written.
     assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap(), s);
+    set_mask_store(None);
+}
+
+#[test]
+fn relight_lights_a_slice_of_the_depth_and_keeps_it_to_a_round_area() {
+    // Mid grey with a little texture; near on the left, far on the right.
+    let img: RgbImage = ImageBuffer::from_fn(200, 100, |x, y| {
+        let n = ((x * 7 + y * 13) % 5) as u8;
+        Rgb([110 + n, 110 + n, 110 + n])
+    });
+    let w = rendered(&img);
+    let picture = image::GrayImage::from_fn(50, 25, |x, _| image::Luma([255 - (x * 255 / 49) as u8]));
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("slice-depth", &picture).unwrap();
+    let relight = |change: &dyn Fn(&mut Effects)| {
+        let mut e = Effects {
+            relight_amount: 60.0,
+            relight_depth: 50.0,
+            relight_range: 10.0,
+            relight_feather: 20.0,
+            fog_depth: Some("slice-depth".into()),
+            ..Effects::default()
+        };
+        change(&mut e);
+        DevelopSettings { effects: e, ..Default::default() }
+    };
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    let lum = |i: &RgbImage, x: u32, y: u32| f32::from(i.get_pixel(x, y)[1]);
+    // Where along the row the light is strongest.
+    let peak = |i: &RgbImage| (0..200).max_by(|&a, &b| lum(i, a, 50).total_cmp(&lum(i, b, 50))).unwrap();
+    // The slice alone is lit: what is well in front of it and behind it stays.
+    let s = relight(&|_| {});
+    let out = render_srgb8(&w, &s);
+    let at = peak(&out);
+    assert!((20..180).contains(&at), "the slice is inside the photo: {at}");
+    assert!(lum(&out, at, 50) > lum(&plain, at, 50) + 25.0, "the slice is lit");
+    assert_eq!(out.get_pixel(3, 50), plain.get_pixel(3, 50), "near is left alone");
+    assert_eq!(out.get_pixel(196, 50), plain.get_pixel(196, 50), "far is left alone");
+    // Depth moves it back; Range makes it deeper.
+    let back = render_srgb8(&w, &relight(&|e| e.relight_depth = 75.0));
+    assert!(peak(&back) > at + 10, "the slice moved back: {} from {at}", peak(&back));
+    let lit = |i: &RgbImage| (0..200).filter(|&x| lum(i, x, 50) > lum(&plain, x, 50) + 20.0).count();
+    let deep = render_srgb8(&w, &relight(&|e| e.relight_range = 40.0));
+    assert!(lit(&deep) > lit(&out) + 10, "a deeper slice: {} from {}", lit(&deep), lit(&out));
+    // Near and Far light what is around the slice, and leave it its own light.
+    let around = render_srgb8(&w, &relight(&|e| (e.relight_near, e.relight_far) = (-50.0, -50.0)));
+    assert!(lum(&around, 3, 50) < lum(&plain, 3, 50) - 20.0, "near is dimmed");
+    assert!(lum(&around, 196, 50) < lum(&plain, 196, 50) - 20.0, "far is dimmed");
+    assert!(lum(&around, at, 50) > lum(&plain, at, 50) + 20.0, "the slice still lit");
+    // Size keeps the light to a round area around where it was put.
+    let put = [(at as f32 + 0.5) / 200.0, 0.2];
+    let spot = relight(&|e| (e.relight_size, e.relight_at) = (25.0, put));
+    let small = render_srgb8(&w, &spot);
+    assert!(lum(&small, at, 20) > lum(&plain, at, 20) + 20.0, "lit in the area");
+    assert_eq!(small.get_pixel(at, 95), plain.get_pixel(at, 95), "not outside it");
+    // Shown: what the light does not reach is dimmed.
+    let shown = render_srgb8(&w, &relight(&|e| e.relight_show = true));
+    assert!(lum(&shown, 3, 50) < lum(&plain, 3, 50) - 30.0);
+    assert!(lum(&shown, at, 50) > lum(&plain, at, 50));
+    // Regions render like the whole, with everything on.
+    let all = relight(&|e| {
+        (e.relight_near, e.relight_far, e.relight_warmth) = (-40.0, 30.0, 50.0);
+        (e.relight_size, e.relight_at) = (60.0, put);
+    });
+    let whole = render_srgb8(&w, &all);
+    let part = render_region_srgb8(&w, &all, Region { x: 60, y: 20, w: 100, h: 60 });
+    for (x, y, p) in part.enumerate_pixels() {
+        let q = whole.get_pixel(x + 60, y + 20);
+        assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+    }
+    // Each of them counts in the hash, and all are kept as written.
+    for other in [
+        relight(&|e| e.relight_amount = 61.0),
+        relight(&|e| e.relight_range = 11.0),
+        relight(&|e| e.relight_size = 99.0),
+        relight(&|e| e.relight_at = [0.4, 0.5]),
+        relight(&|e| e.relight_show = true),
+    ] {
+        assert_ne!(s.stable_hash(), other.stable_hash());
+    }
+    assert_eq!(DevelopSettings::from_json(&all.to_json()).unwrap(), all);
+    // Settings from before the slice had a light of its own still load.
+    let mut old: serde_json::Value = serde_json::from_str(&all.to_json()).unwrap();
+    let effects = old["effects"].as_object_mut().unwrap();
+    for key in ["relight_amount", "relight_warmth", "relight_range", "relight_size", "relight_at"] {
+        assert!(effects.remove(key).is_some(), "{key}");
+    }
+    let old = DevelopSettings::from_json(&old.to_string()).unwrap();
+    assert_eq!((old.effects.relight_amount, old.effects.relight_size), (0.0, 100.0));
+    assert_eq!(old.effects.relight_near, -40.0);
     set_mask_store(None);
 }
 
@@ -1169,6 +1262,14 @@ fn the_depth_map_takes_out_of_a_subject_what_is_behind_it_and_orders_what_is_fou
     assert!((mask_nearness(&left, &depth).unwrap() - 210.0).abs() < 1.0);
     assert!((mask_nearness(&right, &depth).unwrap() - 30.0).abs() < 1.0);
     assert_eq!(mask_nearness(&GrayImage::new(400, 200), &depth), None);
+    // Where a mask is, for a light to be put on it: how far, how deep, and its middle.
+    let (far, deep, at) = super::masks::mask_depth_span(&left, &depth).unwrap();
+    assert!((far - 100.0 * (1.0 - 210.0 / 255.0)).abs() < 1.0 && deep < 1.0, "{far}, {deep}");
+    assert!((at[0] - 0.125).abs() < 0.01 && (at[1] - 0.5).abs() < 0.01, "{at:?}");
+    let (far, deep, _) = super::masks::mask_depth_span(&whole, &slope).unwrap();
+    assert!((far - 100.0 * (1.0 - 150.0 / 255.0)).abs() < 2.0, "the middle of a slope: {far}");
+    assert!((deep - 100.0 * 160.0 / 255.0).abs() < 3.0, "most of how deep it is: {deep}");
+    assert_eq!(super::masks::mask_depth_span(&GrayImage::new(400, 200), &depth), None);
 }
 
 /// A mask over the left part of the photo (full left of 45%, none right of 55%).

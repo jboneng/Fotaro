@@ -1404,6 +1404,7 @@ impl FotaroApp {
                         s.develop.picking_wb = false;
                         s.develop.picking_detail = false;
                         s.develop.picking_focus = false;
+                        s.develop.picking_light = false;
                         // Remove: Esc closes it.
                         if s.develop.removing.is_some() {
                             crate::ui::set_removing(&mut s.develop, false);
@@ -2041,6 +2042,7 @@ impl FotaroApp {
             d.picking_wb = false;
             d.picking_detail = false;
             d.picking_focus = false;
+            d.picking_light = false;
             d.set_sharpen_view(None);
             d.masking = None;
             d.commit(catalog, None)
@@ -2057,6 +2059,7 @@ impl FotaroApp {
                 d.picking_wb = !d.picking_wb;
                 d.picking_detail = false;
                 d.picking_focus = false;
+                d.picking_light = false;
             }
             Action::AutoTone => d.auto_tone(),
             Action::ClippingIndicators => d.set_clipping(!d.clipping),

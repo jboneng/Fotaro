@@ -595,6 +595,10 @@ impl DevelopSettings {
                 eat(u32::from(b));
             }
             eat(u32::from(self.effects.fog_show));
+            eat(u32::from(self.effects.relight_show));
+            for v in self.effects.relight_at {
+                eat(v.to_bits());
+            }
         }
         if self.grading != ColorGrading::default() {
             eat(0x9_ade);

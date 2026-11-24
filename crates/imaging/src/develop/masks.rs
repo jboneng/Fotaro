@@ -231,6 +231,38 @@ pub fn mask_nearness(mask: &image::GrayImage, depth: &image::GrayImage) -> Optio
     (n > 0.0).then(|| (sum / n) as f32)
 }
 
+/// Where what `mask` selects is by the depth map (both over the whole untransformed
+/// photo, at any sizes), for a light to be put on it: how far away the middle of it is
+/// and how deep most of it is (both on the 0..100 scale of [`depth_at`]), and its centre
+/// (0..1 of the photo). `None` when it selects next to nothing.
+pub fn mask_depth_span(mask: &image::GrayImage, depth: &image::GrayImage) -> Option<(f32, f32, [f32; 2])> {
+    let (w, h) = mask.dimensions();
+    if w == 0 || h == 0 || depth.width() == 0 || depth.height() == 0 {
+        return None;
+    }
+    let step = (w.max(h) / 256).max(1);
+    let mut far: Vec<u8> = Vec::new();
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    for y in (step / 2..h).step_by(step as usize) {
+        for x in (step / 2..w).step_by(step as usize) {
+            if mask.get_pixel(x, y)[0] > 128 {
+                let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+                far.push(255 - depth_value(depth, u, v));
+                sx += f64::from(u);
+                sy += f64::from(v);
+            }
+        }
+    }
+    if far.len() < 20 {
+        return None;
+    }
+    far.sort_unstable();
+    let n = far.len();
+    let at = |share: usize| 100.0 * f32::from(far[(n * share / 100).min(n - 1)]) / 255.0;
+    let centre = [(sx / n as f64) as f32, (sy / n as f64) as f32];
+    Some((at(50), at(90) - at(10), centre))
+}
+
 /// Take out of a Subject mask what the depth map says is clearly behind the subject: a
 /// piece of the background the model took along with it. Careful on purpose: only what is
 /// far behind the subject for how deep the subject itself is, and only where

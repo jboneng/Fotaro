@@ -588,6 +588,7 @@ fn basic(app: &mut FotaroApp, ui: &mut egui::Ui) {
         d.picking_wb = !d.picking_wb;
         d.picking_detail = false;
         d.picking_focus = false;
+        d.picking_light = false;
     }
     if let Some(label) = done {
         app.run(Command::DevelopCommit(label));
@@ -851,6 +852,23 @@ pub fn center(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         return;
     }
+    if s.develop.picking_light {
+        // Relight's Light Selector: the light goes on what is clicked.
+        if over_photo {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if resp.clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && img_rect.contains(p)
+        {
+            let q = (p - img_rect.min) / img_rect.size();
+            let (x, y) = unrotate(q, photo.rotation);
+            if s.develop.pick_light(x, y) {
+                app.run(Command::DevelopCommit(Some("Relight: Light".into())));
+            }
+        }
+        return;
+    }
     if s.develop.picking_focus {
         // Lens Blur's Focus Selector: click what should be sharp.
         if over_photo {
@@ -905,6 +923,7 @@ pub fn center(app: &mut FotaroApp, ui: &mut egui::Ui) {
         if resp.clicked() {
             s.develop.picking_detail = false;
             s.develop.picking_focus = false;
+            s.develop.picking_light = false;
         }
         return;
     }
@@ -1702,6 +1721,7 @@ fn detail_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             d.picking_detail = !d.picking_detail;
             d.picking_wb = false;
             d.picking_focus = false;
+            d.picking_light = false;
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let arrow = if d.detail_box_open { "⏷" } else { "⏴" };
@@ -1939,6 +1959,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let defaults = d.defaults();
     let mut st = d.settings.clone();
     let mut done: Option<Option<String>> = None;
+    let mut placing = false;
 
     sub_header(ui, "Post-Crop Vignetting", |_| {});
     ui.horizontal(|ui| {
@@ -1970,7 +1991,39 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         match n {
             1 => sub_header(ui, "Grain", |_| {}),
             2 => sub_header(ui, "Glow", |_| {}),
-            5 => sub_header(ui, "Relight", |_| {}),
+            5 => {
+                // The Light Selector: click the photo where the light should fall.
+                let (picking, mapped) = (d.picking_light, st.effects.fog_depth.is_some());
+                let (idle, finding) = (
+                    d.ai_job.is_none(),
+                    d.ai_job.as_ref().is_some_and(|j| j.target == crate::develop::ToolTarget::Light),
+                );
+                let (mut toggle, mut subject) = (false, false);
+                sub_header(ui, "Relight", |ui| {
+                    let button = egui::Button::new(RichText::new("⊹").size(15.0)).selected(picking);
+                    toggle = ui
+                        .add_enabled(mapped, button)
+                        .on_hover_text("Light Selector: click the photo where the light should fall")
+                        .on_disabled_hover_text("Needs the photo's depth map: move a slider to have it made")
+                        .clicked();
+                    subject = ui
+                        .add_enabled(idle, egui::Button::new("Subject").small())
+                        .on_hover_text("Find the subject and put the light on it")
+                        .clicked();
+                    if finding {
+                        ui.add(egui::Spinner::new().size(11.0));
+                    }
+                });
+                if subject {
+                    d.select_ai(crate::develop::AiKind::Subject, crate::develop::ToolTarget::Light);
+                }
+                if toggle {
+                    d.picking_light = !picking;
+                    d.picking_focus = false;
+                    d.picking_wb = false;
+                    d.picking_detail = false;
+                }
+            }
             4 => {
                 // The Focus Selector: click the photo where it should be sharp.
                 let (picking, mapped) = (d.picking_focus, st.effects.fog_depth.is_some());
@@ -1984,6 +2037,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                         .clicked();
                 });
                 if toggle {
+                    d.picking_light = false;
                     d.picking_focus = !picking;
                     d.picking_wb = false;
                     d.picking_detail = false;
@@ -2044,11 +2098,16 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 }
                 EffectParam::GrainSize | EffectParam::GrainRoughness => e.grain_amount > 0.0,
                 EffectParam::GlowAmount | EffectParam::FogAmount | EffectParam::BlurAmount => true,
-                EffectParam::RelightNear
+                EffectParam::RelightAmount
+                | EffectParam::RelightWarmth
+                | EffectParam::RelightNear
                 | EffectParam::RelightFar
                 | EffectParam::RelightWarmthNear
                 | EffectParam::RelightWarmthFar => true,
-                EffectParam::RelightDepth | EffectParam::RelightFeather => e.relights(),
+                EffectParam::RelightDepth | EffectParam::RelightRange | EffectParam::RelightFeather => {
+                    e.relights()
+                }
+                EffectParam::RelightSize => e.relight_lights(),
                 EffectParam::BlurFocus | EffectParam::BlurRange | EffectParam::BlurHighlights => {
                     e.blur_amount > 0.0
                 }
@@ -2069,11 +2128,12 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 log: false,
                 gradient: match p {
                     EffectParam::VignetteAmount => Some([Color32::from_gray(20), Color32::from_gray(235)]),
-                    EffectParam::RelightNear | EffectParam::RelightFar => {
+                    EffectParam::RelightAmount | EffectParam::RelightNear | EffectParam::RelightFar => {
                         Some([Color32::from_gray(20), Color32::from_gray(235)])
                     }
                     EffectParam::GlowWarmth
                     | EffectParam::FogWarmth
+                    | EffectParam::RelightWarmth
                     | EffectParam::RelightWarmthNear
                     | EffectParam::RelightWarmthFar => {
                         Some([Color32::from_rgb(70, 110, 220), Color32::from_rgb(230, 170, 60)])
@@ -2090,7 +2150,20 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             if row.inner.done {
                 done = Some(None);
             }
+            // Where the light falls shows while its place is being dragged.
+            placing |= row.inner.held
+                && matches!(
+                    p,
+                    EffectParam::RelightDepth
+                        | EffectParam::RelightRange
+                        | EffectParam::RelightFeather
+                        | EffectParam::RelightSize
+                );
         }
+    }
+    if placing != d.relight_view {
+        d.relight_view = placing;
+        d.request_renders();
     }
     if st != d.settings {
         d.set_live(st);
