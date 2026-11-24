@@ -2102,7 +2102,10 @@ impl FotaroApp {
                 d.apply(c, s, "White Balance: Auto")
             }),
             Action::ResetSettings => self.develop_op(|d, c| {
-                let defaults = d.defaults();
+                // (The photo's depth and surface maps are the photo's, not settings: kept.)
+                let mut defaults = d.defaults();
+                defaults.effects.fog_depth = d.settings.effects.fog_depth.clone();
+                defaults.effects.relight_surface = d.settings.effects.relight_surface.clone();
                 d.apply(c, defaults, "Reset")
             }),
             Action::PasteSettings => match d.clipboard.clone() {

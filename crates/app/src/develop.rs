@@ -1841,8 +1841,6 @@ pub struct DevelopState {
     pub picking_focus: bool,
     /// Relight's Light Selector: the next click on the photo puts the light there.
     pub picking_light: bool,
-    /// Show where Relight's light falls (while its place is being dragged).
-    pub relight_view: bool,
     /// The Relight panel's picture of where the light falls (and what it was made for).
     pub relight_preview: Option<(u64, egui::TextureHandle)>,
     /// A drag on that picture: of the lamp around it (the light's Direction), else of the
@@ -2021,7 +2019,6 @@ impl DevelopState {
             picking_detail: false,
             picking_focus: false,
             picking_light: false,
-            relight_view: false,
             relight_preview: None,
             relight_drag: None,
             relight_advanced: false,
@@ -3155,7 +3152,6 @@ impl DevelopState {
             s.transform.crop = s.transform.crop.uncropped();
         }
         s.effects.fog_show = self.show_depth && !self.before;
-        s.effects.relight_show = self.relight_view && !self.before;
         s.effects.surface_show = self.show_surface && !self.before;
         s
     }

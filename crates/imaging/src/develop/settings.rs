@@ -459,6 +459,8 @@ impl DevelopSettings {
             (s.temp, s.tint) = (0.0, 0.0);
         }
         s.process_version = PROCESS_VERSION;
+        // The photo's maps change nothing by themselves.
+        (s.effects.fog_depth, s.effects.relight_surface) = (None, None);
         s == Self::default_for(raw)
     }
 

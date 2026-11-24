@@ -1952,19 +1952,20 @@ fn transform_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
 /// Relight's picture of where its light falls (white on the photo's shapes, by the depth
 /// map): dragged up and down, the light goes farther and nearer; a click puts it on what
 /// is clicked. With Shaping, a lamp around it shows where the light comes from, and is
-/// dragged around. Returns whether the light is being placed.
+/// dragged around. (The photo shows the light as it will be all along: the picture is
+/// what shows where it falls.)
 fn relight_placer(
     ui: &mut egui::Ui,
     d: &mut DevelopState,
     st: &mut imaging::develop::DevelopSettings,
     done: &mut Option<Option<String>>,
-) -> bool {
+) {
     use std::hash::{Hash, Hasher};
     let rotation = d.rotation();
     let Some(id) = st.effects.fog_depth.clone() else {
         d.relight_preview = None;
         ui.label(weak("Raise Amount to see where the light falls").size(11.5));
-        return false;
+        return;
     };
     // The picture, made again when what it shows changes.
     let e = &st.effects;
@@ -1986,7 +1987,7 @@ fn relight_placer(
             (key, ui.ctx().load_texture("relight_preview", image, egui::TextureOptions::LINEAR))
         });
     }
-    let Some((_, tex)) = d.relight_preview.clone() else { return false };
+    let Some((_, tex)) = d.relight_preview.clone() else { return };
     let shown = rotated_size(tex.size_vec2(), rotation);
     let width = ui.available_width();
     let scale = (width / shown.x).min(170.0 / shown.y);
@@ -2080,8 +2081,6 @@ fn relight_placer(
         painter.circle(l, 6.0, warm, egui::Stroke::new(1.0, Color32::from_gray(40)));
     }
     ui.add_space(2.0);
-    // (Turning the lamp is seen in the photo itself: only moving the light dims the rest.)
-    resp.dragged() && d.relight_drag == Some(false)
 }
 
 fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
@@ -2094,7 +2093,6 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let defaults = d.defaults();
     let mut st = d.settings.clone();
     let mut done: Option<Option<String>> = None;
-    let mut placing = false;
     let rotation = d.rotation();
 
     sub_header(ui, "Post-Crop Vignetting", |_| {});
@@ -2338,22 +2336,9 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 done = Some(None);
             }
             if *p == EffectParam::RelightAmount {
-                placing |= relight_placer(ui, d, &mut st, &mut done);
+                relight_placer(ui, d, &mut st, &mut done);
             }
-            // Where the light falls shows while its place is being dragged.
-            placing |= row.inner.held
-                && matches!(
-                    p,
-                    EffectParam::RelightDepth
-                        | EffectParam::RelightRange
-                        | EffectParam::RelightFeather
-                        | EffectParam::RelightSize
-                );
         }
-    }
-    if placing != d.relight_view {
-        d.relight_view = placing;
-        d.request_renders();
     }
     if st != d.settings {
         d.set_live(st);
