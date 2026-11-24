@@ -26,6 +26,7 @@ pub enum SettingsGroup {
     Glow,
     Fog,
     LensBlur,
+    Relight,
     LensProfile,
     ChromaticAberration,
     LensManual,
@@ -38,7 +39,7 @@ pub enum SettingsGroup {
 
 impl SettingsGroup {
     /// In panel order.
-    pub const ALL: [SettingsGroup; 24] = [
+    pub const ALL: [SettingsGroup; 25] = [
         Self::Treatment,
         Self::WhiteBalance,
         Self::BasicTone,
@@ -55,6 +56,7 @@ impl SettingsGroup {
         Self::Glow,
         Self::Fog,
         Self::LensBlur,
+        Self::Relight,
         Self::LensProfile,
         Self::ChromaticAberration,
         Self::LensManual,
@@ -83,6 +85,7 @@ impl SettingsGroup {
             Self::Glow => "Glow",
             Self::Fog => "Fog",
             Self::LensBlur => "Lens Blur",
+            Self::Relight => "Relight",
             Self::LensProfile => "Lens Profile Corrections",
             Self::ChromaticAberration => "Chromatic Aberration",
             Self::LensManual => "Lens Distortion & Vignetting",
@@ -102,7 +105,9 @@ impl SettingsGroup {
             }
             Self::ToneCurve | Self::Hsl | Self::BwMix | Self::ColorGrading => "Color",
             Self::Sharpening | Self::NoiseReduction => "Detail",
-            Self::Vignette | Self::Grain | Self::Glow | Self::Fog | Self::LensBlur => "Effects",
+            Self::Vignette | Self::Grain | Self::Glow | Self::Fog | Self::LensBlur | Self::Relight => {
+                "Effects"
+            }
             Self::LensProfile | Self::ChromaticAberration | Self::LensManual => "Lens Corrections",
             Self::Transform | Self::Crop => "Geometry",
             Self::Masks | Self::Spots | Self::Dust => "Local",
@@ -180,6 +185,12 @@ fn copy_group(f: &DevelopSettings, t: &mut DevelopSettings, g: SettingsGroup) {
             let (e, s) = (&mut t.effects, &f.effects);
             (e.blur_amount, e.blur_focus) = (s.blur_amount, s.blur_focus);
             (e.blur_range, e.blur_highlights) = (s.blur_range, s.blur_highlights);
+        }
+        G::Relight => {
+            let (e, s) = (&mut t.effects, &f.effects);
+            (e.relight_near, e.relight_far) = (s.relight_near, s.relight_far);
+            (e.relight_depth, e.relight_feather) = (s.relight_depth, s.relight_feather);
+            (e.relight_warmth_near, e.relight_warmth_far) = (s.relight_warmth_near, s.relight_warmth_far);
         }
         G::Transform => {
             // Everything of the Transform panel but the crop.
@@ -318,6 +329,12 @@ pub(super) fn every_field_changed() -> DevelopSettings {
             blur_focus: 25.0,
             blur_range: 30.0,
             blur_highlights: 10.0,
+            relight_near: 20.0,
+            relight_far: -30.0,
+            relight_depth: 60.0,
+            relight_feather: 30.0,
+            relight_warmth_near: 15.0,
+            relight_warmth_far: -25.0,
             fog_show: false,
         },
         transform: Transform {

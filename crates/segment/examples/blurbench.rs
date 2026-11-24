@@ -2,7 +2,8 @@
 //! `cargo run -p segment --example blurbench --release -- <models dir> <out dir> <photo> [key=value ...]`
 //!
 //! The models dir holds Depth Anything V2 Small's `model.onnx`. Keys: `amount`, `focus`,
-//! `range`, `highlights` (the sliders), `proxy` (the long side rendered, default 2560; 0
+//! `range`, `highlights` (Lens Blur's sliders), `near`, `far`, `depth`, `feather`, `warmnear`,
+//! `warmfar` (Relight's), `proxy` (the long side rendered, default 2560; 0
 //! for full size), `at=x,y` (take Focus from that point of the photo, 0..1), and
 //! `crop=x,y,w,h` (render only that part, in pixels). The photo's depth map is made once
 //! and kept in the out dir. Writes `<photo>_blur.png` and prints the time the render took.
@@ -55,6 +56,14 @@ fn main() -> anyhow::Result<()> {
     s.effects.blur_focus = number("focus", s.effects.blur_focus);
     s.effects.blur_range = number("range", s.effects.blur_range);
     s.effects.blur_highlights = number("highlights", 0.0);
+    s.effects.fog_show = value("show").is_some();
+    // Relight: near, far, depth, feather, warmnear, warmfar.
+    s.effects.relight_near = number("near", 0.0);
+    s.effects.relight_far = number("far", 0.0);
+    s.effects.relight_depth = number("depth", s.effects.relight_depth);
+    s.effects.relight_feather = number("feather", s.effects.relight_feather);
+    s.effects.relight_warmth_near = number("warmnear", 0.0);
+    s.effects.relight_warmth_far = number("warmfar", 0.0);
     if let Some((x, y)) = value("at").and_then(|v| v.split_once(',')) {
         let far = imaging::develop::depth_at(&id, x.parse()?, y.parse()?);
         println!("at {x}, {y}: {far:?}");
@@ -81,7 +90,7 @@ fn main() -> anyhow::Result<()> {
         s.effects.blur_amount,
         s.effects.blur_focus
     );
-    let path = out.join(format!("{stem}_blur.png"));
+    let path = out.join(format!("{stem}_{}.png", value("name").unwrap_or("blur")));
     rendered.save(&path)?;
     println!("{}", path.display());
     Ok(())

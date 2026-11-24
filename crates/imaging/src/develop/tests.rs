@@ -1019,6 +1019,70 @@ fn fog_thickens_with_distance_and_regions_still_match() {
 }
 
 #[test]
+fn relight_lights_near_and_far_separately_and_regions_still_match() {
+    // Mid grey with a little texture; near on the left, far on the right.
+    let img: RgbImage = ImageBuffer::from_fn(200, 100, |x, y| {
+        let n = ((x * 7 + y * 13) % 5) as u8;
+        Rgb([110 + n, 110 + n, 110 + n])
+    });
+    let w = rendered(&img);
+    let picture = image::GrayImage::from_fn(50, 25, |x, _| image::Luma([255 - (x * 255 / 49) as u8]));
+    let _store_lock = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = tempfile::tempdir().unwrap();
+    set_mask_store(Some(store.path().to_path_buf()));
+    save_mask_picture("relight-depth", &picture).unwrap();
+    let relight = |change: fn(&mut Effects)| {
+        let mut e = Effects {
+            relight_depth: 50.0,
+            relight_feather: 20.0,
+            fog_depth: Some("relight-depth".into()),
+            ..Effects::default()
+        };
+        change(&mut e);
+        DevelopSettings { effects: e, ..Default::default() }
+    };
+    let plain = render_srgb8(&w, &DevelopSettings::default());
+    let lum = |i: &RgbImage, x: u32, y: u32| f32::from(i.get_pixel(x, y)[1]);
+    // Near brighter: the left lifts, the right stays.
+    let s = relight(|e| e.relight_near = 60.0);
+    let out = render_srgb8(&w, &s);
+    assert!(lum(&out, 15, 50) > lum(&plain, 15, 50) + 25.0, "near is lit");
+    assert_eq!(out.get_pixel(190, 50), plain.get_pixel(190, 50), "far is left alone");
+    // Far darker: the other way round.
+    let dark = render_srgb8(&w, &relight(|e| e.relight_far = -60.0));
+    assert!(lum(&dark, 190, 50) < lum(&plain, 190, 50) - 25.0, "far is dimmed");
+    assert_eq!(dark.get_pixel(15, 50), plain.get_pixel(15, 50), "near is left alone");
+    // Depth moves the border: with it far out, the middle counts as near too.
+    let mid = lum(&out, 120, 50);
+    let deep = render_srgb8(&w, &relight(|e| (e.relight_near, e.relight_depth) = (60.0, 90.0)));
+    assert!(lum(&deep, 120, 50) > mid + 15.0, "the border moved back");
+    // Feather: a hard border keeps the near side fully lit closer to it.
+    let hard = render_srgb8(&w, &relight(|e| (e.relight_near, e.relight_feather) = (60.0, 0.0)));
+    assert!(lum(&hard, 90, 50) > lum(&out, 90, 50), "a harder border");
+    // Warmth: redder and less blue near, about as bright; far untouched.
+    let warm = render_srgb8(&w, &relight(|e| e.relight_warmth_near = 80.0));
+    let (p, q) = (warm.get_pixel(15, 50), plain.get_pixel(15, 50));
+    assert!(p[0] > q[0] + 8 && p[2] + 8 < q[2], "warmer near: {p:?} from {q:?}");
+    assert!(p[1].abs_diff(q[1]) <= 6, "about as bright: {p:?} from {q:?}");
+    assert_eq!(warm.get_pixel(190, 50), plain.get_pixel(190, 50));
+    // Regions render like the whole.
+    let part = render_region_srgb8(&w, &s, Region { x: 60, y: 20, w: 100, h: 60 });
+    for (x, y, p) in part.enumerate_pixels() {
+        let q = out.get_pixel(x + 60, y + 20);
+        assert!((0..3).all(|c| p[c].abs_diff(q[c]) <= 1), "({x}, {y}): {p:?} vs {q:?}");
+    }
+    // Without the depth map nothing happens; nor with everything at zero.
+    let mut none = s.clone();
+    none.effects.fog_depth = None;
+    assert_eq!(render_srgb8(&w, &none), plain);
+    assert_eq!(render_srgb8(&w, &relight(|e| e.relight_depth = 20.0)), plain);
+    assert_ne!(s.stable_hash(), relight(|e| e.relight_near = 61.0).stable_hash());
+    // Kept as written.
+    assert_eq!(DevelopSettings::from_json(&s.to_json()).unwrap(), s);
+    set_mask_store(None);
+}
+
+#[test]
 fn lens_blur_blurs_what_is_out_of_focus_and_regions_still_match() {
     // Fine stripes everywhere; near on the left half, far on the right.
     let img: RgbImage = ImageBuffer::from_fn(400, 200, |x, y| {

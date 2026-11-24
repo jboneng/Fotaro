@@ -1958,17 +1958,19 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
         });
     });
-    let groups: [&[EffectParam]; 5] = [
+    let groups: [&[EffectParam]; 6] = [
         &EffectParam::VIGNETTE,
         &EffectParam::GRAIN,
         &EffectParam::GLOW,
         &EffectParam::FOG,
         &EffectParam::BLUR,
+        &EffectParam::RELIGHT,
     ];
     for (n, params) in groups.into_iter().enumerate() {
         match n {
             1 => sub_header(ui, "Grain", |_| {}),
             2 => sub_header(ui, "Glow", |_| {}),
+            5 => sub_header(ui, "Relight", |_| {}),
             4 => {
                 // The Focus Selector: click the photo where it should be sharp.
                 let (picking, mapped) = (d.picking_focus, st.effects.fog_depth.is_some());
@@ -1988,7 +1990,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 }
             }
             3 => {
-                // Fog and Lens Blur go by a depth map of the photo.
+                // Fog, Lens Blur and Relight go by a depth map of the photo.
                 sub_header(ui, "Depth", |_| {});
                 let tip = "See the photo's depth map instead of the photo: white is near, black is far";
                 ui.horizontal(|ui| {
@@ -2013,7 +2015,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     }
                 });
                 // Fog goes by a depth map of the photo, made by a model the first time.
-                let wanted = st.effects.fog_amount != 0.0 || st.effects.blur_amount > 0.0 || d.show_depth;
+                let wanted = st.effects.uses_depth() || d.show_depth;
                 if wanted && st.effects.fog_depth.is_none() {
                     ui.horizontal(|ui| {
                         if d.ai_job.is_some() {
@@ -2042,6 +2044,11 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 }
                 EffectParam::GrainSize | EffectParam::GrainRoughness => e.grain_amount > 0.0,
                 EffectParam::GlowAmount | EffectParam::FogAmount | EffectParam::BlurAmount => true,
+                EffectParam::RelightNear
+                | EffectParam::RelightFar
+                | EffectParam::RelightWarmthNear
+                | EffectParam::RelightWarmthFar => true,
+                EffectParam::RelightDepth | EffectParam::RelightFeather => e.relights(),
                 EffectParam::BlurFocus | EffectParam::BlurRange | EffectParam::BlurHighlights => {
                     e.blur_amount > 0.0
                 }
@@ -2062,7 +2069,13 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 log: false,
                 gradient: match p {
                     EffectParam::VignetteAmount => Some([Color32::from_gray(20), Color32::from_gray(235)]),
-                    EffectParam::GlowWarmth | EffectParam::FogWarmth => {
+                    EffectParam::RelightNear | EffectParam::RelightFar => {
+                        Some([Color32::from_gray(20), Color32::from_gray(235)])
+                    }
+                    EffectParam::GlowWarmth
+                    | EffectParam::FogWarmth
+                    | EffectParam::RelightWarmthNear
+                    | EffectParam::RelightWarmthFar => {
                         Some([Color32::from_rgb(70, 110, 220), Color32::from_rgb(230, 170, 60)])
                     }
                     _ => None,
