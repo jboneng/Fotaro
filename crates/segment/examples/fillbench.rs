@@ -6,16 +6,18 @@
 //! (the size of a person near the camera) and a small one. Per hole it prints how far the
 //! coarse picture is from the truth, and how grainy and how coarse-grained the fill is
 //! against the truth (1.00: the same), for the model's picture as it was shown before
-//! ("plain") and with the photo's own detail ("detail"); and writes `<name>.png`: truth |
-//! plain | detail at full size, around the hole's middle.
+//! ("plain") and with the photo's own detail ("detail"); the step in tone across the
+//! hole's border (of 255) in the truth, with detail only, and with the border matched;
+//! and writes `<name>.png`: truth | plain | detail | detail with the border matched, at
+//! full size, around the hole's middle.
 
 use std::path::{Path, PathBuf};
 
 use image::{GrayImage, Luma, RgbImage, imageops};
 use imaging::SourceKind;
 use imaging::develop::{
-    DevelopSettings, Fill, FillInput, Spot, SpotMode, WorkingImage, fill_input, finish_fill, healed_crop,
-    save_fill_picture, set_mask_store,
+    DevelopSettings, Fill, FillInput, Finish, Spot, SpotMode, WorkingImage, fill_input, finish_fill_with,
+    healed_crop, save_fill_picture, set_mask_store,
 };
 
 const PHOTOS: &[&str] = &[
@@ -70,6 +72,43 @@ fn coarse_error(a: &RgbImage, b: &RgbImage, inside: &GrayImage) -> f32 {
     (sum / n.max(1) as f64).sqrt() as f32
 }
 
+/// The step in tone across the hole's border (of 255, green): at the model's size, the
+/// mean just inside against the mean just outside, along the border.
+fn border_step(img: &RgbImage, inside: &GrayImage) -> f32 {
+    let s = 512u32;
+    let a = imageops::resize(img, s, s, imageops::FilterType::Triangle);
+    let m = imageops::resize(inside, s, s, imageops::FilterType::Triangle);
+    let hole = |x: i64, y: i64| m.get_pixel(x.clamp(0, 511) as u32, y.clamp(0, 511) as u32)[0] > 0;
+    let (mut sum, mut n) = (0.0f64, 0u64);
+    for y in 0..i64::from(s) {
+        for x in 0..i64::from(s) {
+            if !hole(x, y) || (hole(x - 1, y) && hole(x + 1, y) && hole(x, y - 1) && hole(x, y + 1)) {
+                continue;
+            }
+            let (mut i, mut ni, mut o, mut no) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for dy in -4..=4 {
+                for dx in -4..=4 {
+                    let (px, py) = (x + dx, y + dy);
+                    if px < 0 || py < 0 || px >= i64::from(s) || py >= i64::from(s) {
+                        continue;
+                    }
+                    let v = f32::from(a.get_pixel(px as u32, py as u32)[1]);
+                    if hole(px, py) {
+                        (i, ni) = (i + v, ni + 1.0);
+                    } else {
+                        (o, no) = (o + v, no + 1.0);
+                    }
+                }
+            }
+            if ni > 0.0 && no > 0.0 {
+                sum += f64::from((i / ni - o / no).abs());
+                n += 1;
+            }
+        }
+    }
+    (sum / n.max(1) as f64) as f32
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some((out, photos)) = args.split_first() else {
@@ -85,12 +124,23 @@ fn main() -> anyhow::Result<()> {
         photos.iter().map(PathBuf::from).collect()
     };
     println!(
-        "{:<34} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7}",
-        "hole", "crop", "coarse", "coarse", "grain", "grain", "size", "size", "detail"
+        "{:<30} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "hole",
+        "crop",
+        "coarse",
+        "coarse",
+        "coarse",
+        "grain",
+        "grain",
+        "size",
+        "step",
+        "step",
+        "step",
+        "took"
     );
     println!(
-        "{:<34} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7}",
-        "", "px", "plain", "detail", "plain", "detail", "plain", "detail", "took"
+        "{:<30} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "", "px", "plain", "detail", "border", "plain", "border", "border", "truth", "detail", "border", ""
     );
     for path in &photos {
         let raw = path
@@ -141,29 +191,40 @@ fn main() -> anyhow::Result<()> {
             };
             let before = shown(&format!("{stem}-{k}-plain"), &plain, input.rect, 0.0, false)?;
             let started = std::time::Instant::now();
-            let done = finish_fill(&input, &filled, spot.shape_key());
+            let how = Finish { seed: spot.shape_key(), ..Finish::default() };
+            let done = finish_fill_with(&input, &filled, &how);
             let took = started.elapsed();
             let after =
-                shown(&format!("{stem}-{k}-detail"), &done.picture, done.rect, done.detail, done.full)?;
+                shown(&format!("{stem}-{k}-border"), &done.picture, done.rect, done.detail, done.full)?;
+            let old = finish_fill_with(&input, &filled, &Finish { border: false, ..how });
+            let unmatched =
+                shown(&format!("{stem}-{k}-detail"), &old.picture, old.rect, old.detail, old.full)?;
             let truth = &input.image;
             let r = |i: &RgbImage, d: u32| roughness(i, &input.mask, d);
             let (t1, t2) = (r(truth, 1), r(truth, 2));
             let ratio =
                 |i: &RgbImage| (r(i, 1) / t1.max(1e-6), (r(i, 2) / r(i, 1).max(1e-6)) / (t2 / t1.max(1e-6)));
-            let ((gb, sb), (ga, sa)) = (ratio(&before), ratio(&after));
+            let ((gb, _), (ga, sa)) = (ratio(&before), ratio(&after));
             println!(
-                "{:<34} {:>6} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>6.1}s",
+                "{:<30} {:>5} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>6.1}s",
                 format!("{stem} {name}"),
                 side,
                 coarse_error(truth, &before, &input.mask),
+                coarse_error(truth, &unmatched, &input.mask),
                 coarse_error(truth, &after, &input.mask),
                 gb,
                 ga,
-                sb,
                 sa,
+                border_step(truth, &input.mask),
+                border_step(&unmatched, &input.mask),
+                border_step(&after, &input.mask),
                 took.as_secs_f32()
             );
-            sheet(&out.join(format!("{stem}_{name}.png")), &[truth, &before, &after], &input.mask)?;
+            sheet(
+                &out.join(format!("{stem}_{name}.png")),
+                &[truth, &before, &unmatched, &after],
+                &input.mask,
+            )?;
         }
     }
     let _ = std::fs::remove_dir_all(store);

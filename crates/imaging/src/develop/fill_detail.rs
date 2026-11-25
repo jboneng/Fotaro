@@ -34,7 +34,25 @@ const MARGIN: usize = 8;
 /// module's notes) and a picture of the hole's box only, at the photo's size; a small one
 /// the model's picture as it is. `seed` picks among equally good places to copy from.
 pub fn finish_fill(input: &FillInput, out: &RgbImage, seed: u64) -> FinishedFill {
-    finish_fill_by_depth(input, out, seed, None)
+    finish_fill_with(input, out, &Finish { seed, ..Finish::default() })
+}
+
+/// How a fill is finished (see [`finish_fill_with`]).
+#[derive(Clone, Copy)]
+pub struct Finish<'a> {
+    /// Picks among equally good places to copy detail from.
+    pub seed: u64,
+    /// The photo's depth map (white near, the whole untransformed photo): detail is then
+    /// copied from places about as far away as what is behind the hole.
+    pub depth: Option<&'a image::GrayImage>,
+    /// Match the fill's tone to the photo along the hole's border.
+    pub border: bool,
+}
+
+impl Default for Finish<'_> {
+    fn default() -> Self {
+        Finish { seed: 0, depth: None, border: true }
+    }
 }
 
 /// [`finish_fill`] with the photo's depth map (white near, covering the whole untransformed
@@ -47,16 +65,119 @@ pub fn finish_fill_by_depth(
     seed: u64,
     depth: Option<&image::GrayImage>,
 ) -> FinishedFill {
+    finish_fill_with(input, out, &Finish { seed, depth, ..Finish::default() })
+}
+
+/// [`finish_fill`] as `how` says: first the fill's tone is matched to the photo along
+/// the hole's border (see [`match_border`]), then a large crop gets the photo's detail.
+pub fn finish_fill_with(input: &FillInput, out: &RgbImage, how: &Finish) -> FinishedFill {
     let side = input.image.width();
     let m = out.width();
+    let matched = (how.border && m > 0).then(|| match_border(input, out));
+    let out = matched.as_ref().unwrap_or(out);
     if side > PLAIN_SIDE
         && m > 0
-        && let Some(done) = with_detail(input, out, seed, depth)
+        && let Some(done) = with_detail(input, out, how.seed, how.depth)
     {
         return done;
     }
     let picture = image::imageops::resize(out, side, side, image::imageops::FilterType::Lanczos3);
     FinishedFill { picture, rect: input.rect, detail: (m as f32 / side as f32).min(1.0), full: false }
+}
+
+/// The hole of `input` at the model's size (`m` square): the cells with any of it.
+fn hole_cells(input: &FillInput, m: usize) -> Vec<bool> {
+    let side = input.image.width() as usize;
+    let k = side as f32 / m as f32;
+    let mut hole = vec![false; m * m];
+    for (i, v) in input.mask.as_raw().iter().enumerate() {
+        if *v > 0 {
+            let (x, y) = (i % side, i / side);
+            hole[((y as f32 / k) as usize).min(m - 1) * m + ((x as f32 / k) as usize).min(m - 1)] = true;
+        }
+    }
+    hole
+}
+
+/// The most a fill's tone is moved to meet the photo (of 255): what the model drew at
+/// the border on purpose (something dark going on into the hole) is not undone.
+const BORDER_MOST: f32 = 48.0;
+/// Over how many cells along the border the difference is averaged (to either side):
+/// grain and texture are not a difference in tone.
+const BORDER_ALONG: usize = 6;
+
+/// The model's picture `out` with its tone matched to the photo along the hole's border:
+/// where the fill meets the photo lighter, darker or of another colour than the photo is
+/// right there (a sky or a wall drawn a shade off), the difference is taken off at the
+/// border and, fading smoothly, across the hole. What the model drew stays as drawn, on
+/// another level: the border no longer shows as a step.
+pub fn match_border(input: &FillInput, out: &RgbImage) -> RgbImage {
+    let m = out.width() as usize;
+    if m == 0 || out.height() as usize != m {
+        return out.clone();
+    }
+    let hole = hole_cells(input, m);
+    // The photo as the model saw it.
+    let photo =
+        image::imageops::resize(&input.image, m as u32, m as u32, image::imageops::FilterType::Triangle);
+    // At the hole's outermost cells: the photo right outside less the fill right inside.
+    let mut diff = vec![0.0f32; 3 * m * m];
+    let mut edge = vec![0.0f32; m * m];
+    for y in 0..m {
+        for x in 0..m {
+            if !hole[y * m + x] {
+                continue;
+            }
+            let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
+            for (dx, dy) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                let (nx, ny) = (x as isize + dx, y as isize + dy);
+                if nx < 0 || ny < 0 || nx >= m as isize || ny >= m as isize {
+                    continue;
+                }
+                if !hole[ny as usize * m + nx as usize] {
+                    let p = photo.get_pixel(nx as u32, ny as u32);
+                    for c in 0..3 {
+                        sum[c] += f32::from(p[c]);
+                    }
+                    n += 1.0;
+                }
+            }
+            if n > 0.0 {
+                let o = out.get_pixel(x as u32, y as u32);
+                for c in 0..3 {
+                    diff[3 * (y * m + x) + c] = sum[c] / n - f32::from(o[c]);
+                }
+                edge[y * m + x] = 1.0;
+            }
+        }
+    }
+    if edge.iter().all(|e| *e == 0.0) {
+        return out.clone();
+    }
+    // Averaged along the border.
+    let blur = |v: &[f32]| box_blur_par(&box_blur_par(v, m, m, BORDER_ALONG), m, m, BORDER_ALONG);
+    let weight = blur(&edge);
+    let mut level = vec![0.0f32; 3 * m * m];
+    for c in 0..3 {
+        let plane: Vec<f32> = (0..m * m).map(|i| diff[3 * i + c]).collect();
+        let sum = blur(&plane);
+        for i in 0..m * m {
+            if edge[i] > 0.0 {
+                level[3 * i + c] = (sum[i] / weight[i].max(1e-6)).clamp(-BORDER_MOST, BORDER_MOST);
+            }
+        }
+    }
+    // Across the hole: smoothly from what it is at the border.
+    let unknown: Vec<u8> = edge.iter().map(|e| if *e > 0.0 { 0 } else { 255 }).collect();
+    super::dust::fill_masked(&mut level, m, m, &unknown);
+    RgbImage::from_fn(m as u32, m as u32, |x, y| {
+        let i = y as usize * m + x as usize;
+        let p = out.get_pixel(x, y);
+        if !hole[i] {
+            return *p;
+        }
+        Rgb(std::array::from_fn(|c| (f32::from(p[c]) + level[3 * i + c]).round().clamp(0.0, 255.0) as u8))
+    })
 }
 
 fn with_detail(
@@ -422,6 +543,41 @@ mod tests {
         let by_depth = patch_match(&guide, &hole, m, 1, Some(&far)).unwrap();
         assert!(right(&plain) > 20, "by looks alone, from both halves ({})", right(&plain));
         assert_eq!(right(&by_depth), 0, "by depth, from its own half only");
+    }
+
+    #[test]
+    fn a_fill_a_shade_off_meets_the_photo_at_its_border() {
+        let (side, m) = (1024u32, 256u32);
+        let (input, out) = case(side, m);
+        let hole = hole_cells(&input, m as usize);
+        let inside = |x: u32, y: u32| hole[(y * m + x) as usize];
+        // The model drew the hole 20 lighter than the photo is around it.
+        let off = RgbImage::from_fn(m, m, |x, y| {
+            let v = out.get_pixel(x, y)[0] + if inside(x, y) { 20 } else { 0 };
+            Rgb([v, v, v])
+        });
+        let mean_off = |a: &RgbImage| {
+            let (mut sum, mut n) = (0.0f32, 0.0f32);
+            for (x, y, p) in a.enumerate_pixels() {
+                if inside(x, y) {
+                    sum += f32::from(p[0]) - f32::from(out.get_pixel(x, y)[0]);
+                    n += 1.0;
+                }
+            }
+            sum / n
+        };
+        let matched = match_border(&input, &off);
+        assert!(mean_off(&matched).abs() < 2.5, "still {} off", mean_off(&matched));
+        // Outside the hole nothing changes, and a fill that meets the photo stays as it is.
+        assert_eq!(matched.get_pixel(2, 2), off.get_pixel(2, 2));
+        let same = match_border(&input, &out);
+        assert!(mean_off(&same).abs() < 2.5, "moved by {}", mean_off(&same));
+        // Without the matching, the fill is kept a shade off.
+        let kept = finish_fill_with(&input, &off, &Finish { seed: 1, depth: None, border: false });
+        let done = finish_fill_with(&input, &off, &Finish { seed: 1, ..Finish::default() });
+        let (w, h) = (done.picture.width(), done.picture.height());
+        let row = |p: &RgbImage| (w / 4..3 * w / 4).map(|x| f32::from(p.get_pixel(x, h / 2)[0])).sum::<f32>();
+        assert!(row(&kept.picture) - row(&done.picture) > 10.0 * (w / 2) as f32);
     }
 
     #[test]
