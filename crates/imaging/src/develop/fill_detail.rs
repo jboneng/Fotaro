@@ -47,6 +47,8 @@ pub struct Finish<'a> {
     pub depth: Option<&'a image::GrayImage>,
     /// Match the fill's tone to the photo along the hole's border.
     pub border: bool,
+    /// Take soft colour casts out of the fill (see [`calm_colour`]).
+    pub calm: bool,
     /// Take the detail from about this far from each part of the hole (of the crop's
     /// side, right and down), when a place there is alike enough.
     pub prefer: Option<[f32; 2]>,
@@ -54,7 +56,7 @@ pub struct Finish<'a> {
 
 impl Default for Finish<'_> {
     fn default() -> Self {
-        Finish { seed: 0, depth: None, border: true, prefer: None }
+        Finish { seed: 0, depth: None, border: true, calm: true, prefer: None }
     }
 }
 
@@ -76,6 +78,8 @@ pub fn finish_fill_by_depth(
 pub fn finish_fill_with(input: &FillInput, out: &RgbImage, how: &Finish) -> FinishedFill {
     let side = input.image.width();
     let m = out.width();
+    let calmed = (how.calm && m > 0).then(|| calm_colour(input, out));
+    let out = calmed.as_ref().unwrap_or(out);
     let matched = (how.border && m > 0).then(|| match_border(input, out));
     let out = matched.as_ref().unwrap_or(out);
     if side > PLAIN_SIDE
@@ -125,6 +129,91 @@ const BORDER_MOST: f32 = 48.0;
 /// grain and texture are not a difference in tone.
 const BORDER_ALONG: usize = 6;
 
+/// Up to this far apart (of 255) the photo outside the border and the fill inside it are
+/// the same thing a shade off; from [`BORDER_OTHER`] on they are two things.
+const BORDER_SAME: f32 = 20.0;
+const BORDER_OTHER: f32 = 44.0;
+
+#[inline]
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A soft colour cast up to this strong (of 255, off grey) is taken out whole; from
+/// [`CAST_KEPT`] on it is colour the model meant.
+const CAST_GONE: f32 = 12.0;
+const CAST_KEPT: f32 = 36.0;
+/// Where the fill is this much lighter or darker than its surroundings carried inward,
+/// it is a thing the model drew, and its colour is its own.
+const CAST_THING: [f32; 2] = [40.0, 90.0];
+/// How broad a cast is, in cells (to either side).
+const CAST_ACROSS: usize = 8;
+
+/// The model's picture `out` without the soft colour casts models leave in a fill: a
+/// greenish or yellowish cloud in a sky, the glow of what was removed. The hole's
+/// surroundings carried smoothly inward say what colour a plain fill would have; where
+/// the fill is off that colour broadly and only a little, and is not something the model
+/// drew (clearly lighter or darker), the difference in colour is taken out. Light and
+/// dark stay as drawn, and so does fine colour.
+pub fn calm_colour(input: &FillInput, out: &RgbImage) -> RgbImage {
+    let m = out.width() as usize;
+    if m == 0 || out.height() as usize != m {
+        return out.clone();
+    }
+    let hole = hole_cells(input, m);
+    let other = other_cells(input, m);
+    let n = m * m;
+    // The surroundings, carried inward.
+    let mut plain = vec![0.0f32; 3 * n];
+    let unknown: Vec<u8> = (0..n).map(|i| if hole[i] || other[i] { 255 } else { 0 }).collect();
+    if unknown.iter().all(|u| *u > 0) || unknown.iter().all(|u| *u == 0) {
+        return out.clone();
+    }
+    for (i, p) in out.pixels().enumerate() {
+        if unknown[i] == 0 {
+            for c in 0..3 {
+                plain[3 * i + c] = f32::from(p[c]);
+            }
+        }
+    }
+    super::dust::fill_masked(&mut plain, m, m, &unknown);
+    // How far the fill is off it: in light, and in colour apart from light.
+    let inside: Vec<f32> = hole.iter().map(|h| if *h { 1.0 } else { 0.0 }).collect();
+    let blur = |v: &[f32]| box_blur_par(&box_blur_par(v, m, m, CAST_ACROSS), m, m, CAST_ACROSS);
+    let weight = blur(&inside);
+    let mut off = vec![[0.0f32; 4]; n];
+    for (i, p) in out.pixels().enumerate() {
+        if hole[i] {
+            let d: [f32; 3] = std::array::from_fn(|c| f32::from(p[c]) - plain[3 * i + c]);
+            let light = 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2];
+            off[i] = [d[0] - light, d[1] - light, d[2] - light, light];
+        }
+    }
+    let broad: [Vec<f32>; 4] = std::array::from_fn(|c| {
+        let plane: Vec<f32> = off.iter().map(|o| o[c]).collect();
+        let sum = blur(&plane);
+        (0..n).map(|i| sum[i] / weight[i].max(1e-6)).collect()
+    });
+    RgbImage::from_fn(m as u32, m as u32, |x, y| {
+        let i = y as usize * m + x as usize;
+        let p = out.get_pixel(x, y);
+        if !hole[i] {
+            return *p;
+        }
+        let cast = [broad[0][i], broad[1][i], broad[2][i]];
+        let strong = cast.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+        let meant = smoothstep(CAST_GONE, CAST_KEPT, strong)
+            .max(smoothstep(CAST_THING[0], CAST_THING[1], broad[3][i].abs()))
+            .max(smoothstep(CAST_THING[0], CAST_THING[1], off[i][3].abs()));
+        // (Colour only: a soft shade taken out the same way leaves a dark ring wherever
+        // the hole touches something dark, whose darkness the surroundings carry inward.)
+        Rgb(std::array::from_fn(|c| {
+            (f32::from(p[c]) - (1.0 - meant) * cast[c]).round().clamp(0.0, 255.0) as u8
+        }))
+    })
+}
+
 /// The model's picture `out` with its tone matched to the photo along the hole's border:
 /// where the fill meets the photo lighter, darker or of another colour than the photo is
 /// right there (a sky or a wall drawn a shade off), the difference is taken off at the
@@ -143,6 +232,7 @@ pub fn match_border(input: &FillInput, out: &RgbImage) -> RgbImage {
     // At the hole's outermost cells: the photo right outside less the fill right inside.
     let mut diff = vec![0.0f32; 3 * m * m];
     let mut edge = vec![0.0f32; m * m];
+    let mut known = vec![0.0f32; m * m];
     for y in 0..m {
         for x in 0..m {
             if !hole[y * m + x] {
@@ -165,10 +255,17 @@ pub fn match_border(input: &FillInput, out: &RgbImage) -> RgbImage {
             }
             if n > 0.0 {
                 let o = out.get_pixel(x as u32, y as u32);
+                let d: [f32; 3] = std::array::from_fn(|c| sum[c] / n - f32::from(o[c]));
+                // A tone a shade off counts; something else outside than the model drew
+                // inside (a tree the hole's border touches, sky drawn beside it) is no
+                // difference in tone, and the fill is not to take its colour.
+                let most = d.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+                let counts = 1.0 - smoothstep(BORDER_SAME, BORDER_OTHER, most);
                 for c in 0..3 {
-                    diff[3 * (y * m + x) + c] = sum[c] / n - f32::from(o[c]);
+                    diff[3 * (y * m + x) + c] = counts * d[c];
                 }
                 edge[y * m + x] = 1.0;
+                known[y * m + x] = counts;
             }
         }
     }
@@ -177,14 +274,16 @@ pub fn match_border(input: &FillInput, out: &RgbImage) -> RgbImage {
     }
     // Averaged along the border.
     let blur = |v: &[f32]| box_blur_par(&box_blur_par(v, m, m, BORDER_ALONG), m, m, BORDER_ALONG);
-    let weight = blur(&edge);
+    let weight = blur(&known);
     let mut level = vec![0.0f32; 3 * m * m];
     for c in 0..3 {
         let plane: Vec<f32> = (0..m * m).map(|i| diff[3 * i + c]).collect();
         let sum = blur(&plane);
         for i in 0..m * m {
             if edge[i] > 0.0 {
-                level[3 * i + c] = (sum[i] / weight[i].max(1e-6)).clamp(-BORDER_MOST, BORDER_MOST);
+                // (Nothing near that counts: no difference to take off.)
+                let near = (weight[i] * 40.0).min(1.0);
+                level[3 * i + c] = near * (sum[i] / weight[i].max(1e-6)).clamp(-BORDER_MOST, BORDER_MOST);
             }
         }
     }
@@ -584,6 +683,73 @@ mod tests {
         assert_eq!(right(&by_depth), 0, "by depth, from its own half only");
     }
 
+    /// A plain grey photo with a round hole, something dark (`thing`) in the photo, and
+    /// the model's picture: the grey, drawn by `fill` inside the hole.
+    fn plain_case(
+        thing: impl Fn(u32, u32) -> bool,
+        fill: impl Fn(u32, u32) -> [u8; 3],
+    ) -> (FillInput, RgbImage, Vec<bool>) {
+        let (side, m) = (512u32, 256u32);
+        let image =
+            RgbImage::from_fn(side, side, |x, y| if thing(x, y) { Rgb([30, 60, 30]) } else { Rgb([200; 3]) });
+        let mask = GrayImage::from_fn(side, side, |x, y| {
+            Luma([if (x as f32 - 256.0).hypot(y as f32 - 256.0) < 100.0 { 255 } else { 0 }])
+        });
+        let input = FillInput {
+            image,
+            mask,
+            others: GrayImage::new(0, 0),
+            rect: [0.0, 0.0, 1.0, 1.0],
+            gains: [1.0; 3],
+        };
+        let hole = hole_cells(&input, m as usize);
+        let out = RgbImage::from_fn(m, m, |x, y| {
+            if hole[(y * m + x) as usize] { Rgb(fill(x, y)) } else { *input.image.get_pixel(2 * x, 2 * y) }
+        });
+        (input, out, hole)
+    }
+
+    #[test]
+    fn something_dark_at_the_border_does_not_colour_the_fill() {
+        // A tree under the hole, the hole's lower border in it; the model drew sky.
+        let (input, out, hole) = plain_case(|_, y| y > 330, |_, _| [200; 3]);
+        let matched = match_border(&input, &out);
+        let most = matched
+            .enumerate_pixels()
+            .filter(|(x, y, _)| hole[(y * 256 + x) as usize])
+            .map(|(_, _, p)| (i32::from(p[0]) - 200).abs().max((i32::from(p[1]) - 200).abs()))
+            .max()
+            .unwrap();
+        assert!(most <= 2, "the fill moved by {most} towards the tree");
+    }
+
+    #[test]
+    fn a_soft_cast_is_taken_out_of_a_fill_and_a_thing_drawn_is_kept() {
+        // A greenish cloud in the middle of the fill, fading outward.
+        let cloud = |x: u32, y: u32| {
+            let d = (x as f32 - 128.0).hypot(y as f32 - 128.0);
+            (1.0 - d / 45.0).max(0.0)
+        };
+        let (input, out, _) = plain_case(
+            |_, _| false,
+            |x, y| [200 - (14.0 * cloud(x, y)) as u8, 200, 200 - (22.0 * cloud(x, y)) as u8],
+        );
+        let calm = calm_colour(&input, &out);
+        let p = calm.get_pixel(128, 128);
+        let spread = i32::from(p[0].max(p[1]).max(p[2])) - i32::from(p[0].min(p[1]).min(p[2]));
+        assert!(spread <= 6, "still a cast of {spread} ({p:?}; it was 22)");
+        assert_eq!(calm.get_pixel(5, 5), out.get_pixel(5, 5));
+        // Something red the model drew there stays red, and something dark its colour.
+        for thing in [[230u8, 90, 80], [30, 60, 30]] {
+            let (input, out, _) =
+                plain_case(|_, _| false, |x, y| if cloud(x, y) > 0.0 { thing } else { [200; 3] });
+            let calm = calm_colour(&input, &out);
+            let p = calm.get_pixel(128, 128);
+            let far = (0..3).map(|c| (i32::from(p[c]) - i32::from(thing[c])).abs()).max().unwrap();
+            assert!(far <= 4, "{thing:?} came out as {p:?}");
+        }
+    }
+
     #[test]
     fn a_fill_a_shade_off_meets_the_photo_at_its_border() {
         let (side, m) = (1024u32, 256u32);
@@ -612,7 +778,11 @@ mod tests {
         let same = match_border(&input, &out);
         assert!(mean_off(&same).abs() < 2.5, "moved by {}", mean_off(&same));
         // Without the matching, the fill is kept a shade off.
-        let kept = finish_fill_with(&input, &off, &Finish { seed: 1, border: false, ..Finish::default() });
+        let kept = finish_fill_with(
+            &input,
+            &off,
+            &Finish { seed: 1, border: false, calm: false, ..Finish::default() },
+        );
         let done = finish_fill_with(&input, &off, &Finish { seed: 1, ..Finish::default() });
         let (w, h) = (done.picture.width(), done.picture.height());
         let row = |p: &RgbImage| (w / 4..3 * w / 4).map(|x| f32::from(p.get_pixel(x, h / 2)[0])).sum::<f32>();

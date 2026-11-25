@@ -39,7 +39,7 @@ pub use dust::{
 };
 pub use effects::{EffectParam, Effects, VignetteStyle};
 pub use fill_detail::{
-    Finish, FinishedFill, finish_fill, finish_fill_by_depth, finish_fill_with, match_border,
+    Finish, FinishedFill, calm_colour, finish_fill, finish_fill_by_depth, finish_fill_with, match_border,
 };
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use groups::{SettingsGroup, changed_groups, copy_groups};

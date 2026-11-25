@@ -142,6 +142,24 @@ fn main() -> anyhow::Result<()> {
         "{:<30} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
         "", "px", "plain", "detail", "border", "plain", "border", "border", "truth", "detail", "border", ""
     );
+    // `FILL_HOLES=name,x,y,half,size;...`: other holes than the usual (a case to look at).
+    let asked: Vec<(String, [f32; 2], f32, f32)> = std::env::var("FILL_HOLES")
+        .ok()
+        .map(|v| {
+            v.split(';')
+                .filter_map(|h| {
+                    let p: Vec<&str> = h.split(',').collect();
+                    let n = |i: usize| p.get(i).and_then(|v| v.trim().parse::<f32>().ok());
+                    Some((p.first()?.trim().to_owned(), [n(1)?, n(2)?], n(3)?, n(4)?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let holes: Vec<(&str, [f32; 2], f32, f32)> = if asked.is_empty() {
+        HOLES.to_vec()
+    } else {
+        asked.iter().map(|(n, m, h, s)| (n.as_str(), *m, *h, *s)).collect()
+    };
     for path in &photos {
         let raw = path
             .extension()
@@ -150,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         let (img, _) = WorkingImage::load(path, kind, None)?;
         let wb = img.resolve_wb(&DevelopSettings::default()).multipliers;
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("photo").to_owned();
-        for (k, (name, middle, half, size)) in HOLES.iter().enumerate() {
+        for (k, (name, middle, half, size)) in holes.iter().enumerate() {
             let points = if *half > 0.0 {
                 vec![[middle[0], middle[1] - half], [middle[0], middle[1] + half]]
             } else {
@@ -197,7 +215,7 @@ fn main() -> anyhow::Result<()> {
             let took = started.elapsed();
             let after =
                 shown(&format!("{stem}-{k}-border"), &done.picture, done.rect, done.detail, done.full)?;
-            let old = finish_fill_with(&input, &filled, &Finish { border: false, ..how });
+            let old = finish_fill_with(&input, &filled, &Finish { border: false, calm: false, ..how });
             let unmatched =
                 shown(&format!("{stem}-{k}-detail"), &old.picture, old.rect, old.detail, old.full)?;
             let truth = &input.image;
