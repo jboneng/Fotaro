@@ -185,6 +185,7 @@ fn main() -> anyhow::Result<()> {
                     model: "bench".into(),
                     detail,
                     full,
+                    variant: 0,
                 };
                 let with = Spot { fill: Some(fill), ..spot.clone() };
                 Ok(healed_crop(&img, &[with], None, input.rect, input.gains))
@@ -235,7 +236,7 @@ fn main() -> anyhow::Result<()> {
 fn model(input: &FillInput) -> anyhow::Result<RgbImage> {
     let s = segment::inpaint::SIZE;
     let img = imageops::resize(&input.image, s, s, imageops::FilterType::Lanczos3);
-    let mask = imageops::resize(&input.mask, s, s, imageops::FilterType::Triangle);
+    let mask = imageops::resize(&input.model_mask(), s, s, imageops::FilterType::Triangle);
     let mask = GrayImage::from_fn(s, s, |x, y| Luma([if mask.get_pixel(x, y)[0] > 0 { 255 } else { 0 }]));
     Ok(segment::remove(&img, &mask, true, true)?.0)
 }

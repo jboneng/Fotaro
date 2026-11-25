@@ -44,8 +44,8 @@ pub use fill_detail::{
 pub use grading::{ColorGrading, GradeParam, GradeWheel, Wheel, wheel_color};
 pub use groups::{SettingsGroup, changed_groups, copy_groups};
 pub use heal::{
-    Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode, fill_input,
-    find_source, healed_crop, prepare_area,
+    FILL_VARIANTS, Fill, FillInput, Spot, SpotArea, SpotMask, SpotMode, SpotStroke, fill_decode, fill_encode,
+    fill_input, fill_input_as, find_source, healed_crop, prepare_area,
 };
 pub use hsl::{COLORS, Hsl, HslGroup, SWATCHES};
 pub use lens::{

@@ -1530,6 +1530,105 @@ fn glow_spreads_light_around_bright_areas_and_regions_still_match() {
 }
 
 #[test]
+fn a_fills_model_sees_nothing_of_what_else_is_to_go() {
+    let photo: RgbImage =
+        ImageBuffer::from_fn(600, 400, |x, y| Rgb([(60 + x / 4) as u8, 120, (200 - y / 3) as u8]));
+    let img = rendered(&photo);
+    let spot = |x: f32| Spot {
+        mode: SpotMode::Remove,
+        points: vec![[x, 0.5]],
+        size: 0.05, // 15 px
+        feather: 0.0,
+        ..Spot::default()
+    };
+    let spots = vec![spot(0.5), spot(0.56), Spot { mode: SpotMode::Heal, ..spot(0.44) }];
+    // The first spot's crop has the second in it: not its own hole, but the model's.
+    let input = fill_input(&img, &spots, None, 0, [1.0; 3]).unwrap();
+    let side = input.image.width();
+    let at = |u: f32| ((u - input.rect[0]) / (input.rect[2] - input.rect[0]) * side as f32) as u32;
+    let (own, other, heal) = (at(0.5), at(0.56), at(0.44));
+    assert_eq!(input.others.dimensions(), input.mask.dimensions());
+    assert_eq!((input.mask.get_pixel(own, side / 2)[0], input.others.get_pixel(own, side / 2)[0]), (255, 0));
+    assert_eq!(
+        (input.mask.get_pixel(other, side / 2)[0], input.others.get_pixel(other, side / 2)[0]),
+        (0, 255)
+    );
+    assert_eq!(input.others.get_pixel(heal, side / 2)[0], 0, "a Heal spot is not something to remove");
+    let model = input.model_mask();
+    assert_eq!((model.get_pixel(own, side / 2)[0], model.get_pixel(other, side / 2)[0]), (255, 255));
+    assert_eq!(model.get_pixel(2, 2)[0], 0);
+    // The last spot has nothing after it (the first is in the photo by then).
+    let last = fill_input(&img, &spots, None, 1, [1.0; 3]).unwrap();
+    assert_eq!(last.others.width(), 0);
+    assert_eq!(last.model_mask(), last.mask);
+    // Another variant, another amount of room around the same hole.
+    let big = [Spot { size: 0.2, ..spot(0.5) }];
+    let usual = fill_input(&img, &big, None, 0, [1.0; 3]).unwrap().image.width();
+    let wide = fill_input_as(&img, &big, None, 0, [1.0; 3], 1).unwrap().image.width();
+    assert!(wide > usual, "{wide} vs {usual}");
+}
+
+#[test]
+fn a_remove_spot_keeps_the_fills_made_for_it_to_step_through() {
+    let mut spot = Spot { mode: SpotMode::Remove, points: vec![[0.5, 0.5]], size: 0.1, ..Spot::default() };
+    let fill = |spot: &Spot, variant: u8| Fill {
+        id: format!("fill-{variant}"),
+        rect: [0.0, 0.0, 1.0, 1.0],
+        gains: [1.0; 3],
+        made_for: spot.shape_key(),
+        model: "test".into(),
+        detail: 1.0,
+        full: false,
+        variant,
+    };
+    assert_eq!((spot.fills(), spot.next_variant()), ((0, 0), 0));
+    spot.fill = Some(fill(&spot, 0));
+    assert_eq!((spot.fills(), spot.next_variant()), ((1, 0), 1));
+    // Refill: the fill is set aside, and another is wanted.
+    spot.refill();
+    assert!(spot.needs_fill());
+    assert_eq!((spot.fills(), spot.next_variant()), ((1, 1), 1));
+    spot.fill = Some(fill(&spot, 1));
+    spot.refill();
+    spot.fill = Some(fill(&spot, 2));
+    assert_eq!(spot.fills(), (3, 2));
+    // Back and forth through them, in the order made.
+    let shown = |s: &Spot| s.current_fill().map(|f| f.variant);
+    assert!(!spot.step_fill(true), "none after the last");
+    assert!(spot.step_fill(false));
+    assert_eq!((shown(&spot), spot.fills()), (Some(1), (3, 1)));
+    assert!(spot.step_fill(false));
+    assert_eq!((shown(&spot), spot.fills()), (Some(0), (3, 0)));
+    assert!(!spot.step_fill(false));
+    assert!(spot.step_fill(true) && spot.step_fill(true));
+    assert_eq!(shown(&spot), Some(2));
+    // They survive saving, and a spot without them is saved as before.
+    let json = serde_json::to_string(&spot).unwrap();
+    assert_eq!(serde_json::from_str::<Spot>(&json).unwrap(), spot);
+    let plain = serde_json::to_string(&Spot::default()).unwrap();
+    assert!(!plain.contains("tried") && !plain.contains("sample"), "{plain}");
+    // Another shape: none of them is for it.
+    spot.size = 0.2;
+    assert_eq!((spot.fills(), spot.next_variant()), ((0, 0), 0));
+    assert!(spot.needs_fill());
+    spot.size = 0.1;
+    // A place to sample from is part of what a fill is made for; Heal's source is not.
+    let key = spot.shape_key();
+    spot.sample = true;
+    assert_ne!(spot.shape_key(), key);
+    let with = spot.shape_key();
+    spot.offset = [0.2, 0.1];
+    assert_ne!(spot.shape_key(), with);
+    assert!(spot.has_source());
+    spot.sample = false;
+    assert!(!spot.has_source() && spot.shape_key() == key);
+    let mut heal = Spot { mode: SpotMode::Heal, sample: true, ..spot.clone() };
+    let before = heal.shape_key();
+    heal.offset = [0.3, 0.3];
+    assert_eq!(heal.shape_key(), before);
+}
+
+#[test]
 fn remove_spots_show_their_fill_inside_only_and_follow_their_shape() {
     // A gradient photo with a dark blob to remove.
     let photo: RgbImage = ImageBuffer::from_fn(300, 200, |x, y| {
@@ -1577,6 +1676,7 @@ fn remove_spots_show_their_fill_inside_only_and_follow_their_shape() {
         model: "test".into(),
         detail: 0.0,
         full: false,
+        variant: 0,
     });
     assert!(!s.spots[0].needs_fill());
     let out = render_srgb8(&img, &s);

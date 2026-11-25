@@ -1679,8 +1679,21 @@ fn worker(
         for (photo_id, job, index, key, settings, rotation, gpu, best) in ready {
             let Some((_, full_img)) = &full else { continue };
             let wb = full_img.resolve_wb(&settings).multipliers;
-            let input =
-                imaging::develop::fill_input(full_img, &settings.spots, settings.dust.as_ref(), index, wb);
+            // Which try this is: each with another amount of room around the spot.
+            let variant = settings.spots.get(index).map_or(0, imaging::develop::Spot::next_variant);
+            let input = imaging::develop::fill_input_as(
+                full_img,
+                &settings.spots,
+                settings.dust.as_ref(),
+                index,
+                wb,
+                variant % imaging::develop::FILL_VARIANTS,
+            );
+            // Sample from: where the spot's source outline is, as a share of the crop.
+            let prefer = settings.spots.get(index).filter(|s| s.sample).zip(input.as_ref()).map(|(s, i)| {
+                let [l, t, r, b] = i.rect;
+                [s.offset[0] / (r - l).max(1e-6), s.offset[1] / (b - t).max(1e-6)]
+            });
             let depth = settings.depth_map().filter(|_| job.refine).and_then(imaging::develop::mask_picture);
             // Refine with depth on a photo without a depth map: the photo as AI masks see
             // it, to make the map from.
@@ -1707,7 +1720,8 @@ fn worker(
                                 if let Some(id) = made {
                                     let _ = tx.send(Reply::DepthMade { photo_id, id });
                                 }
-                                run_fill(photo_id, &job, input, key, best, gpu, depth, &ctx)
+                                let how = (variant, prefer);
+                                run_fill(photo_id, &job, input, key, how, best, gpu, depth, &ctx)
                             }),
                         None => Err(anyhow::anyhow!("the spot is outside the photo")),
                     };
@@ -2709,10 +2723,8 @@ impl DevelopState {
                 feather: 10.0,
                 opacity: 100.0,
                 offset: [0.0, 0.0],
-                fill: None,
-                strokes: Vec::new(),
-                found: false,
                 area: Some(p.area.clone()),
+                ..Default::default()
             });
         }
         self.people.clear();
@@ -2766,9 +2778,28 @@ impl DevelopState {
         else {
             return Ok(None);
         };
+        spot.tried.retain(|f| f.made_for == key);
+        let label = if spot.tried.is_empty() { "Remove" } else { "Refill" };
         spot.fill = Some(fill);
         self.set_live(st);
-        self.commit(catalog, Some("Remove".into()))
+        self.commit(catalog, Some(label.into()))
+    }
+
+    /// Remove: make spot `index`'s fill again, another way (also after a fill that failed).
+    /// The fill it has is kept to go back to.
+    pub fn refill(&mut self, index: usize) {
+        let mut st = self.settings.clone();
+        let Some(spot) = st.spots.get_mut(index) else { return };
+        let key = spot.shape_key();
+        spot.refill();
+        self.fill_failed.retain(|k| *k != key);
+        self.fill_declined = false;
+        if st == self.settings {
+            // Nothing to set aside (it failed, or is not made yet): just ask again.
+            self.request_renders();
+        } else {
+            self.set_live(st);
+        }
     }
 
     /// Select Subject / Sky / Background (as a new mask, or a component of the selected
@@ -3332,6 +3363,7 @@ fn run_fill(
     job: &AiJob,
     input: imaging::develop::FillInput,
     key: u64,
+    (variant, prefer): (u8, Option<[f32; 2]>),
     best: bool,
     gpu: bool,
     depth: Option<Arc<image::GrayImage>>,
@@ -3359,7 +3391,8 @@ fn run_fill(
     let s = segment::inpaint::SIZE;
     let img = resize(&input.image, s, s, FilterType::Lanczos3);
     // The hole a pixel larger after scaling: what the spot touches at all.
-    let mask = resize(&input.mask, s, s, FilterType::Triangle);
+    // (With everything else that is to go: none of it is surroundings to draw from.)
+    let mask = resize(&input.model_mask(), s, s, FilterType::Triangle);
     let mask = image::GrayImage::from_fn(s, s, |x, y| {
         image::Luma([if mask.get_pixel(x, y)[0] > 0 { 255 } else { 0 }])
     });
@@ -3368,7 +3401,14 @@ fn run_fill(
     // A large area gets the photo's own fine detail and grain over what the model drew.
     let started = std::time::Instant::now();
     // (Refine with depth: from places as far away as what is behind the hole.)
-    let done = imaging::develop::finish_fill_by_depth(&input, &out, key, depth.as_deref());
+    let how = imaging::develop::Finish {
+        // (Another try takes its detail from other places.)
+        seed: key ^ u64::from(variant).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        depth: depth.as_deref(),
+        prefer,
+        ..Default::default()
+    };
+    let done = imaging::develop::finish_fill_with(&input, &out, &how);
     if done.full {
         log::info!(
             "Remove: detail from the photo for {} x {} px in {:.0?}",
@@ -3389,6 +3429,7 @@ fn run_fill(
         model,
         detail: done.detail,
         full: done.full,
+        variant,
     })
 }
 

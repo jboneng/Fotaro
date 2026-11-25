@@ -62,6 +62,14 @@ pub struct Spot {
     /// An area given as a picture (People: a person's outline) instead of the spot's own
     /// path; strokes still add to it or take from it.
     pub area: Option<SpotMask>,
+    /// Remove: take the fill's fine detail (texture, grain) from around `offset`, where
+    /// the source outline is put, before anywhere else.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sample: bool,
+    /// Remove: the other fills made for the spot as it is (Refill makes another; the
+    /// arrows beside it step through them).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tried: Vec<Fill>,
 }
 
 /// A spot's area as a picture in the mask store (`<id>.png`, 255 inside) over `rect`
@@ -95,6 +103,8 @@ impl Default for Spot {
             strokes: Vec::new(),
             found: false,
             area: None,
+            sample: false,
+            tried: Vec::new(),
         }
     }
 }
@@ -120,6 +130,10 @@ pub struct Fill {
     /// it (see [`super::fill_detail`]): nothing is added when it is shown.
     #[serde(default)]
     pub full: bool,
+    /// Which try it is (0: the first): each has another amount of room around the spot
+    /// for the model, and its detail from other places.
+    #[serde(default)]
+    pub variant: u8,
 }
 
 impl Spot {
@@ -144,7 +158,71 @@ impl Spot {
                 eat(v.to_bits());
             }
         }
+        // Remove with a place to sample from: the fill is made for that place too.
+        if self.sample && self.mode == SpotMode::Remove {
+            eat(0x5a3e);
+            for v in self.offset {
+                eat(v.to_bits());
+            }
+        }
         h
+    }
+
+    /// The spot has a source to show and move: Heal and Clone always, Remove when it
+    /// samples from a place.
+    pub fn has_source(&self) -> bool {
+        self.mode != SpotMode::Remove || self.sample
+    }
+
+    /// The fills made for the spot as it is, other than the one shown.
+    fn tried_now(&self) -> impl Iterator<Item = &Fill> {
+        let key = self.shape_key();
+        self.tried.iter().filter(move |f| f.made_for == key)
+    }
+
+    /// How many fills the spot has as it is (shown and others), and which of them is
+    /// shown (counted from 0, by when they were made).
+    pub fn fills(&self) -> (usize, usize) {
+        let others = self.tried_now().count();
+        match self.current_fill() {
+            Some(f) => (others + 1, self.tried_now().filter(|t| t.variant < f.variant).count()),
+            None => (others, others),
+        }
+    }
+
+    /// Which try the next fill made for the spot is.
+    pub fn next_variant(&self) -> u8 {
+        let made = self.tried_now().chain(self.current_fill()).map(|f| f.variant).max();
+        made.map_or(0, |v| v.saturating_add(1))
+    }
+
+    /// Remove: set the shown fill aside so that another is made (see [`Self::needs_fill`]).
+    pub fn refill(&mut self) {
+        let key = self.shape_key();
+        self.tried.retain(|f| f.made_for == key);
+        if let Some(f) = self.fill.take().filter(|f| f.made_for == key) {
+            self.tried.push(f);
+        }
+    }
+
+    /// Remove: show the fill made before (`forward` false) or after the one shown.
+    /// Returns whether there was one.
+    pub fn step_fill(&mut self, forward: bool) -> bool {
+        let Some(shown) = self.current_fill().map(|f| f.variant) else { return false };
+        let key = self.shape_key();
+        let next = self
+            .tried
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.made_for == key && if forward { f.variant > shown } else { f.variant < shown })
+            .min_by_key(|(_, f)| f.variant.abs_diff(shown))
+            .map(|(i, _)| i);
+        let Some(i) = next else { return false };
+        let other = self.tried.remove(i);
+        if let Some(f) = self.fill.replace(other) {
+            self.tried.push(f);
+        }
+        true
     }
 
     /// A Remove spot's fill, if it was made for the spot as it is now.
@@ -185,19 +263,57 @@ pub struct FillInput {
     pub image: image::RgbImage,
     /// 255 where to fill.
     pub mask: image::GrayImage,
+    /// 255 where something else is still to be removed (later Remove spots, found people):
+    /// not surroundings to draw from, and nothing of it is kept. Empty: nothing.
+    pub others: image::GrayImage,
     pub rect: [f32; 4],
     pub gains: [f32; 3],
 }
 
-/// The input for spot `index` of `spots` on `img`: a square around the spot grown by 1.5
-/// radii (at least 64 px), white balanced by `wb` and scaled so the bright end sits near
-/// 0.9 before sRGB encoding.
+impl FillInput {
+    /// What the model is to fill: the spot, and everything else that is to go (so that it
+    /// cannot paint half a person back in).
+    pub fn model_mask(&self) -> image::GrayImage {
+        if self.others.dimensions() != self.mask.dimensions() {
+            return self.mask.clone();
+        }
+        image::GrayImage::from_fn(self.mask.width(), self.mask.height(), |x, y| {
+            image::Luma([self.mask.get_pixel(x, y)[0].max(self.others.get_pixel(x, y)[0])])
+        })
+    }
+
+    /// Something else to be removed is at pixel `i` of the crop.
+    #[inline]
+    pub fn other_at(&self, i: usize) -> bool {
+        self.others.as_raw().get(i).is_some_and(|v| *v > 0)
+    }
+}
+
+/// How many crop sizes a fill can be made at (see [`fill_input_as`]).
+pub const FILL_VARIANTS: u8 = 3;
+
+/// The input for spot `index` of `spots` on `img`: a square around the spot with room
+/// around it for the model to take from, white balanced by `wb` and scaled so the bright
+/// end sits near 0.9 before sRGB encoding.
 pub fn fill_input(
     img: &WorkingImage,
     spots: &[Spot],
     dust: Option<&super::dust::DustLayer>,
     index: usize,
     wb: [f32; 3],
+) -> Option<FillInput> {
+    fill_input_as(img, spots, dust, index, wb, 0)
+}
+
+/// [`fill_input`] with another amount of room around the spot (`variant` 0, the usual,
+/// to [`FILL_VARIANTS`] − 1): the model draws something else with more or less to go by.
+pub fn fill_input_as(
+    img: &WorkingImage,
+    spots: &[Spot],
+    dust: Option<&super::dust::DustLayer>,
+    index: usize,
+    wb: [f32; 3],
+    variant: u8,
 ) -> Option<FillInput> {
     let spot = spots.get(index)?;
     let before = healed(img, &spots[..index], dust);
@@ -212,7 +328,14 @@ pub fn fill_input(
     // Room around the spot for the model to take from. An area picture (a person) is big:
     // less room keeps more of its detail at the model's size.
     let grow = (if s.raster.is_some() { 0.75 } else { 1.5 } * s.r).max(64.0);
-    let side = ((bw.max(bh) as f32 + 2.0 * grow).ceil() as usize).min(w.min(h));
+    let room = fill_room(variant);
+    let mut side = (bw.max(bh) as f32 + 2.0 * grow).max(room * bw.max(bh) as f32);
+    if spot.sample {
+        // With the place to sample from in it.
+        let off = (spot.offset[0] * f.w).abs().max((spot.offset[1] * f.h).abs());
+        side = side.max(2.0 * off + bw.max(bh) as f32 + 16.0);
+    }
+    let side = (side.ceil() as usize).min(w.min(h));
     let (cx, cy) = (bx as f32 + bw as f32 / 2.0, by as f32 + bh as f32 / 2.0);
     let x0 = ((cx - side as f32 / 2.0).round().max(0.0) as usize).min(w - side);
     let y0 = ((cy - side as f32 / 2.0).round().max(0.0) as usize).min(h - side);
@@ -240,8 +363,36 @@ pub fn fill_input(
     let mask = image::GrayImage::from_fn(side as u32, side as u32, |x, y| {
         image::Luma([if s.coverage(x0 + x as usize, y0 + y as usize) > 0.0 { 255 } else { 0 }])
     });
+    // What else is to go: the Remove spots after this one (those before it are in the
+    // photo as it is here already).
+    let later: Vec<SpotPx> = spots[index + 1..]
+        .iter()
+        .filter(|o| o.mode == SpotMode::Remove && !o.points.is_empty() && o.opacity > 0.0)
+        .map(|o| SpotPx::new(o, f))
+        .filter(|o| {
+            let (ox, oy, ow, oh) = o.bbox(0.0, w, h);
+            ow > 0 && oh > 0 && ox < x0 + side && ox + ow > x0 && oy < y0 + side && oy + oh > y0
+        })
+        .collect();
+    let others = if later.is_empty() {
+        image::GrayImage::new(0, 0)
+    } else {
+        image::GrayImage::from_fn(side as u32, side as u32, |x, y| {
+            let (px, py) = (x0 + x as usize, y0 + y as usize);
+            let own = mask.get_pixel(x, y)[0] > 0;
+            image::Luma([if !own && later.iter().any(|o| o.coverage(px, py) > 0.0) { 255 } else { 0 }])
+        })
+    };
     let rect = [x0 as f32 / f.w, y0 as f32 / f.h, (x0 + side) as f32 / f.w, (y0 + side) as f32 / f.h];
-    Some(FillInput { image, mask, rect, gains })
+    Some(FillInput { image, mask, others, rect, gains })
+}
+
+/// The crop's side as a multiple of the hole's longer side, at least, for a variant.
+/// The usual one adds nothing: measured on photos with known answers, more room gave
+/// fills no nearer the truth (the model has fewer pixels for the hole), three times slower.
+fn fill_room(variant: u8) -> f32 {
+    const ROOM: [f32; FILL_VARIANTS as usize] = [0.0, 3.0, 2.2];
+    ROOM[usize::from(variant) % ROOM.len()]
 }
 
 /// The part `rect` (0..1) of the photo with `spots` applied, as a model sees it (8-bit
@@ -1211,6 +1362,7 @@ mod tests {
             strokes: vec![],
             found: false,
             area: None,
+            ..Spot::default()
         };
         // Clone: the source's value (from x = 110).
         let cloned = healed(&img, &[spot(SpotMode::Clone)], None);
@@ -1241,6 +1393,7 @@ mod tests {
             strokes: vec![],
             found: false,
             area: None,
+            ..Spot::default()
         };
         let out = healed(&img, &[spot], None);
         let at = |x, y| out.pixels.get_pixel(x, y)[0];

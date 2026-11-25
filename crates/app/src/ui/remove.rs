@@ -73,7 +73,7 @@ fn hit(c: &Canvas, spots: &[Spot], selected: Option<usize>, p: Pos2) -> Option<R
             return Some(RemoveDrag::Spot { index: i, grab, original: s.clone() });
         }
         let off = c.px(s.offset);
-        if Some(i) == selected && s.mode != SpotMode::Remove && area.edge(q.x - off.x, q.y - off.y) > near {
+        if Some(i) == selected && s.has_source() && area.edge(q.x - off.x, q.y - off.y) > near {
             return Some(RemoveDrag::Source { index: i, grab, original: s.clone() });
         }
     }
@@ -363,10 +363,7 @@ pub(super) fn canvas(
             feather: settings.feather,
             opacity: settings.opacity,
             offset: [2.5 * radius * half / w, 0.0],
-            fill: None,
-            strokes: Vec::new(),
-            found: false,
-            area: None,
+            ..Spot::default()
         }
     };
 
@@ -603,8 +600,8 @@ pub(super) fn canvas(
             spinner(&painter, at, ui.input(|i| i.time));
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
         }
-        // Heal and Clone: the source, and an arrow from it.
-        if selected && s.mode != SpotMode::Remove {
+        // Heal and Clone: the source, and an arrow from it (Remove: where it samples from).
+        if selected && s.has_source() {
             draw_outline(
                 &painter,
                 &outline(&c, s, s.offset),
@@ -712,6 +709,7 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut done: Option<Option<String>> = None;
     let mut leave = false;
     let mut new_source = false;
+    let mut refill = None;
     let mut asks = DistractionAsks::default();
     tool.selected = tool.selected.filter(|&i| i < st.spots.len());
     let title = match tool.selected {
@@ -826,6 +824,50 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         } else {
             tool.area = None;
         }
+        // A Remove spot's fill: made again another way, the ones made stepped through, and
+        // a place to take its texture from.
+        if let Some(i) = tool.selected.filter(|&i| st.spots[i].mode == SpotMode::Remove) {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(super::develop::LABEL_W - 40.0);
+                let busy = d.fill_job.is_some();
+                let tip = "Fill this spot again, another way: with more or less of its surroundings \
+                           for the model to go by, and its texture from other places. The fills \
+                           made are kept: step through them with the arrows";
+                if ui.add_enabled(!busy, egui::Button::new("Refill").small()).on_hover_text(tip).clicked() {
+                    refill = Some(i);
+                }
+                let (made, shown) = st.spots[i].fills();
+                if made > 1 && shown < made {
+                    if ui.add_enabled(shown > 0, egui::Button::new("◂").small()).clicked()
+                        && st.spots[i].step_fill(false)
+                    {
+                        done = Some(Some("Remove: Earlier Fill".into()));
+                    }
+                    ui.label(weak(format!("{} of {made}", shown + 1)).size(11.5));
+                    if ui.add_enabled(shown + 1 < made, egui::Button::new("▸").small()).clicked()
+                        && st.spots[i].step_fill(true)
+                    {
+                        done = Some(Some("Remove: Later Fill".into()));
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(super::develop::LABEL_W - 40.0);
+                let mut sample = st.spots[i].sample;
+                let tip = "Take this fill's texture and grain from a place you choose: drag the \
+                           thin outline with the arrow to it. The fill is made again for it";
+                if ui.checkbox(&mut sample, "Sample from").on_hover_text(tip).changed() {
+                    let s = &mut st.spots[i];
+                    s.sample = sample;
+                    // A place beside the spot to start from.
+                    if sample && s.offset[0].abs() + s.offset[1].abs() < 1e-4 {
+                        s.offset = [1.6 * s.size, 0.0];
+                    }
+                    done = Some(None);
+                }
+            });
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if let Some(i) = tool.selected {
@@ -872,6 +914,9 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     }
     if new_source && let Some(i) = index {
         d.find_source(i, true);
+    }
+    if let Some(i) = refill {
+        d.refill(i);
     }
     if asks.find_dust {
         d.find_sensor_dust();

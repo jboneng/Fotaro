@@ -47,11 +47,14 @@ pub struct Finish<'a> {
     pub depth: Option<&'a image::GrayImage>,
     /// Match the fill's tone to the photo along the hole's border.
     pub border: bool,
+    /// Take the detail from about this far from each part of the hole (of the crop's
+    /// side, right and down), when a place there is alike enough.
+    pub prefer: Option<[f32; 2]>,
 }
 
 impl Default for Finish<'_> {
     fn default() -> Self {
-        Finish { seed: 0, depth: None, border: true }
+        Finish { seed: 0, depth: None, border: true, prefer: None }
     }
 }
 
@@ -77,7 +80,7 @@ pub fn finish_fill_with(input: &FillInput, out: &RgbImage, how: &Finish) -> Fini
     let out = matched.as_ref().unwrap_or(out);
     if side > PLAIN_SIDE
         && m > 0
-        && let Some(done) = with_detail(input, out, how.seed, how.depth)
+        && let Some(done) = with_detail(input, out, how)
     {
         return done;
     }
@@ -99,6 +102,22 @@ fn hole_cells(input: &FillInput, m: usize) -> Vec<bool> {
     hole
 }
 
+/// What else is to be removed (see [`FillInput::others`]) at the model's size.
+fn other_cells(input: &FillInput, m: usize) -> Vec<bool> {
+    let side = input.image.width() as usize;
+    let k = side as f32 / m as f32;
+    let mut cells = vec![false; m * m];
+    if input.others.dimensions() == input.mask.dimensions() {
+        for (i, v) in input.others.as_raw().iter().enumerate() {
+            if *v > 0 {
+                let (x, y) = (i % side, i / side);
+                cells[((y as f32 / k) as usize).min(m - 1) * m + ((x as f32 / k) as usize).min(m - 1)] = true;
+            }
+        }
+    }
+    cells
+}
+
 /// The most a fill's tone is moved to meet the photo (of 255): what the model drew at
 /// the border on purpose (something dark going on into the hole) is not undone.
 const BORDER_MOST: f32 = 48.0;
@@ -117,6 +136,7 @@ pub fn match_border(input: &FillInput, out: &RgbImage) -> RgbImage {
         return out.clone();
     }
     let hole = hole_cells(input, m);
+    let other = other_cells(input, m);
     // The photo as the model saw it.
     let photo =
         image::imageops::resize(&input.image, m as u32, m as u32, image::imageops::FilterType::Triangle);
@@ -134,7 +154,8 @@ pub fn match_border(input: &FillInput, out: &RgbImage) -> RgbImage {
                 if nx < 0 || ny < 0 || nx >= m as isize || ny >= m as isize {
                     continue;
                 }
-                if !hole[ny as usize * m + nx as usize] {
+                let j = ny as usize * m + nx as usize;
+                if !hole[j] && !other[j] {
                     let p = photo.get_pixel(nx as u32, ny as u32);
                     for c in 0..3 {
                         sum[c] += f32::from(p[c]);
@@ -180,12 +201,8 @@ pub fn match_border(input: &FillInput, out: &RgbImage) -> RgbImage {
     })
 }
 
-fn with_detail(
-    input: &FillInput,
-    out: &RgbImage,
-    seed: u64,
-    depth: Option<&image::GrayImage>,
-) -> Option<FinishedFill> {
+fn with_detail(input: &FillInput, out: &RgbImage, how: &Finish) -> Option<FinishedFill> {
+    let (seed, depth) = (how.seed, how.depth);
     let side = input.image.width() as usize;
     let m = out.width() as usize;
     let k = side as f32 / m as f32;
@@ -206,13 +223,18 @@ fn with_detail(
     }
     let guide: Vec<[f32; 3]> =
         out.pixels().map(|p| [f32::from(p[0]), f32::from(p[1]), f32::from(p[2])]).collect();
-    let far = depth.and_then(|d| distances(input.rect, d, &hole, m));
-    let from = patch_match(&guide, &hole, m, seed, far.as_ref())?;
+    // Nothing is copied from what else is to go, nor measured there.
+    let other = other_cells(input, m);
+    let taken: Vec<bool> = hole.iter().zip(&other).map(|(h, o)| *h || *o).collect();
+    let far = depth.and_then(|d| distances(input.rect, d, &taken, m));
+    let prefer = how.prefer.map(|p| (p[0] * m as f32, p[1] * m as f32));
+    let from = patch_match(&guide, &hole, &taken, m, seed, far.as_ref(), prefer)?;
 
     // The photo's fine layer: each channel less its own blur at the size the model can
     // hold, the blur taken from outside the hole only (nothing of what is removed in it).
     let r = ((0.8 * k).round() as usize).max(1);
-    let keep: Vec<f32> = mask.iter().map(|v| if *v > 0 { 0.0 } else { 1.0 }).collect();
+    let keep: Vec<f32> =
+        (0..side * side).map(|i| if mask[i] > 0 || input.other_at(i) { 0.0 } else { 1.0 }).collect();
     let blur3 = |v: &[f32]| {
         box_blur_par(&box_blur_par(&box_blur_par(v, side, side, r), side, side, r), side, side, r)
     };
@@ -330,13 +352,16 @@ fn sample(g: &[[f32; 3]], m: usize, x: f32, y: f32) -> [f32; 3] {
 /// outside the hole is whose surroundings look most like its own: PatchMatch, a few
 /// passes of taking a neighbour's answer when it is better and of looking at random ever
 /// nearer the best so far. With `depths` (see [`distances`]), places as far away as what
-/// is behind the hole are preferred. `None` when there is nowhere to take from.
+/// is behind the hole are preferred. Nothing is taken from `taken` cells (the hole, and
+/// whatever else is not the photo to keep). `None` when there is nowhere to take from.
 fn patch_match(
     guide: &[[f32; 3]],
     hole: &[bool],
+    taken: &[bool],
     m: usize,
     seed: u64,
     depths: Option<&(Vec<f32>, Vec<f32>)>,
+    prefer: Option<(f32, f32)>,
 ) -> Option<Vec<(i16, i16)>> {
     let mi = m as isize;
     // Places to take from: a patch and a little more with nothing of the hole in it.
@@ -345,7 +370,7 @@ fn patch_match(
     for y in 0..m {
         for x in 0..m {
             near[(y + 1) * (m + 1) + x + 1] =
-                u32::from(hole[y * m + x]) + near[y * (m + 1) + x + 1] + near[(y + 1) * (m + 1) + x]
+                u32::from(taken[y * m + x]) + near[y * (m + 1) + x + 1] + near[(y + 1) * (m + 1) + x]
                     - near[y * (m + 1) + x];
         }
     }
@@ -375,10 +400,16 @@ fn patch_match(
     // How unlike the surroundings of a hole cell and of a source are (and, a little, how
     // far apart: nearer places have more alike light and grain). Stops once over `limit`.
     let cost = |tx: isize, ty: isize, sx: isize, sy: isize, limit: f32| -> f32 {
-        let far = (((sx - tx).pow(2) + (sy - ty).pow(2)) as f32).sqrt();
         // In steps, so that places side by side cost the same: the nearest place of all
         // would be another for every cell, with a seam between each.
-        let mut sum = 100.0 * (far / 48.0).floor();
+        let mut sum = match prefer {
+            // A place asked for: how far from it, counted finer and dearer.
+            Some((px, py)) => {
+                let far = ((sx - tx) as f32 - px).hypot((sy - ty) as f32 - py);
+                800.0 * (far / 10.0).floor()
+            }
+            None => 100.0 * ((((sx - tx).pow(2) + (sy - ty).pow(2)) as f32).sqrt() / 48.0).floor(),
+        };
         if let Some((own, behind)) = depths {
             let off = (own[(sy * mi + sx) as usize] - behind[(ty * mi + tx) as usize]).abs() - DEPTH_SLACK;
             if off > 0.0 {
@@ -406,7 +437,14 @@ fn patch_match(
         .filter(|(x, y)| hole[(y * mi + x) as usize])
         .collect();
     for &(x, y) in &cells {
-        let (sx, sy) = sources[(random() % sources.len() as u64) as usize];
+        let (mut sx, mut sy) = sources[(random() % sources.len() as u64) as usize];
+        // Starting at the place asked for, where there is one to take from.
+        if let Some((px, py)) = prefer {
+            let (ax, ay) = (x + px.round() as isize, y + py.round() as isize);
+            if free(ax, ay) {
+                (sx, sy) = (ax as i16, ay as i16);
+            }
+        }
         let i = (y * mi + x) as usize;
         from[i] = (sx - x as i16, sy - y as i16);
         best[i] = cost(x, y, isize::from(sx), isize::from(sy), f32::MAX);
@@ -473,7 +511,8 @@ mod tests {
             let v = level(x * side / m + side / m / 2).round() as u8;
             Rgb([v, v, v])
         });
-        (FillInput { image, mask, rect: [0.25, 0.25, 0.75, 0.75], gains: [1.0; 3] }, out)
+        let others = GrayImage::new(0, 0);
+        (FillInput { image, mask, others, rect: [0.25, 0.25, 0.75, 0.75], gains: [1.0; 3] }, out)
     }
 
     /// The spread of pixels from their four neighbours' mean, where `inside` says.
@@ -539,8 +578,8 @@ mod tests {
         let right = |from: &[(i16, i16)]| {
             (0..m * m).filter(|i| hole[*i] && (i % m) as i16 + from[*i].0 >= 64).count()
         };
-        let plain = patch_match(&guide, &hole, m, 1, None).unwrap();
-        let by_depth = patch_match(&guide, &hole, m, 1, Some(&far)).unwrap();
+        let plain = patch_match(&guide, &hole, &hole, m, 1, None, None).unwrap();
+        let by_depth = patch_match(&guide, &hole, &hole, m, 1, Some(&far), None).unwrap();
         assert!(right(&plain) > 20, "by looks alone, from both halves ({})", right(&plain));
         assert_eq!(right(&by_depth), 0, "by depth, from its own half only");
     }
@@ -573,11 +612,33 @@ mod tests {
         let same = match_border(&input, &out);
         assert!(mean_off(&same).abs() < 2.5, "moved by {}", mean_off(&same));
         // Without the matching, the fill is kept a shade off.
-        let kept = finish_fill_with(&input, &off, &Finish { seed: 1, depth: None, border: false });
+        let kept = finish_fill_with(&input, &off, &Finish { seed: 1, border: false, ..Finish::default() });
         let done = finish_fill_with(&input, &off, &Finish { seed: 1, ..Finish::default() });
         let (w, h) = (done.picture.width(), done.picture.height());
         let row = |p: &RgbImage| (w / 4..3 * w / 4).map(|x| f32::from(p.get_pixel(x, h / 2)[0])).sum::<f32>();
         assert!(row(&kept.picture) - row(&done.picture) > 10.0 * (w / 2) as f32);
+    }
+
+    #[test]
+    fn detail_comes_from_the_place_asked_for() {
+        // The same grain everywhere: by looks, any place is as good as another.
+        let m = 128usize;
+        let grain = super::super::heal::noise_plane(0, 0, m, m, 1.0, 3);
+        let guide: Vec<[f32; 3]> = grain.iter().map(|g| [120.0 + 4.0 * g; 3]).collect();
+        let hole: Vec<bool> =
+            (0..m * m).map(|i| (56..72).contains(&(i % m)) && (56..72).contains(&(i / m))).collect();
+        let near = |from: &[(i16, i16)], dx: f32, dy: f32| {
+            let cells: Vec<usize> = (0..m * m).filter(|i| hole[*i]).collect();
+            let n = cells
+                .iter()
+                .filter(|i| (f32::from(from[**i].0) - dx).hypot(f32::from(from[**i].1) - dy) < 14.0)
+                .count();
+            n as f32 / cells.len() as f32
+        };
+        let anywhere = patch_match(&guide, &hole, &hole, m, 1, None, None).unwrap();
+        let asked = patch_match(&guide, &hole, &hole, m, 1, None, Some((-36.0, 20.0))).unwrap();
+        assert!(near(&anywhere, -36.0, 20.0) < 0.3, "{}", near(&anywhere, -36.0, 20.0));
+        assert!(near(&asked, -36.0, 20.0) > 0.75, "{}", near(&asked, -36.0, 20.0));
     }
 
     #[test]
