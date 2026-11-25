@@ -766,7 +766,7 @@ fn run_people(
     rgb: &image::RgbImage,
     size: (u32, u32),
     rotation: u8,
-    gpu: bool,
+    (gpu, shadows): (bool, bool),
     depth: Option<Arc<image::GrayImage>>,
     ctx: &egui::Context,
 ) -> Result<Vec<FoundPerson>> {
@@ -789,6 +789,14 @@ fn run_people(
     let people = segment::find_people(rgb, 0.3, gpu, &|share, what| set(share, what.to_owned()))?;
     set(1.0, "Outlining…".to_owned());
     log::info!("People: {} found in {:.1?}", people.len(), started.elapsed());
+    // With their shadows, where one is found: the shadow goes when the person does.
+    let people: Vec<segment::Person> = if shadows {
+        let with: Vec<_> = people.into_iter().map(|p| segment::with_shadow(rgb, &p).ok_or(p)).collect();
+        log::info!("People: {} with a shadow", with.iter().filter(|p| p.is_ok()).count());
+        with.into_iter().map(|p| p.unwrap_or_else(|p| p)).collect()
+    } else {
+        people
+    };
     let (fw, fh) = (size.0 as f32, size.1 as f32);
     let stamp =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -906,7 +914,15 @@ enum Request {
     DustOverlay { photo_id: i64, settings: DevelopSettings, seq: u64 },
     /// Distractions → People: find the people in the full-size photo developed with
     /// `settings` (turned `rotation` quarter turns to stand upright).
-    FindPeople { photo_id: i64, job: AiJob, settings: DevelopSettings, rotation: u8, gpu: bool },
+    /// (`shadows`: with the shadows they cast, where one is found.)
+    FindPeople {
+        photo_id: i64,
+        job: AiJob,
+        settings: DevelopSettings,
+        rotation: u8,
+        gpu: bool,
+        shadows: bool,
+    },
 }
 
 /// Remove: the fills made one after another (Remove People makes many at once).
@@ -1336,7 +1352,9 @@ fn worker(
     let mut fills: Vec<FillAsk> = Vec::new();
     let mut dusts: Vec<(i64, u64, imaging::develop::DustLayer, Option<IrFiles>, AiJob, bool)> = Vec::new();
     let mut dust_overlay: Option<(i64, DevelopSettings, u64)> = None;
-    let mut finds: Vec<(i64, AiJob, DevelopSettings, u8, bool)> = Vec::new();
+    // (photo, job, settings, rotation, (on the GPU, with shadows))
+    type Find = (i64, AiJob, DevelopSettings, u8, (bool, bool));
+    let mut finds: Vec<Find> = Vec::new();
     // The photo small, for thumbnails.
     let mut small: Option<(i64, WorkingImage)> = None;
     loop {
@@ -1389,8 +1407,8 @@ fn worker(
                 Request::DustOverlay { photo_id, settings, seq } => {
                     dust_overlay = Some((photo_id, settings, seq))
                 }
-                Request::FindPeople { photo_id, job, settings, rotation, gpu } => {
-                    finds.push((photo_id, job, settings, rotation, gpu))
+                Request::FindPeople { photo_id, job, settings, rotation, gpu, shadows } => {
+                    finds.push((photo_id, job, settings, rotation, (gpu, shadows)))
                 }
             }
         }
@@ -1636,7 +1654,7 @@ fn worker(
         if let Some(f) = finds.first() {
             load_full(&mut full_loading, &source, f.0, &full_tx, &ctx);
         }
-        for (photo_id, job, mut settings, rotation, gpu) in ready {
+        for (photo_id, job, mut settings, rotation, (gpu, shadows)) in ready {
             let Some((_, full_img)) = &full else { continue };
             let depth = settings.depth_map().filter(|_| job.refine).and_then(imaging::develop::mask_picture);
             settings.transform = Default::default();
@@ -1659,7 +1677,7 @@ fn worker(
                             if let Some(id) = made {
                                 let _ = tx.send(Reply::DepthMade { photo_id, id });
                             }
-                            run_people(photo_id, &job, &rgb, size, rotation, gpu, depth, &ctx)
+                            run_people(photo_id, &job, &rgb, size, rotation, (gpu, shadows), depth, &ctx)
                         })
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Reply::People { photo_id, result });
@@ -1923,6 +1941,8 @@ pub struct DevelopState {
     /// Refine with depth, for Remove: fills take their detail from as far away as what
     /// is behind the hole, and found people are listed nearest first.
     pub remove_depth: bool,
+    /// People are found with the shadows they cast (where one can be told).
+    pub people_shadows: bool,
     /// Distractions: the photo's infrared pass, if it is a scan that has one.
     pub ir_pass: Option<IrFiles>,
     /// Dust & Scratches: the detection running (for this layer key), and keys that failed
@@ -2071,6 +2091,7 @@ impl DevelopState {
             remove_best: true,
             mask_depth: false,
             remove_depth: false,
+            people_shadows: false,
             ir_pass: None,
             dust_job: None,
             dust_failed: Vec::new(),
@@ -2697,7 +2718,15 @@ impl DevelopState {
         };
         *job.progress.lock().unwrap_or_else(|e| e.into_inner()) = (-1.0, "Finding people…".into());
         let (settings, rotation, gpu) = (self.settings.clone(), self.rotation, self.ai_gpu);
-        let _ = self.tx.send(Request::FindPeople { photo_id, job: job.clone(), settings, rotation, gpu });
+        let shadows = self.people_shadows;
+        let _ = self.tx.send(Request::FindPeople {
+            photo_id,
+            job: job.clone(),
+            settings,
+            rotation,
+            gpu,
+            shadows,
+        });
         self.people_job = Some(job);
         self.people.clear();
         self.people_searched = false;

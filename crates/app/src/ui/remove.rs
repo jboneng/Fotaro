@@ -1189,6 +1189,8 @@ fn distractions(
             if ui.add_enabled_ui(!busy, |ui| pill(ui, label, false)).inner.on_hover_text(tip).clicked() {
                 asks.find_people = true;
             }
+            let tip = "Find people with the shadow they cast on the ground, so that it goes                        when they do. Only shadows that can be told for sure are taken (lit                        ground around them); the orange outline shows what will go. Find again                        after changing this";
+            ui.checkbox(&mut d.people_shadows, "Shadows").on_hover_text(tip);
         });
     });
     ui.add_space(4.0);

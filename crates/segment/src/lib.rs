@@ -702,6 +702,188 @@ pub struct Person {
     pub mask: GrayImage,
 }
 
+/// A person with the shadow they cast on the ground, if one is found: ground beside
+/// their feet that is clearly darker than the ground around it but of its colour, joined
+/// to the feet, reaching no farther than the person is tall, and with lit ground around
+/// most of it. `None` when there is none to be sure of (shade all around, a dark floor,
+/// something dark that goes on out of sight): a guess that only takes what it can tell.
+pub fn with_shadow(img: &RgbImage, person: &Person) -> Option<Person> {
+    let (w, h) = img.dimensions();
+    let [l, t, r, b] = person.rect;
+    let (pw, ph) = (r.saturating_sub(l), b.saturating_sub(t));
+    if pw < 8 || ph < 16 || person.mask.dimensions() != (pw, ph) {
+        return None;
+    }
+    // Around the feet: the person's height to either side, from the waist down to a little
+    // more than half their height below.
+    let x0 = l.saturating_sub(ph);
+    let y0 = t + ph / 2;
+    let x1 = (r + ph).min(w);
+    let y1 = (b + ph * 6 / 10).min(h);
+    if x1 <= x0 + 8 || y1 <= y0 + 8 {
+        return None;
+    }
+    // Small: a shadow is a large soft thing, and grain is not to count.
+    let k = ((x1 - x0).max(y1 - y0) as f32 / 256.0).max(1.0);
+    let (sw, sh) = ((((x1 - x0) as f32 / k) as u32).max(8), (((y1 - y0) as f32 / k) as u32).max(8));
+    let crop = imageops::crop_imm(img, x0, y0, x1 - x0, y1 - y0).to_image();
+    let small = imageops::resize(&crop, sw, sh, imageops::FilterType::Triangle);
+    let (sw, sh) = (sw as usize, sh as usize);
+    let n = sw * sh;
+    let body: Vec<bool> = (0..n)
+        .map(|i| {
+            let px = x0 as f32 + ((i % sw) as f32 + 0.5) * k;
+            let py = y0 as f32 + ((i / sw) as f32 + 0.5) * k;
+            px >= l as f32
+                && py >= t as f32
+                && (px as u32) < r
+                && (py as u32) < b
+                && person.mask.get_pixel(px as u32 - l, py as u32 - t)[0] > 0
+        })
+        .collect();
+    // Light (linear, so that "half as bright" means it) and colour apart from lightness.
+    let lin = |v: u8| (f32::from(v) / 255.0).powf(2.2);
+    let (mut light, mut tone) = (vec![0.0f32; n], vec![[0.0f32; 2]; n]);
+    for (i, p) in small.pixels().enumerate() {
+        let (rr, g, bb) = (lin(p[0]), lin(p[1]), lin(p[2]));
+        let sum = (rr + g + bb).max(1e-4);
+        light[i] = 0.2126 * rr + 0.7152 * g + 0.0722 * bb;
+        tone[i] = [rr / sum, bb / sum];
+    }
+    // The ground by the feet: what is not the person, from a little above their feet down.
+    let feet = ((b as f32 - 0.12 * ph as f32 - y0 as f32) / k).max(0.0) as usize;
+    let ground: Vec<usize> = (0..n).filter(|i| !body[*i] && i / sw >= feet).collect();
+    if ground.len() < 50 {
+        return None;
+    }
+    let mut lights: Vec<f32> = ground.iter().map(|i| light[*i]).collect();
+    lights.sort_by(f32::total_cmp);
+    let lit = lights[lights.len() * 3 / 4];
+    if lit < 0.02 {
+        return None;
+    }
+    let bright: Vec<usize> = ground.iter().copied().filter(|i| light[*i] >= 0.8 * lit).collect();
+    let middle = |c: usize| {
+        let mut v: Vec<f32> = bright.iter().map(|i| tone[*i][c]).collect();
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    let colour = [middle(0), middle(1)];
+    // Shadow, perhaps: clearly darker than the lit ground, of about its colour (a shadow is
+    // lit by the sky: a little bluer).
+    let dark: Vec<bool> = (0..n)
+        .map(|i| {
+            !body[i]
+                && light[i] < 0.6 * lit
+                && (tone[i][0] - colour[0]).abs() < 0.07
+                && (tone[i][1] - colour[1]).abs() < 0.09
+        })
+        .collect();
+    // From the feet: the person's lowest part, a little grown.
+    let low = ((b as f32 - 0.15 * ph as f32 - y0 as f32) / k).max(0.0) as usize;
+    let reach = ph as f32 / k;
+    let (fx, fy) = (((l + r) as f32 / 2.0 - x0 as f32) / k, (b as f32 - y0 as f32) / k);
+    let mut shadow = vec![false; n];
+    let mut queue: Vec<usize> = Vec::new();
+    for y in low..sh {
+        for x in 0..sw {
+            if !body[y * sw + x] {
+                continue;
+            }
+            for dy in -2i32..=3 {
+                for dx in -2i32..=2 {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= sw as i32 || ny >= sh as i32 {
+                        continue;
+                    }
+                    let j = ny as usize * sw + nx as usize;
+                    if dark[j] && !shadow[j] {
+                        shadow[j] = true;
+                        queue.push(j);
+                    }
+                }
+            }
+        }
+    }
+    while let Some(i) = queue.pop() {
+        let (x, y) = ((i % sw) as i32, (i / sw) as i32);
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+            let (nx, ny) = (x + dx, y + dy);
+            if nx < 0 || ny < 0 || nx >= sw as i32 || ny >= sh as i32 {
+                continue;
+            }
+            let j = ny as usize * sw + nx as usize;
+            if dark[j] && !shadow[j] && (nx as f32 - fx).hypot(ny as f32 - fy) <= reach {
+                shadow[j] = true;
+                queue.push(j);
+            }
+        }
+    }
+    // Is it a shadow? Not too little or too much of it, not going on out of sight, and
+    // lit ground around most of it.
+    let area = shadow.iter().filter(|s| **s).count();
+    let person_area = body.iter().filter(|s| **s).count().max(1);
+    let whole = person.mask.pixels().filter(|p| p[0] > 0).count() as f32 / (k * k);
+    if (area as f32) < 0.03 * whole || (area as f32) > 1.2 * whole.max(person_area as f32) {
+        return None;
+    }
+    let (mut around, mut lit_around, mut cut) = (0u32, 0u32, 0u32);
+    for i in (0..n).filter(|i| shadow[*i]) {
+        let (x, y) = ((i % sw) as i32, (i / sw) as i32);
+        // (The picture's own edges do not count: only where the photo goes on.)
+        let at_edge = (x == 0 && x0 > 0)
+            || (x == sw as i32 - 1 && x1 < w)
+            || (y == sh as i32 - 1 && y1 < h)
+            || (f32::from(x as i16) - fx).hypot(f32::from(y as i16) - fy) > reach - 1.5;
+        cut += u32::from(at_edge);
+        for (dx, dy) in [(-2, 0), (2, 0), (0, -2), (0, 2)] {
+            let (nx, ny) = (x + dx, y + dy);
+            if nx < 0 || ny < 0 || nx >= sw as i32 || ny >= sh as i32 {
+                continue;
+            }
+            let j = ny as usize * sw + nx as usize;
+            if !shadow[j] && !body[j] {
+                around += 1;
+                lit_around += u32::from(light[j] >= 0.75 * lit);
+            }
+        }
+    }
+    if cut as f32 > 0.04 * area as f32 || around == 0 || (lit_around as f32) < 0.6 * around as f32 {
+        return None;
+    }
+    // The person and the shadow (a little grown: its edge is soft), over both.
+    let mut grown = shadow.clone();
+    for i in (0..n).filter(|i| shadow[*i]) {
+        let (x, y) = ((i % sw) as i32, (i / sw) as i32);
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx >= 0 && ny >= 0 && nx < sw as i32 && ny < sh as i32 {
+                    grown[ny as usize * sw + nx as usize] = true;
+                }
+            }
+        }
+    }
+    let (mut bx0, mut by0, mut bx1, mut by1) = (l, t, r, b);
+    for i in (0..n).filter(|i| grown[*i]) {
+        let px = x0 + ((i % sw) as f32 * k) as u32;
+        let py = y0 + ((i / sw) as f32 * k) as u32;
+        (bx0, by0) = (bx0.min(px), by0.min(py));
+        (bx1, by1) = (bx1.max((px + k.ceil() as u32 + 1).min(w)), by1.max((py + k.ceil() as u32 + 1).min(h)));
+    }
+    let mask = GrayImage::from_fn(bx1 - bx0, by1 - by0, |x, y| {
+        let (px, py) = (bx0 + x, by0 + y);
+        let own = px >= l && py >= t && px < r && py < b && person.mask.get_pixel(px - l, py - t)[0] > 0;
+        let cast = px >= x0 && py >= y0 && px < x1 && py < y1 && {
+            let sx = (((px - x0) as f32 / k) as usize).min(sw - 1);
+            let sy = (((py - y0) as f32 / k) as usize).min(sh - 1);
+            grown[sy * sw + sx]
+        };
+        image::Luma([if own || cast { 255 } else { 0 }])
+    });
+    Some(Person { rect: [bx0, by0, bx1, by1], score: person.score, mask })
+}
+
 /// Distractions → People: the people in `img` (the photo at full size, upright), down to
 /// a detector score of `threshold`, with their outlines.
 ///
@@ -1072,6 +1254,42 @@ pub fn unload_remove() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_persons_shadow_is_found_when_it_is_one() {
+        // Light ground, a dark figure standing on it, and (when `cast`) their shadow lying
+        // to the right of their feet; `floor` darkens all the ground below the knees.
+        let scene = |cast: bool, floor: bool| {
+            RgbImage::from_fn(400, 300, |x, y| {
+                let ground = [200.0f32, 190.0, 170.0];
+                let k = if (180..220).contains(&x) && (60..200).contains(&y) {
+                    return image::Rgb([60, 40, 40]);
+                } else if floor && y > 150 {
+                    0.6
+                } else if cast && (220..300).contains(&x) && (184..204).contains(&y) {
+                    0.62
+                } else {
+                    1.0
+                };
+                image::Rgb(ground.map(|v| (v * k) as u8))
+            })
+        };
+        let person = Person {
+            rect: [180, 60, 220, 200],
+            score: 0.9,
+            mask: GrayImage::from_pixel(40, 140, image::Luma([255])),
+        };
+        let found = with_shadow(&scene(true, false), &person).expect("a shadow");
+        let [l, t, r, b] = found.rect;
+        assert!(l <= 180 && t <= 60 && r >= 296 && b >= 202, "{:?}", found.rect);
+        assert!(r <= 312 && b <= 216, "no more than the shadow: {:?}", found.rect);
+        assert_eq!(found.mask.dimensions(), (r - l, b - t));
+        let at = |x: u32, y: u32| found.mask.get_pixel(x - l, y - t)[0];
+        assert_eq!((at(260, 194), at(200, 100), at(260, 150)), (255, 255, 0));
+        // No shadow, and a floor dark all over: nothing to be sure of.
+        assert!(with_shadow(&scene(false, false), &person).is_none());
+        assert!(with_shadow(&scene(false, true), &person).is_none());
+    }
 
     #[test]
     fn dilate_grows_by_its_reach_each_way() {
