@@ -1,7 +1,7 @@
 //! Left (Navigator, Catalog, Folders, Collections) and right (Histogram,
 //! Keywording, Keyword List, Metadata) panel stacks.
 
-use catalog::{Flag, Folder, Source};
+use catalog::{Flag, Source};
 use eframe::egui::{self, Align, Color32, Layout, Rect, RichText, Sense};
 use imaging::PreviewSize;
 
@@ -177,18 +177,46 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let tree = &s.folder_tree;
     let folders = &s.folders;
 
+    // A filter: the folders whose names have the text, with the folders above them.
+    let filter_id = egui::Id::unique("folder_filter");
+    let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+    if folders.len() > 6 || !filter.is_empty() {
+        ui.add(
+            egui::TextEdit::singleline(&mut filter).hint_text("Filter Folders").desired_width(f32::INFINITY),
+        );
+        ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+        ui.add_space(2.0);
+    }
+    let needle = filter.trim().to_lowercase();
+    let mut shown = vec![needle.is_empty(); tree.nodes.len()];
+    if !needle.is_empty() {
+        // Children come after their parents: mark matches, then their parents, from the end.
+        for n in (0..tree.nodes.len()).rev() {
+            let node = &tree.nodes[n];
+            let hit =
+                node.name.to_lowercase().contains(&needle) || node.prefix.to_lowercase().contains(&needle);
+            shown[n] = hit || node.children.iter().any(|c| shown[*c]);
+        }
+    }
+
     let selected = match s.source {
         Source::Folder { id, .. } => Some(id),
         _ => None,
     };
     let include_subfolders = app.ui.include_subfolders;
     let mut commands = Vec::new();
-    let mut toggles = Vec::new();
+    let mut toggles: Vec<(Option<i64>, std::path::PathBuf)> = Vec::new();
+    let mut none_shown = true;
 
-    for (key, name, roots) in &tree.volumes {
+    for (key, name, tops) in &tree.volumes {
+        if !tops.iter().any(|t| shown[*t]) {
+            continue;
+        }
+        none_shown = false;
         // Volume header: name and free space.
+        ui.add_space(2.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(name).color(theme::TEXT_STRONG).strong());
+            ui.label(RichText::new(name).color(theme::TEXT_STRONG).strong()).on_hover_text(key.as_str());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(free) = s.free_space.get(key) {
                     ui.label(weak(format!("{} free", platform::human_bytes(free))).size(10.5));
@@ -196,94 +224,219 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
             });
         });
 
-        let mut stack: Vec<(&Folder, usize)> = roots.iter().rev().map(|&i| (&folders[i], 0)).collect();
-        while let Some((f, depth)) = stack.pop() {
-            let kids = tree.children.get(&Some(f.id));
-            let has_kids = kids.is_some_and(|k| !k.is_empty());
-            let expanded = !s.collapsed_folders.contains(&f.id);
-            let name = f
-                .path
-                .file_name()
-                .map_or_else(|| f.path.display().to_string(), |n| n.to_string_lossy().into_owned());
-            let tri = match (has_kids, expanded) {
-                (false, _) => "   ",
-                (true, true) => "▼ ",
-                (true, false) => "▶ ",
-            };
-            let indent = 4.0 + depth as f32 * 14.0;
-            let count = if include_subfolders { tree.totals[&f.id] } else { f.photo_count };
-            let missing = s.missing_folders.contains(&f.id);
-            let label = if missing { format!("{tri}{name}  ?") } else { format!("{tri}{name}") };
-            let resp = source_row(ui, indent, &label, Some(count), selected == Some(f.id));
-            if missing {
-                // LrC greys out folders it can't find (e.g. an unplugged drive).
-                ui.painter().rect_filled(resp.rect, 0.0, Color32::from_black_alpha(90));
+        let mut stack: Vec<(usize, usize)> = tops.iter().rev().map(|&n| (n, 0)).collect();
+        while let Some((n, depth)) = stack.pop() {
+            if !shown[n] {
+                continue;
             }
-            let tip = if missing {
-                format!("{}\nThis folder could not be found.", f.path.display())
-            } else {
-                f.path.display().to_string()
+            let node = &tree.nodes[n];
+            let folder = node.folder.map(|i| &folders[i]);
+            let has_kids = node.children.iter().any(|c| shown[*c]);
+            let expanded = !needle.is_empty()
+                || match folder {
+                    Some(f) => !s.collapsed_folders.contains(&f.id),
+                    None => !s.collapsed_groups.contains(&node.path),
+                };
+            let count = match folder {
+                Some(f) if !include_subfolders => f.photo_count,
+                _ => node.total,
+            };
+            let missing = folder.is_some_and(|f| s.missing_folders.contains(&f.id));
+            let row = FolderRow {
+                depth,
+                kids: has_kids.then_some(expanded),
+                prefix: &node.prefix,
+                name: &node.name,
+                count,
+                selected: folder.is_some_and(|f| selected == Some(f.id)),
+                group: folder.is_none(),
+                missing,
+            };
+            let (resp, on_triangle) = folder_row(ui, &row);
+            let tip = match (folder, missing) {
+                (_, true) => format!("{}\nThis folder could not be found.", node.path.display()),
+                (None, _) => {
+                    format!("{}\nNot a catalog folder: the folders under it are.", node.path.display())
+                }
+                (Some(_), false) => node.path.display().to_string(),
             };
             let resp = resp.on_hover_text(tip);
+            let toggle = (folder.map(|f| f.id), node.path.clone());
             if resp.clicked() {
-                let tri_hit =
-                    resp.interact_pointer_pos().is_some_and(|p| p.x < resp.rect.left() + indent + 12.0);
-                if tri_hit && has_kids {
-                    toggles.push(f.id);
-                } else {
-                    commands.push(Command::SetSource(Source::Folder { id: f.id, include_subfolders }));
-                }
-            }
-            if resp.double_clicked() && has_kids {
-                toggles.push(f.id);
-            }
-            // Same items and order as LrC's Folders panel context menu.
-            resp.context_menu(|ui| {
-                let mut item = |ui: &mut egui::Ui, text: &str, enabled: bool, cmd: Command| {
-                    // no hotkey: a folder's own menu
-                    if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
-                        commands.push(cmd);
-                        ui.close();
+                match folder {
+                    Some(f) if !(on_triangle && has_kids) => {
+                        commands.push(Command::SetSource(Source::Folder { id: f.id, include_subfolders }));
                     }
-                };
-                if missing {
-                    item(ui, "Find Missing Folder…", true, Command::LocateFolder(f.id));
-                    ui.separator();
+                    _ if has_kids => toggles.push(toggle.clone()),
+                    _ => {}
                 }
-                item(
-                    ui,
-                    &format!("Create Folder inside \"{name}\"…"),
-                    !missing,
-                    Command::CreateFolderIn(f.id),
-                );
-                item(ui, "Rename…", !missing, Command::RenameFolder(f.id));
-                item(ui, "Remove…", true, Command::RemoveFolder(f.id));
-                ui.separator();
-                item(ui, "Synchronize Folder…", !missing, Command::SyncFolder(f.id));
-                if !missing {
-                    item(ui, "Update Folder Location…", true, Command::LocateFolder(f.id));
+            }
+            if resp.double_clicked() && has_kids && folder.is_some() {
+                toggles.push(toggle);
+            }
+            match folder {
+                Some(f) => folder_menu(&resp, f, &node.name, missing, &mut commands),
+                None => {
+                    resp.context_menu(|ui| {
+                        // no hotkey: a folder's own menu
+                        if ui.button(platform::REVEAL_LABEL).clicked() {
+                            commands.push(Command::Reveal(node.path.clone()));
+                            ui.close();
+                        }
+                    });
                 }
-                item(ui, "Show Parent Folder", f.parent_id.is_none(), Command::ShowParentFolder(f.id));
-                ui.separator();
-                item(ui, platform::REVEAL_LABEL, !missing, Command::Reveal(f.path.clone()));
-            });
+            }
             if has_kids && expanded {
-                for &k in kids.into_iter().flatten().rev() {
-                    stack.push((&folders[k], depth + 1));
+                for &k in node.children.iter().rev() {
+                    stack.push((k, depth + 1));
                 }
             }
         }
         ui.add_space(4.0);
     }
+    if none_shown {
+        ui.label(weak("No folder by that name."));
+    }
 
-    for id in toggles {
-        if !s.collapsed_folders.remove(&id) {
-            s.collapsed_folders.insert(id);
+    for (id, path) in toggles {
+        match id {
+            Some(id) => {
+                if !s.collapsed_folders.remove(&id) {
+                    s.collapsed_folders.insert(id);
+                }
+            }
+            None => {
+                if !s.collapsed_groups.remove(&path) {
+                    s.collapsed_groups.insert(path);
+                }
+            }
         }
     }
     for c in commands {
         app.run(c);
     }
+}
+
+/// What a Folders panel row shows.
+struct FolderRow<'a> {
+    depth: usize,
+    /// Has folders under it: expanded or not.
+    kids: Option<bool>,
+    /// Folders above it with nothing else in them (dimmer, shortened first when narrow).
+    prefix: &'a str,
+    name: &'a str,
+    count: i64,
+    selected: bool,
+    /// Not a catalog folder: only shows where the ones under it are.
+    group: bool,
+    missing: bool,
+}
+
+/// A Folders panel row: a triangle (in its own column, so names line up), the name
+/// shortened to fit before the count, and the count. Also returns whether a click was on
+/// the triangle.
+fn folder_row(ui: &mut egui::Ui, row: &FolderRow) -> (egui::Response, bool) {
+    let height = 19.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
+    let painter = ui.painter_at(rect);
+    if row.selected {
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(0x55, 0x55, 0x55));
+    } else if resp.hovered() {
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(0x3d, 0x3d, 0x3d));
+    }
+    let x = rect.left() + 4.0 + row.depth as f32 * 12.0;
+    let tri = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(12.0, height));
+    if let Some(open) = row.kids {
+        let c = tri.center();
+        let points = if open {
+            vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)]
+        } else {
+            vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(2.5, 0.0), c + egui::vec2(-2.0, 3.5)]
+        };
+        painter.add(egui::Shape::convex_polygon(points, theme::TEXT_WEAK, egui::Stroke::NONE));
+    }
+    // The count, then the name in what is left.
+    let small = egui::FontId::proportional(11.5);
+    let count = painter.text(
+        rect.right_center() - egui::vec2(4.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        row.count.to_string(),
+        small,
+        theme::TEXT_WEAK,
+    );
+    let font = egui::FontId::proportional(12.5);
+    let room = (count.left() - 8.0 - (tri.right() + 2.0)).max(10.0);
+    let name_color = if row.group {
+        theme::TEXT_WEAK
+    } else if row.selected {
+        theme::TEXT_STRONG
+    } else {
+        theme::TEXT
+    };
+    let width = |text: &str| {
+        ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE).size().x)
+    };
+    let name = if row.missing { format!("{}  ?", row.name) } else { row.name.to_owned() };
+    // The prefix whole if it fits, else its end, else none.
+    let mut prefix = if row.prefix.is_empty() { String::new() } else { format!("{} / ", row.prefix) };
+    while !prefix.is_empty() && width(&prefix) + width(&name) > room {
+        let parts: Vec<&str> =
+            prefix.trim_start_matches("… / ").trim_end_matches(" / ").split(" / ").collect();
+        prefix = if parts.len() > 1 { format!("… / {} / ", parts[1..].join(" / ")) } else { String::new() };
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let dim = theme::TEXT_WEAK.gamma_multiply(0.85);
+    job.append(&prefix, 0.0, egui::TextFormat::simple(font.clone(), dim));
+    job.append(&name, 0.0, egui::TextFormat::simple(font.clone(), name_color));
+    job.wrap = egui::text::TextWrapping {
+        max_width: room,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+    let at = egui::pos2(tri.right() + 2.0, rect.center().y - galley.size().y / 2.0);
+    painter.galley(at, galley, name_color);
+    if row.missing {
+        // LrC greys out folders it can't find (e.g. an unplugged drive).
+        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(90));
+    }
+    let on_triangle = resp.interact_pointer_pos().is_some_and(|p| p.x < tri.right() + 2.0);
+    (resp, on_triangle)
+}
+
+/// A catalog folder's menu: the same items and order as LrC's Folders panel.
+fn folder_menu(
+    resp: &egui::Response,
+    f: &catalog::Folder,
+    name: &str,
+    missing: bool,
+    commands: &mut Vec<Command>,
+) {
+    resp.context_menu(|ui| {
+        let mut item = |ui: &mut egui::Ui, text: &str, enabled: bool, cmd: Command| {
+            // no hotkey: a folder's own menu
+            if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
+                commands.push(cmd);
+                ui.close();
+            }
+        };
+        if missing {
+            item(ui, "Find Missing Folder…", true, Command::LocateFolder(f.id));
+            ui.separator();
+        }
+        item(ui, &format!("Create Folder inside \"{name}\"…"), !missing, Command::CreateFolderIn(f.id));
+        item(ui, "Rename…", !missing, Command::RenameFolder(f.id));
+        item(ui, "Remove…", true, Command::RemoveFolder(f.id));
+        ui.separator();
+        item(ui, "Synchronize Folder…", !missing, Command::SyncFolder(f.id));
+        if !missing {
+            item(ui, "Update Folder Location…", true, Command::LocateFolder(f.id));
+        }
+        item(ui, "Show Parent Folder", f.parent_id.is_none(), Command::ShowParentFolder(f.id));
+        ui.separator();
+        item(ui, platform::REVEAL_LABEL, !missing, Command::Reveal(f.path.clone()));
+    });
 }
 
 pub fn right(app: &mut FotaroApp, ui: &mut egui::Ui) {

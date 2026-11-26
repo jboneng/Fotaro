@@ -458,6 +458,8 @@ pub struct Session {
     /// Catalog folders not found on disk (checked in the background).
     pub missing_folders: HashSet<i64>,
     pub collapsed_folders: HashSet<i64>,
+    /// Folders panel groups (folders above catalog folders) collapsed, by path.
+    pub collapsed_groups: HashSet<PathBuf>,
     pub free_space: crate::platform::FreeSpaceCache,
     pub counts: (i64, i64),
     pub quick_count: i64,
@@ -522,6 +524,7 @@ impl Session {
             folder_tree: FolderTree::default(),
             missing_folders: HashSet::new(),
             collapsed_folders: HashSet::new(),
+            collapsed_groups: HashSet::new(),
             free_space: Default::default(),
             counts: (0, 0),
             quick_count: 0,
@@ -2965,40 +2968,125 @@ impl eframe::App for FotaroApp {
     }
 }
 
+/// A row of the Folders panel: a catalog folder, or a folder above some (a group) that
+/// is not in the catalog itself but shows where they are.
+pub struct FolderNode {
+    /// The catalog folder (index into `Session::folders`); `None`: a group.
+    pub folder: Option<usize>,
+    /// Folders above it with nothing else in them, shown before its name ("2026 / Trip").
+    pub prefix: String,
+    pub name: String,
+    pub path: PathBuf,
+    /// Rows under it (indices into `FolderTree::nodes`), sorted by name.
+    pub children: Vec<usize>,
+    /// Photos in it and everything under it.
+    pub total: i64,
+}
+
 /// Folders panel structure, computed when the catalog's folders change rather than
-/// every frame. Indices refer to `Session::folders`.
+/// every frame. Each volume's folders are laid out by their paths: folders above them
+/// that are not in the catalog show as groups (so that two folders both named "Tiff" are
+/// told apart by where they are), and a run of such folders with one thing under each
+/// shows as one row.
 #[derive(Default)]
 pub struct FolderTree {
-    pub children: HashMap<Option<i64>, Vec<usize>>,
-    /// Photo counts including all subfolders.
+    /// Photo counts including all subfolders, per catalog folder id.
     pub totals: HashMap<i64, i64>,
-    /// (volume key, display name, root folder indices), sorted by key.
+    /// (volume key, display name, top rows), sorted by key.
     pub volumes: Vec<(String, String, Vec<usize>)>,
+    pub nodes: Vec<FolderNode>,
+}
+
+/// A folder of the path tree while it is built.
+struct PathNode {
+    name: String,
+    path: PathBuf,
+    folder: Option<usize>,
+    kids: Vec<usize>,
 }
 
 impl FolderTree {
     pub fn build(folders: &[Folder]) -> Self {
-        let mut children: HashMap<Option<i64>, Vec<usize>> = HashMap::new();
+        let mut groups: std::collections::BTreeMap<String, (String, Vec<usize>)> = Default::default();
         for (i, f) in folders.iter().enumerate() {
-            children.entry(f.parent_id).or_default().push(i);
+            let (key, name) = crate::platform::volume_of(&f.path);
+            groups.entry(key).or_insert_with(|| (name, Vec::new())).1.push(i);
         }
-        let index: HashMap<i64, usize> = folders.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
-        // Folders are sorted by path, so children come after parents: sum in reverse.
-        let mut totals: HashMap<i64, i64> = folders.iter().map(|f| (f.id, f.photo_count)).collect();
-        for f in folders.iter().rev() {
-            if let Some(parent) = f.parent_id.filter(|p| index.contains_key(p)) {
-                let own = totals[&f.id];
-                *totals.entry(parent).or_default() += own;
+        let mut tree = FolderTree::default();
+        for (key, (name, members)) in groups {
+            // The volume's path tree: node 0 is the volume.
+            let mut raw =
+                vec![PathNode { name: name.clone(), path: PathBuf::new(), folder: None, kids: Vec::new() }];
+            for i in members {
+                let f = &folders[i];
+                let parts = crate::platform::parts_below_volume(&f.path);
+                let mut at = 0;
+                for (depth, part) in parts.iter().enumerate() {
+                    let found = raw[at].kids.iter().copied().find(|k| raw[*k].name == *part);
+                    at = match found {
+                        Some(k) => k,
+                        None => {
+                            let up = parts.len() - 1 - depth;
+                            let path =
+                                f.path.ancestors().nth(up).map_or_else(PathBuf::new, Path::to_path_buf);
+                            raw.push(PathNode { name: part.clone(), path, folder: None, kids: Vec::new() });
+                            let k = raw.len() - 1;
+                            raw[at].kids.push(k);
+                            k
+                        }
+                    };
+                }
+                raw[at].folder = Some(i);
+                raw[at].path = f.path.clone();
             }
+            let tops = if raw[0].folder.is_some() {
+                // The volume's root is itself a catalog folder.
+                vec![tree.emit(&raw, 0, Vec::new(), folders)]
+            } else {
+                let kids = sorted_kids(&raw, 0);
+                kids.into_iter().map(|k| tree.emit(&raw, k, Vec::new(), folders)).collect()
+            };
+            tree.volumes.push((key, name, tops));
         }
-        let mut volumes: std::collections::BTreeMap<String, (String, Vec<usize>)> = Default::default();
-        for &i in children.get(&None).into_iter().flatten() {
-            let (key, name) = crate::platform::volume_of(&folders[i].path);
-            volumes.entry(key).or_insert_with(|| (name, Vec::new())).1.push(i);
-        }
-        let volumes = volumes.into_iter().map(|(k, (n, roots))| (k, n, roots)).collect();
-        FolderTree { children, totals, volumes }
+        tree
     }
+
+    /// Lay out path node `i` (with `prefix`, the groups folded into it) and what is under
+    /// it; returns its row.
+    fn emit(&mut self, raw: &[PathNode], i: usize, mut prefix: Vec<String>, folders: &[Folder]) -> usize {
+        let r = &raw[i];
+        if r.folder.is_none() && r.kids.len() == 1 {
+            // Nothing here but one folder further down: one row for both.
+            prefix.push(r.name.clone());
+            return self.emit(raw, r.kids[0], prefix, folders);
+        }
+        let at = self.nodes.len();
+        self.nodes.push(FolderNode {
+            folder: r.folder,
+            prefix: prefix.join(" / "),
+            name: r.name.clone(),
+            path: r.path.clone(),
+            children: Vec::new(),
+            total: 0,
+        });
+        let children: Vec<usize> =
+            sorted_kids(raw, i).into_iter().map(|k| self.emit(raw, k, Vec::new(), folders)).collect();
+        let own = r.folder.map_or(0, |f| folders[f].photo_count);
+        let total = own + children.iter().map(|c| self.nodes[*c].total).sum::<i64>();
+        if let Some(f) = r.folder {
+            self.totals.insert(folders[f].id, total);
+        }
+        let node = &mut self.nodes[at];
+        (node.children, node.total) = (children, total);
+        at
+    }
+}
+
+/// A path node's children by name, ignoring case.
+fn sorted_kids(raw: &[PathNode], i: usize) -> Vec<usize> {
+    let mut kids = raw[i].kids.clone();
+    kids.sort_by_cached_key(|k| raw[*k].name.to_lowercase());
+    kids
 }
 
 #[cfg(test)]
@@ -3009,10 +3097,36 @@ mod tests {
         Folder { id, path: PathBuf::from(path), parent_id: parent, photo_count: count }
     }
 
+    /// The rows as text: depth, prefix / name, total.
+    fn rows(t: &FolderTree) -> Vec<String> {
+        fn walk(t: &FolderTree, n: usize, depth: usize, out: &mut Vec<String>) {
+            let node = &t.nodes[n];
+            let name = if node.prefix.is_empty() {
+                node.name.clone()
+            } else {
+                format!("{} / {}", node.prefix, node.name)
+            };
+            let kind = if node.folder.is_some() { "" } else { "(group) " };
+            out.push(format!("{}{kind}{name} {}", "  ".repeat(depth), node.total));
+            for c in &node.children {
+                walk(t, *c, depth + 1, out);
+            }
+        }
+        let mut out = Vec::new();
+        for (_, name, tops) in &t.volumes {
+            out.push(format!("[{name}]"));
+            for n in tops {
+                walk(t, *n, 0, &mut out);
+            }
+        }
+        out
+    }
+
     #[test]
     fn folder_tree_totals_include_subfolders() {
         let sep = std::path::MAIN_SEPARATOR;
-        let p = |s: &str| s.replace('/', &sep.to_string());
+        let root = if cfg!(windows) { "C:" } else { "" };
+        let p = |s: &str| format!("{root}{}", s.replace('/', &sep.to_string()));
         let folders = vec![
             folder(1, &p("/photos"), None, 1),
             folder(2, &p("/photos/2025"), Some(1), 2),
@@ -3023,8 +3137,41 @@ mod tests {
         assert_eq!(t.totals[&1], 15);
         assert_eq!(t.totals[&2], 6);
         assert_eq!(t.totals[&3], 4);
-        assert_eq!(t.children[&Some(1)], vec![1, 3]);
         assert_eq!(t.volumes.len(), 1);
+    }
+
+    #[test]
+    fn folders_of_the_same_name_show_where_they_are() {
+        let sep = std::path::MAIN_SEPARATOR.to_string();
+        let root = if cfg!(windows) { "C:" } else { "" };
+        let p = |s: &str| format!("{root}{}", s.replace('/', &sep));
+        let folders = vec![
+            folder(1, &p("/Users/me/Desktop/real/nef"), None, 3),
+            folder(2, &p("/nas/2026 bilder/Mallorca/F3_CineStill/Tiff"), None, 3),
+            folder(3, &p("/nas/2026 bilder/Mallorca/F3_CineStill/Tiff/Edited"), Some(2), 1),
+            folder(4, &p("/nas/2026 bilder/Mallorca/F3_Delta/tiff"), None, 8),
+            folder(5, &p("/nas/2026 bilder/Mallorca/FM2_Gold/Tiff"), None, 8),
+        ];
+        let t = FolderTree::build(&folders);
+        let volume = if cfg!(windows) {
+            "[C:]"
+        } else if cfg!(target_os = "macos") {
+            "[Macintosh HD]"
+        } else {
+            "[File System]"
+        };
+        assert_eq!(
+            rows(&t),
+            [
+                volume,
+                "(group) nas / 2026 bilder / Mallorca 20",
+                "  F3_CineStill / Tiff 4",
+                "    Edited 1",
+                "  F3_Delta / tiff 8",
+                "  FM2_Gold / Tiff 8",
+                "Users / me / Desktop / real / nef 3",
+            ]
+        );
     }
 }
 

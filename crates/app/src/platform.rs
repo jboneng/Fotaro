@@ -63,23 +63,56 @@ impl FreeSpaceCache {
 }
 
 /// Group a folder path under its volume, the way LrC's Folders panel does.
-/// Returns (volume key, display name).
+/// Returns (volume key, display name). On Windows a network share
+/// (`\\server\share\…`, also written `\\?\UNC\server\share\…`) is a volume of its own,
+/// named "share on server"; its key is the share's root, for free space.
 pub fn volume_of(path: &Path) -> (String, String) {
+    volume_and_parts(path).0
+}
+
+/// The folders of `path` below its volume ([`volume_of`]), outermost first.
+pub fn parts_below_volume(path: &Path) -> Vec<String> {
+    volume_and_parts(path).1
+}
+
+fn volume_and_parts(path: &Path) -> ((String, String), Vec<String>) {
     let s = path.to_string_lossy();
     if cfg!(target_os = "windows") {
-        let drive: String = s.chars().take_while(|c| *c != '\\').collect();
-        return (format!("{drive}\\"), drive);
+        let split = |rest: &str| -> Vec<String> {
+            rest.split(['\\', '/']).filter(|p| !p.is_empty()).map(str::to_owned).collect()
+        };
+        // `\\?\` (long paths) is not part of the name.
+        let plain = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        let unc = match plain.strip_prefix(r"UNC\") {
+            Some(rest) => Some(rest),
+            None if !s.starts_with(r"\\?\") => s.strip_prefix(r"\\"),
+            None => None,
+        };
+        if let Some(unc) = unc {
+            let mut parts = split(unc).into_iter();
+            let server = parts.next().unwrap_or_default();
+            let share = parts.next().unwrap_or_default();
+            let name = if share.is_empty() { server.clone() } else { format!("{share} on {server}") };
+            return ((format!(r"\\{server}\{share}\"), name), parts.collect());
+        }
+        let drive: String = plain.chars().take_while(|c| *c != '\\').collect();
+        let rest = plain.get(drive.len()..).unwrap_or_default();
+        return ((format!("{drive}\\"), drive), split(rest));
     }
-    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
-    match parts.as_slice() {
-        ["Volumes", name, ..] => (format!("/Volumes/{name}"), (*name).to_owned()),
-        ["media", user, name, ..] => (format!("/media/{user}/{name}"), (*name).to_owned()),
-        ["mnt", name, ..] => (format!("/mnt/{name}"), (*name).to_owned()),
+    let all: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    let (volume, skip) = match all.as_slice() {
+        ["Volumes", name, ..] => ((format!("/Volumes/{name}"), (*name).to_owned()), 2),
+        ["media", user, name, ..] => ((format!("/media/{user}/{name}"), (*name).to_owned()), 3),
+        ["mnt", name, ..] => ((format!("/mnt/{name}"), (*name).to_owned()), 2),
         _ => (
-            "/".to_owned(),
-            if cfg!(target_os = "macos") { "Macintosh HD" } else { "File System" }.to_owned(),
+            (
+                "/".to_owned(),
+                if cfg!(target_os = "macos") { "Macintosh HD" } else { "File System" }.to_owned(),
+            ),
+            0,
         ),
-    }
+    };
+    (volume, all[skip.min(all.len())..].iter().map(|p| (*p).to_owned()).collect())
 }
 
 pub fn human_bytes(bytes: u64) -> String {
@@ -214,8 +247,21 @@ mod tests {
     fn groups_by_volume() {
         if cfg!(target_os = "windows") {
             assert_eq!(volume_of(Path::new(r"D:\Photos\2026")).1, "D:");
+            assert_eq!(parts_below_volume(Path::new(r"D:\Photos\2026")), ["Photos", "2026"]);
+            assert_eq!(parts_below_volume(Path::new(r"\\?\D:\Photos")), ["Photos"]);
+            // A network share, as written either way: one volume, with its own free space.
+            for p in [r"\\?\UNC\nas\Media\2026 bilder\Trip", r"\\nas\Media\2026 bilder\Trip"] {
+                assert_eq!(
+                    volume_of(Path::new(p)),
+                    (r"\\nas\Media\".to_owned(), "Media on nas".to_owned()),
+                    "{p}"
+                );
+                assert_eq!(parts_below_volume(Path::new(p)), ["2026 bilder", "Trip"]);
+            }
         } else {
             assert_eq!(volume_of(Path::new("/Volumes/Archive/2026")).1, "Archive");
+            assert_eq!(parts_below_volume(Path::new("/Volumes/Archive/2026/x")), ["2026", "x"]);
+            assert_eq!(parts_below_volume(Path::new("/home/me/Pictures")), ["home", "me", "Pictures"]);
         }
     }
 }
