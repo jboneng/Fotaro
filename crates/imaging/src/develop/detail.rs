@@ -89,6 +89,20 @@ pub enum DetailParam {
 }
 
 impl DetailParam {
+    /// Every one, in the panel's order.
+    pub const ALL: [DetailParam; 10] = [
+        Self::SharpenAmount,
+        Self::SharpenRadius,
+        Self::SharpenDetail,
+        Self::SharpenMasking,
+        Self::Luminance,
+        Self::LuminanceDetail,
+        Self::LuminanceContrast,
+        Self::Color,
+        Self::ColorDetail,
+        Self::ColorSmoothness,
+    ];
+
     pub const SHARPENING: [DetailParam; 4] =
         [Self::SharpenAmount, Self::SharpenRadius, Self::SharpenDetail, Self::SharpenMasking];
     pub const NOISE: [DetailParam; 6] = [

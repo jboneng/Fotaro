@@ -1328,6 +1328,49 @@ impl FotaroApp {
         self.notify(describe(n));
     }
 
+    /// A hot key was pressed for `c`.
+    fn hot_key(&mut self, ctx: &egui::Context, c: &'static crate::ui::hotkeys::Command) {
+        use crate::ui::hotkeys::{self, Run};
+        // Its panel opens, to show what it did.
+        if let Some(panel) = c.panel
+            && self.module == Module::Develop
+        {
+            self.ui.dev_right.set_open(panel, true, crate::ui::DEVELOP_PANELS);
+        }
+        match c.run {
+            Run::Action(a) => self.commands.push(Command::Action(a)),
+            Run::Slider { slider, up } => {
+                let steps = if up { 1.0 } else { -1.0 };
+                if hotkeys::moves_settings(slider) {
+                    self.step_setting(slider, steps);
+                } else {
+                    hotkeys::step_when_drawn(ctx, slider, steps);
+                }
+            }
+            Run::PickSlider(dir) => hotkeys::pick_next(ctx, dir),
+            Run::StepPicked(dir) => hotkeys::step_picked(ctx, f32::from(dir)),
+        }
+    }
+
+    /// Move a develop slider that is a plain setting by `steps` of its step, and save it.
+    fn step_setting(&mut self, slider: imaging::develop::Slider, steps: f32) {
+        let Some(s) = &mut self.session else { return };
+        let d = &mut s.develop;
+        if d.photo.is_none() {
+            return;
+        }
+        let kelvin = d.kelvin();
+        let (lo, hi) = slider.range(kelvin);
+        let q = 10f32.powi(-(slider.decimals() as i32));
+        let mut st = d.settings.clone();
+        let v = slider.get(&st) + steps * crate::ui::hotkeys::step(slider, kelvin);
+        slider.set(&mut st, ((v / q).round() * q).clamp(lo, hi));
+        if st != d.settings {
+            d.set_live(st);
+            self.commands.push(Command::DevelopCommit(None));
+        }
+    }
+
     fn action(&mut self, ctx: &egui::Context, action: Action) {
         if let Some(sc) = SHORTCUTS.iter().find(|s| s.action == action)
             && let Status::Planned(phase) = sc.status
@@ -2873,9 +2916,10 @@ impl eframe::App for FotaroApp {
         }
 
         // (Not while the shortcuts editor is taking keys.)
+        crate::ui::hotkeys::begin_frame(&ctx);
         if !self.keymap_editor.capturing() {
             for c in crate::ui::shortcuts::take_actions(&ctx, self.module) {
-                self.commands.push(Command::Action(c.action));
+                self.hot_key(&ctx, c);
             }
         }
 

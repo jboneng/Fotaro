@@ -495,6 +495,25 @@ pub enum LocalParam {
 }
 
 impl LocalParam {
+    /// Every one, in the panel's order.
+    pub const ALL: [LocalParam; 15] = [
+        Self::Temp,
+        Self::Tint,
+        Self::Exposure,
+        Self::Contrast,
+        Self::Highlights,
+        Self::Shadows,
+        Self::Whites,
+        Self::Blacks,
+        Self::Texture,
+        Self::Clarity,
+        Self::Dehaze,
+        Self::Hue,
+        Self::Saturation,
+        Self::Sharpness,
+        Self::Noise,
+    ];
+
     /// LrC's groups, in order.
     pub const GROUPS: [&'static [LocalParam]; 5] = [
         &[Self::Temp, Self::Tint],

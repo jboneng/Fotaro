@@ -419,6 +419,43 @@ pub enum EffectParam {
 }
 
 impl EffectParam {
+    /// Every one, in the panel's order.
+    pub const ALL: [EffectParam; 33] = [
+        Self::VignetteAmount,
+        Self::VignetteMidpoint,
+        Self::VignetteRoundness,
+        Self::VignetteFeather,
+        Self::VignetteHighlights,
+        Self::GrainAmount,
+        Self::GrainSize,
+        Self::GrainRoughness,
+        Self::GlowAmount,
+        Self::GlowRange,
+        Self::GlowSpread,
+        Self::GlowWarmth,
+        Self::FogAmount,
+        Self::FogDistance,
+        Self::FogDensity,
+        Self::FogHeight,
+        Self::FogWarmth,
+        Self::BlurAmount,
+        Self::BlurFocus,
+        Self::BlurRange,
+        Self::BlurHighlights,
+        Self::RelightAmount,
+        Self::RelightWarmth,
+        Self::RelightDepth,
+        Self::RelightRange,
+        Self::RelightFeather,
+        Self::RelightSize,
+        Self::RelightShaping,
+        Self::RelightDirection,
+        Self::RelightNear,
+        Self::RelightWarmthNear,
+        Self::RelightFar,
+        Self::RelightWarmthFar,
+    ];
+
     pub const VIGNETTE: [EffectParam; 5] = [
         Self::VignetteAmount,
         Self::VignetteMidpoint,

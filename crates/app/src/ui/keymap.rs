@@ -178,8 +178,20 @@ pub fn window(app: &mut FotaroApp, ctx: &egui::Context) {
                             egui::Grid::new(("keymap_grid", section)).num_columns(2).striped(true).show(
                                 ui,
                                 |ui| {
+                                    let mut done: Vec<imaging::develop::Slider> = Vec::new();
                                     for c in members {
-                                        row(ui, &mut ed, &mut keymap, c);
+                                        match c.slider() {
+                                            // A slider: one row with both its keys and its step.
+                                            Some(s) if done.contains(&s) => continue,
+                                            Some(s) => {
+                                                done.push(s);
+                                                slider_row(ui, &mut ed, &mut keymap, s);
+                                            }
+                                            None => {
+                                                ui.label(&c.name);
+                                                ui.horizontal(|ui| key_chips(ui, &mut ed, &mut keymap, c));
+                                            }
+                                        }
                                         ui.end_row();
                                     }
                                 },
@@ -202,30 +214,53 @@ pub fn window(app: &mut FotaroApp, ctx: &egui::Context) {
     }
 }
 
-/// A command's row: its name, its keys (click one to remove it), + to add one, Reset.
-fn row(ui: &mut egui::Ui, ed: &mut Editor, keymap: &mut Keymap, c: &'static Command) {
-    ui.label(&c.name);
+/// A command's keys (click one to remove it), + to add one, Reset.
+fn key_chips(ui: &mut egui::Ui, ed: &mut Editor, keymap: &mut Keymap, c: &'static Command) {
+    let keys = keymap.bindings(c);
+    for k in &keys {
+        let chip = egui::Button::new(RichText::new(format!("{} ×", k.label())).monospace()).small();
+        if ui.add(chip).on_hover_text("Remove this key").clicked() {
+            let rest: Vec<Binding> = keys.iter().copied().filter(|o| o != k).collect();
+            keymap.set(c, &rest);
+        }
+    }
+    let recording = ed.recording.is_some_and(|r| r.id == c.id);
+    if recording {
+        ui.label(RichText::new("Press keys… (Esc)").color(theme::TEXT_STRONG));
+    } else if ui.small_button("+").on_hover_text("Add a key").clicked() {
+        ed.recording = Some(c);
+        ed.by_keys = None;
+        ed.clash = None;
+    }
+    if keys != c.defaults
+        && ui.small_button("Reset").on_hover_text("Back to the keys out of the box").clicked()
+    {
+        keymap.set(c, &c.defaults);
+    }
+}
+
+/// A slider's row: its name, the keys that raise and lower it, and its step.
+fn slider_row(ui: &mut egui::Ui, ed: &mut Editor, keymap: &mut Keymap, s: imaging::develop::Slider) {
+    let find =
+        |up: bool| hotkeys::commands().iter().find(|c| c.run == hotkeys::Run::Slider { slider: s, up });
+    let (Some(up), Some(down)) = (find(true), find(false)) else { return };
+    ui.label(up.name.trim_end_matches(": Raise"));
     ui.horizontal(|ui| {
-        let keys = keymap.bindings(c);
-        for k in &keys {
-            let chip = egui::Button::new(RichText::new(format!("{} ×", k.label())).monospace()).small();
-            if ui.add(chip).on_hover_text("Remove this key").clicked() {
-                let rest: Vec<Binding> = keys.iter().copied().filter(|o| o != k).collect();
-                keymap.set(c, &rest);
-            }
-        }
-        let recording = ed.recording.is_some_and(|r| r.id == c.id);
-        if recording {
-            ui.label(RichText::new("Press keys… (Esc)").color(theme::TEXT_STRONG));
-        } else if ui.small_button("+").on_hover_text("Add a key").clicked() {
-            ed.recording = Some(c);
-            ed.by_keys = None;
-            ed.clash = None;
-        }
-        if keys != c.defaults
-            && ui.small_button("Reset").on_hover_text("Back to the keys out of the box").clicked()
-        {
-            keymap.set(c, &c.defaults);
+        ui.label(RichText::new("Raise").color(theme::TEXT_WEAK));
+        key_chips(ui, ed, keymap, up);
+        ui.add_space(8.0);
+        ui.label(RichText::new("Lower").color(theme::TEXT_WEAK));
+        key_chips(ui, ed, keymap, down);
+        ui.add_space(8.0);
+        ui.label(RichText::new("Step").color(theme::TEXT_WEAK));
+        let mut step = keymap.step(s);
+        let fine = hotkeys::default_step(s) < 1.0;
+        let drag = egui::DragValue::new(&mut step)
+            .range(if fine { 0.01..=10.0 } else { 0.1..=1000.0 })
+            .speed(if fine { 0.01 } else { 0.5 })
+            .max_decimals(2);
+        if ui.add(drag).on_hover_text("How much one key press moves the slider").changed() {
+            keymap.set_step(s, step);
         }
     });
 }

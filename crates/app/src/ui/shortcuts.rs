@@ -646,26 +646,26 @@ mod tests {
         // Windows reports AltGr as Ctrl+Alt: Nordic `\` is AltGr+'+'.
         let altgr = egui::Modifiers { ctrl: true, alt: true, command: true, ..Default::default() };
         let s = resolve(Key::Backslash, Some(Key::Minus), altgr, Module::Develop).unwrap();
-        assert_eq!(s.action, Action::BeforeAfter);
+        assert_eq!(s.action(), Some(Action::BeforeAfter));
         let s = resolve(Key::Backslash, Some(Key::Minus), altgr, Module::Library).unwrap();
-        assert_eq!(s.action, Action::ToggleFilterBar);
+        assert_eq!(s.action(), Some(Action::ToggleFilterBar));
         // Letters and digits with Ctrl+Alt keep their own bindings.
         let s = resolve(Key::E, None, altgr, Module::Library).unwrap();
-        assert_eq!(s.action, Action::EditInOther);
+        assert_eq!(s.action(), Some(Action::EditInOther));
         assert!(resolve(Key::P, None, altgr, Module::Library).is_none());
         // Brush keys: `[` is AltGr+8 and `{` AltGr+7 on Nordic layouts; `{` is Shift+[ on US.
         let s = resolve(Key::OpenBracket, Some(Key::Num8), altgr, Module::Develop).unwrap();
-        assert_eq!(s.action, Action::BrushSize(-1));
+        assert_eq!(s.action(), Some(Action::BrushSize(-1)));
         let s = resolve(Key::OpenCurlyBracket, Some(Key::Num7), altgr, Module::Develop).unwrap();
-        assert_eq!(s.action, Action::BrushFeather(-1));
+        assert_eq!(s.action(), Some(Action::BrushFeather(-1)));
         let shift = egui::Modifiers { shift: true, ..Default::default() };
         let s = resolve(Key::CloseCurlyBracket, Some(Key::CloseBracket), shift, Module::Develop).unwrap();
-        assert_eq!(s.action, Action::BrushFeather(1));
+        assert_eq!(s.action(), Some(Action::BrushFeather(1)));
         // Ctrl+[ still rotates.
         let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
         assert_eq!(
-            resolve(Key::OpenBracket, None, ctrl, Module::Develop).unwrap().action,
-            Action::RotateLeft
+            resolve(Key::OpenBracket, None, ctrl, Module::Develop).unwrap().action(),
+            Some(Action::RotateLeft)
         );
     }
 
@@ -681,8 +681,8 @@ mod tests {
         // What is recorded runs the command.
         let b = binding_for_press(Key::Backslash, Some(Key::Minus), altgr);
         assert_eq!(
-            resolve(b.key, None, egui::Modifiers::NONE, Module::Develop).unwrap().action,
-            Action::BeforeAfter
+            resolve(b.key, None, egui::Modifiers::NONE, Module::Develop).unwrap().action(),
+            Some(Action::BeforeAfter)
         );
     }
 
@@ -690,9 +690,9 @@ mod tests {
     fn keys_follow_the_module() {
         let none = egui::Modifiers::NONE;
         let lib = resolve(Key::Backslash, None, none, Module::Library).unwrap();
-        assert_eq!(lib.action, Action::ToggleFilterBar);
+        assert_eq!(lib.action(), Some(Action::ToggleFilterBar));
         let dev = resolve(Key::Backslash, None, none, Module::Develop).unwrap();
-        assert_eq!(dev.action, Action::BeforeAfter);
+        assert_eq!(dev.action(), Some(Action::BeforeAfter));
         // Rating works in both.
         assert!(resolve(Key::Num3, None, none, Module::Develop).is_some());
         assert!(resolve(Key::W, None, none, Module::Library).is_none());
@@ -713,12 +713,12 @@ mod tests {
     fn arrow_keys_win_over_numpad_physical_keys() {
         // Windows reports Right arrow (and numpad arrows) with physical key Num6.
         let s = resolve(Key::ArrowRight, Some(Key::Num6), egui::Modifiers::NONE, Module::Library).unwrap();
-        assert_eq!(s.action, Action::Next);
+        assert_eq!(s.action(), Some(Action::Next));
         let s = resolve(Key::ArrowLeft, Some(Key::Num4), egui::Modifiers::NONE, Module::Library).unwrap();
-        assert_eq!(s.action, Action::Previous);
+        assert_eq!(s.action(), Some(Action::Previous));
         let shift = egui::Modifiers { shift: true, ..Default::default() };
         let s = resolve(Key::Exclamationmark, Some(Key::Num1), shift, Module::Library).unwrap();
-        assert_eq!(s.action, Action::SetRating { stars: 1, advance: true });
+        assert_eq!(s.action(), Some(Action::SetRating { stars: 1, advance: true }));
     }
 
     #[test]

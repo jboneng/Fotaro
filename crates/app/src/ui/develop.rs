@@ -30,7 +30,7 @@ use crate::develop::{DevelopState, GuideDrag, RegionTarget, Slot};
 
 const LEFT: &[&str] = &["Navigator", "Presets", "Snapshots", "History", "Collections"];
 const PLANNED_RIGHT: &[&str] = &[];
-const RIGHT: &[&str] = &[
+pub(crate) const RIGHT: &[&str] = &[
     "Histogram",
     "Basic",
     "Tone Curve",
@@ -255,6 +255,16 @@ pub(super) fn slider_row_as(ui: &mut egui::Ui, spec: &Spec, text: &str, value: &
     let mut out = Moved::default();
     let enabled = ui.is_enabled();
     let id = ui.scope_id().with(("dev_slider", spec.slider));
+    // Its hot keys: steps asked of it, and whether it is the picked one (`,` `.`).
+    let (steps, picked) = super::hotkeys::drawn(ui.ctx(), spec.slider);
+    if steps != 0.0 && enabled {
+        let v = spec.round(*value + steps * super::hotkeys::step(spec.slider, spec.kelvin));
+        if v != *value {
+            *value = v;
+            out.changed = true;
+        }
+        out.done = true;
+    }
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 21.0), Sense::hover());
     let label_rect = Rect::from_min_size(rect.min, egui::vec2(LABEL_W, rect.height()));
     let value_rect = Rect::from_min_max(egui::pos2(rect.right() - VALUE_W, rect.top() + 1.0), rect.max);
@@ -265,13 +275,18 @@ pub(super) fn slider_row_as(ui: &mut egui::Ui, spec: &Spec, text: &str, value: &
 
     let label = ui.interact(label_rect, id.with("label"), Sense::click());
     let text_color = if enabled { theme::TEXT } else { theme::TEXT_WEAK.gamma_multiply(0.7) };
-    ui.painter().text(
+    let shown = ui.painter().text(
         label_rect.right_center(),
         Align2::RIGHT_CENTER,
         text,
         FontId::proportional(12.5),
-        if label.hovered() { theme::TEXT_STRONG } else { text_color },
+        if label.hovered() || picked { theme::TEXT_STRONG } else { text_color },
     );
+    if picked {
+        // The picked slider (`,` and `.`; `+` and `-` move it): a mark under its name.
+        let y = shown.bottom() + 1.0;
+        ui.painter().hline(shown.x_range(), y, egui::Stroke::new(1.5, theme::TEXT_STRONG));
+    }
     let label = label.on_hover_text("Double-click to reset");
     let mut reset = label.double_clicked();
 
@@ -312,6 +327,9 @@ pub(super) fn slider_row_as(ui: &mut egui::Ui, spec: &Spec, text: &str, value: &
         }
     }
     out.held = track.is_pointer_button_down_on();
+    if out.held || label.clicked() {
+        super::hotkeys::pick(ui.ctx(), spec.slider);
+    }
     if track.drag_stopped() || track.clicked() {
         out.done = true;
     }
@@ -355,6 +373,9 @@ pub(super) fn slider_row_as(ui: &mut egui::Ui, spec: &Spec, text: &str, value: &
         }
     }
     out.held |= resp.dragged();
+    if resp.dragged() || resp.gained_focus() {
+        super::hotkeys::pick(ui.ctx(), spec.slider);
+    }
     if resp.drag_stopped() {
         out.done = true;
     }
@@ -431,7 +452,7 @@ fn profile_row(
     }
     if let Some(p) = &mut st.profile {
         let spec = Spec {
-            slider: Slider::MaskAmount(250),
+            slider: Slider::MaskAmount(254),
             range: (0.0, 200.0),
             default: 100.0,
             log: false,
