@@ -25,7 +25,7 @@ const TOAST_TIME: Duration = Duration::from_millis(1400);
 
 /// Shortcut label for an action, for display next to menu items.
 pub(super) fn shortcut_for(action: Action) -> Option<String> {
-    SHORTCUTS.iter().find(|s| s.action == action).map(|s| s.binding.label())
+    super::hotkeys::label_for(action)
 }
 
 /// A menu item that runs a shortcut action, showing its key binding.
@@ -106,6 +106,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             menu_action(ui, app, "Select All", Action::SelectAll);
             menu_action(ui, app, "Select None", Action::SelectNone);
             ui.separator();
+            menu_action(ui, app, "Keyboard Shortcuts…", Action::ShowShortcuts);
             menu_cmd(ui, app, "External Editing Settings…", true, Command::OpenEditSettings);
         });
         if develop {
@@ -294,7 +295,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             });
         });
         ui.menu_button("Help", |ui| {
-            menu_action(ui, app, "Library Module Shortcuts", Action::ShowShortcuts);
+            menu_action(ui, app, "Keyboard Shortcuts…", Action::ShowShortcuts);
             ui.separator();
             if ui.button("Check for Updates…").clicked() {
                 app.updater.check(ui.ctx(), true);
@@ -744,43 +745,7 @@ fn overlays(app: &mut FotaroApp, ctx: &egui::Context, full: egui::Rect) {
         views::fullscreen(app, ctx, full);
     }
 
-    if app.show_shortcuts {
-        let mut open = true;
-        egui::Window::new("Library Module Shortcuts")
-            .open(&mut open)
-            .default_size([520.0, 560.0])
-            .collapsible(false)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut group = "";
-                    for s in SHORTCUTS {
-                        if s.group != group {
-                            group = s.group;
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(group).strong().color(theme::TEXT_STRONG));
-                            ui.separator();
-                        }
-                        ui.horizontal(|ui| {
-                            ui.add_sized(
-                                [130.0, 16.0],
-                                egui::Label::new(RichText::new(s.binding.label()).monospace()),
-                            );
-                            let text = RichText::new(s.description);
-                            match s.status {
-                                Status::Available => ui.label(text),
-                                Status::Planned(phase) => {
-                                    ui.label(text.color(theme::TEXT_WEAK));
-                                    ui.label(
-                                        RichText::new(format!("({phase})")).small().color(theme::TEXT_WEAK),
-                                    )
-                                }
-                            };
-                        });
-                    }
-                });
-            });
-        app.show_shortcuts = open;
-    }
+    super::keymap::window(app, ctx);
 
     if app.show_about {
         about(app, ctx);

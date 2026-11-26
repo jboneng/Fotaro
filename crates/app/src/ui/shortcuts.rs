@@ -6,6 +6,7 @@
 
 use catalog::Flag;
 
+use super::hotkeys::{Command, Keymap, commands};
 use crate::app::Module;
 use eframe::egui::{self, Key};
 
@@ -168,8 +169,8 @@ impl Scope {
         }
     }
 
-    #[cfg(test)]
-    fn overlaps(self, other: Scope) -> bool {
+    /// Both can be in effect at once (a key used by both would clash).
+    pub fn overlaps(self, other: Scope) -> bool {
         self == Scope::All || other == Scope::All || self == other
     }
 }
@@ -448,21 +449,17 @@ impl Binding {
         m.command == self.ctrl && m.shift == self.shift && m.alt == self.alt
     }
 
-    fn matches(&self, key: Key, physical: Option<Key>, m: egui::Modifiers) -> bool {
+    /// `bound`: `key` has a binding of its own (with any modifiers), and so never falls
+    /// back to the physical key.
+    fn matches(&self, key: Key, physical: Option<Key>, m: egui::Modifiers, bound: bool) -> bool {
         if !self.modifiers_match(m) {
             return false;
         }
         // Shift+digit may arrive as a symbol ("!" for Shift+1), so fall back to the
         // physical key for Shift+digit bindings only. (Never otherwise: arrow keys can
         // report the numpad digit as their physical key.)
-        key == self.key
-            || (self.shift && is_digit(self.key) && !is_logical_key_bound(key) && physical == Some(self.key))
+        key == self.key || (self.shift && is_digit(self.key) && !bound && physical == Some(self.key))
     }
-}
-
-/// Is `key` bound (with any modifiers) as a logical key? Such keys never fall back to physical matching.
-fn is_logical_key_bound(key: Key) -> bool {
-    SHORTCUTS.iter().any(|s| s.binding.key == key)
 }
 
 fn is_digit(key: Key) -> bool {
@@ -483,20 +480,22 @@ fn is_digit(key: Key) -> bool {
 
 /// Take this frame's shortcut presses out of the input queue (so widgets don't
 /// also react, e.g. Tab moving focus). Does nothing while a text field has focus.
-pub fn take_actions(ctx: &egui::Context, module: Module) -> Vec<&'static Shortcut> {
+pub fn take_actions(ctx: &egui::Context, module: Module) -> Vec<&'static Command> {
     if ctx.egui_wants_keyboard_input() {
         return Vec::new();
     }
     let mut hits = Vec::new();
+    let mut keymap = None;
     ctx.input_mut(|input| {
         input.events.retain(|ev| {
             let egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } = ev else {
                 return true;
             };
-            match resolve(*key, *physical_key, *modifiers, module) {
-                Some(s) => {
-                    log::debug!("shortcut {}: {}", s.binding.label(), s.description);
-                    hits.push(s);
+            let keymap = keymap.get_or_insert_with(super::hotkeys::current);
+            match resolve_in(keymap, *key, *physical_key, *modifiers, module) {
+                Some(c) => {
+                    log::debug!("hot key {key:?}: {}", c.name);
+                    hits.push(c);
                     false
                 }
                 None => true,
@@ -506,13 +505,29 @@ pub fn take_actions(ctx: &egui::Context, module: Module) -> Vec<&'static Shortcu
     hits
 }
 
-/// The shortcut for a key press: exact logical matches win over the physical fallback.
-fn resolve(key: Key, physical: Option<Key>, m: egui::Modifiers, module: Module) -> Option<&'static Shortcut> {
-    let active = || SHORTCUTS.iter().filter(move |s| s.scope.includes(module));
+/// The command for a key press with the keys out of the box.
+#[cfg(test)]
+fn resolve(key: Key, physical: Option<Key>, m: egui::Modifiers, module: Module) -> Option<&'static Command> {
+    resolve_in(&Keymap::default(), key, physical, m, module)
+}
+
+/// The command for a key press: exact logical matches win over the physical fallback.
+fn resolve_in(
+    keymap: &Keymap,
+    key: Key,
+    physical: Option<Key>,
+    m: egui::Modifiers,
+    module: Module,
+) -> Option<&'static Command> {
+    let all: Vec<(Binding, &'static Command)> =
+        commands().iter().flat_map(|c| keymap.bindings(c).into_iter().map(move |b| (b, c))).collect();
+    let bound = all.iter().any(|(b, _)| b.key == key);
+    let active = || all.iter().filter(|(_, c)| c.scope.includes(module));
     let find = |m: egui::Modifiers| {
         active()
-            .find(|s| s.binding.key == key && s.binding.modifiers_match(m))
-            .or_else(|| active().find(|s| s.binding.matches(key, physical, m)))
+            .find(|(b, _)| b.key == key && b.modifiers_match(m))
+            .or_else(|| active().find(|(b, _)| b.matches(key, physical, m, bound)))
+            .map(|(_, c)| *c)
     };
     find(m)
         .or_else(|| {
@@ -529,6 +544,21 @@ fn resolve(key: Key, physical: Option<Key>, m: egui::Modifiers, module: Module) 
                 .then(|| find(egui::Modifiers { shift: false, ..m }))
                 .flatten()
         })
+}
+
+/// The binding a key press makes, as the editor records it: a symbol typed with AltGr
+/// (Ctrl+Alt on Windows) or with Shift is the symbol alone, as [`resolve_in`] matches it.
+pub fn binding_for_press(key: Key, physical: Option<Key>, m: egui::Modifiers) -> Binding {
+    let _ = physical;
+    let (mut ctrl, mut alt, mut shift) = (m.command || m.ctrl, m.alt, m.shift);
+    if is_symbol(key) {
+        if m.ctrl && m.alt && !m.shift {
+            (ctrl, alt) = (false, false);
+        } else if shift && !ctrl && !alt {
+            shift = false;
+        }
+    }
+    Binding { key, ctrl, shift, alt }
 }
 
 /// Punctuation keys, which some layouts only reach through AltGr.
@@ -640,6 +670,23 @@ mod tests {
     }
 
     #[test]
+    fn a_pressed_symbol_is_recorded_as_typed() {
+        let altgr = egui::Modifiers { ctrl: true, alt: true, command: true, ..Default::default() };
+        // Nordic `\` (AltGr+'+') and a Ctrl+Alt letter.
+        assert_eq!(binding_for_press(Key::Backslash, Some(Key::Minus), altgr), k(Key::Backslash));
+        assert_eq!(binding_for_press(Key::E, None, altgr), ctrl_alt(Key::E));
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        assert_eq!(binding_for_press(Key::CloseCurlyBracket, None, shift), k(Key::CloseCurlyBracket));
+        assert_eq!(binding_for_press(Key::P, None, shift), super::shift(Key::P));
+        // What is recorded runs the command.
+        let b = binding_for_press(Key::Backslash, Some(Key::Minus), altgr);
+        assert_eq!(
+            resolve(b.key, None, egui::Modifiers::NONE, Module::Develop).unwrap().action,
+            Action::BeforeAfter
+        );
+    }
+
+    #[test]
     fn keys_follow_the_module() {
         let none = egui::Modifiers::NONE;
         let lib = resolve(Key::Backslash, None, none, Module::Library).unwrap();
@@ -655,11 +702,11 @@ mod tests {
     fn shift_digit_matches_by_physical_key() {
         let b = shift(Key::Num3);
         let m = egui::Modifiers { shift: true, ..Default::default() };
-        assert!(b.matches(Key::Num3, Some(Key::Num3), m));
-        assert!(b.matches(Key::Exclamationmark, Some(Key::Num3), m));
-        assert!(!b.matches(Key::Num3, Some(Key::Num3), egui::Modifiers::NONE));
+        assert!(b.matches(Key::Num3, Some(Key::Num3), m, true));
+        assert!(b.matches(Key::Exclamationmark, Some(Key::Num3), m, false));
+        assert!(!b.matches(Key::Num3, Some(Key::Num3), egui::Modifiers::NONE, true));
         // Letters follow the logical layout (AZERTY etc.), not the physical position.
-        assert!(!k(Key::P).matches(Key::O, Some(Key::P), egui::Modifiers::NONE));
+        assert!(!k(Key::P).matches(Key::O, Some(Key::P), egui::Modifiers::NONE, true));
     }
 
     #[test]

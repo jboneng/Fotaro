@@ -196,6 +196,8 @@ pub struct UiState {
     pub remove_depth: bool,
     /// Help ▸ Check for Updates Automatically: at start and once a day.
     pub check_updates: bool,
+    /// The user's changes to the hot keys.
+    pub keymap: crate::ui::hotkeys::Keymap,
     /// The release the user chose to skip (not offered again unless they check).
     pub skipped_update: Option<String>,
     /// Lenses chosen by hand in Lens Corrections (maker, model), newest first.
@@ -236,6 +238,7 @@ impl Default for UiState {
             check_updates: true,
             skipped_update: None,
             recent_lenses: Vec::new(),
+            keymap: Default::default(),
         }
     }
 }
@@ -1160,6 +1163,7 @@ pub struct FotaroApp {
     /// Ctrl+F: put the cursor in the Text filter next frame.
     pub focus_find: bool,
     pub show_shortcuts: bool,
+    pub keymap_editor: crate::ui::keymap::Editor,
     /// Help ▸ About Fotaro.
     pub show_about: bool,
     /// New releases on GitHub: checked for, downloaded and installed.
@@ -1195,6 +1199,7 @@ impl FotaroApp {
         crate::ui::theme::apply(&cc.egui_ctx);
         let settings: Settings =
             cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
+        crate::ui::hotkeys::install(&settings.ui.keymap);
         let mut app = FotaroApp {
             ui: settings.ui,
             last_catalog: None,
@@ -1208,6 +1213,7 @@ impl FotaroApp {
             focus_keywording: false,
             focus_find: false,
             show_shortcuts: false,
+            keymap_editor: Default::default(),
             show_about: false,
             updater: Default::default(),
             toast: None,
@@ -2866,8 +2872,11 @@ impl eframe::App for FotaroApp {
             self.toast = Some(Toast { text, at: Instant::now() });
         }
 
-        for sc in crate::ui::shortcuts::take_actions(&ctx, self.module) {
-            self.commands.push(Command::Action(sc.action));
+        // (Not while the shortcuts editor is taking keys.)
+        if !self.keymap_editor.capturing() {
+            for c in crate::ui::shortcuts::take_actions(&ctx, self.module) {
+                self.commands.push(Command::Action(c.action));
+            }
         }
 
         let draw_started = Instant::now();

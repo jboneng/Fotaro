@@ -12,8 +12,10 @@ pub use remove::{delete_spot, new_source, set_removing, step_size as step_spot_s
 pub mod edit_in;
 pub mod export;
 mod filter_bar;
+pub mod hotkeys;
 mod icons;
 mod import;
+pub mod keymap;
 mod keywords;
 pub mod layout;
 mod lens;
