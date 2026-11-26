@@ -161,6 +161,7 @@ fn catalog_section(app: &mut FotaroApp, ui: &mut egui::Ui) {
 }
 
 fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
+    // key: library.folders.add
     if ui.button("+  Add Folder…").on_hover_text("Import ▸ Add: catalog photos where they are").clicked()
     {
         app.run(Command::OpenImport(Some(catalog::ImportMode::Add)));
@@ -239,6 +240,7 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
             // Same items and order as LrC's Folders panel context menu.
             resp.context_menu(|ui| {
                 let mut item = |ui: &mut egui::Ui, text: &str, enabled: bool, cmd: Command| {
+                    // no hotkey: a folder's own menu
                     if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
                         commands.push(cmd);
                         ui.close();
@@ -391,6 +393,7 @@ fn metadata(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.label(weak("Preset"));
         egui::ComboBox::from_id_salt("metadata_preset").selected_text(name(*preset)).show_ui(ui, |ui| {
             for p in [MetadataPreset::Default, MetadataPreset::Exif, MetadataPreset::Iptc] {
+                // key: library.metadata.*
                 ui.selectable_value(preset, p, name(p));
             }
         });

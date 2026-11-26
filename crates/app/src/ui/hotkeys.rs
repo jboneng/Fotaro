@@ -33,6 +33,12 @@ pub enum Run {
     PickSlider(i8),
     /// Move the picked slider by its step.
     StepPicked(i8),
+    /// Press a panel's button, flip its checkbox or pick its choice (when it is drawn;
+    /// see [`Hot`]).
+    Control,
+    /// Something the app does itself (a menu item, the Library's sort and filter): see
+    /// [`super::app_keys`].
+    App,
 }
 
 /// Something the keyboard can do.
@@ -200,6 +206,166 @@ fn sliders() -> Vec<(Slider, String, &'static str, Option<&'static str>)> {
     out
 }
 
+/// Every panel control: its id (as the panel's code names it), name, section and panel.
+fn controls() -> Vec<(String, String, &'static str, Option<&'static str>)> {
+    use imaging::develop::{CurveChannel, POINT_PRESETS, Upright, VignetteStyle, WbPreset};
+    let mut out = Vec::new();
+    let mut add = |id: String, name: String, section: &'static str, panel: Option<&'static str>| {
+        out.push((format!("develop.{id}"), name, section, panel));
+    };
+    let basic = Some("Basic");
+    add("basic.treatment.color".into(), "Treatment: Color".into(), BASIC, basic);
+    add("basic.treatment.bw".into(), "Treatment: Black & White".into(), BASIC, basic);
+    add("basic.profile.none".into(), "Profile: None".into(), BASIC, basic);
+    add("basic.profile.import".into(), "Import LUT…".into(), BASIC, basic);
+    for p in WbPreset::RAW {
+        add(format!("basic.wb.{p:?}"), format!("White Balance: {}", p.label()), BASIC, basic);
+    }
+    let curve = Some("Tone Curve");
+    add("curve.parametric".into(), "Parametric Curve".into(), CURVE, curve);
+    add("curve.point".into(), "Point Curve".into(), CURVE, curve);
+    for c in CurveChannel::ALL {
+        add(format!("curve.channel.{c:?}"), format!("Point Curve Channel: {}", c.label()), CURVE, curve);
+    }
+    for (name, _) in POINT_PRESETS {
+        add(format!("curve.preset.{name}"), format!("Point Curve: {name}"), CURVE, curve);
+    }
+    add("curve.reset.channel".into(), "Reset the Channel's Point Curve".into(), CURVE, curve);
+    add("curve.reset.points".into(), "Reset Point Curves".into(), CURVE, curve);
+    add("curve.reset.parametric".into(), "Reset Parametric Curve".into(), CURVE, curve);
+    let hsl = Some("HSL / Color");
+    for (id, name) in
+        [("hue", "Hue"), ("saturation", "Saturation"), ("luminance", "Luminance"), ("all", "All")]
+    {
+        add(format!("hsl.tab.{id}"), format!("HSL: Show {name}"), HSL, hsl);
+    }
+    let grading = Some("Color Grading");
+    for (id, name) in [
+        ("all", "3-Way"),
+        ("shadows", "Shadows"),
+        ("midtones", "Midtones"),
+        ("highlights", "Highlights"),
+        ("global", "Global"),
+    ] {
+        add(format!("grading.view.{id}"), format!("Color Grading: Show {name}"), GRADING, grading);
+    }
+    let detail = Some("Detail");
+    add("detail.picker".into(), "Detail Preview: Pick a Point".into(), DETAIL, detail);
+    add("detail.preview".into(), "Detail Preview: Show / Hide".into(), DETAIL, detail);
+    let transform = Some("Transform");
+    for m in Upright::ALL {
+        add(format!("transform.upright.{m:?}"), format!("Upright: {}", m.label()), TRANSFORM, transform);
+    }
+    add("transform.clear_guides".into(), "Clear Guides".into(), TRANSFORM, transform);
+    add("transform.constrain".into(), "Transform: Constrain Crop".into(), TRANSFORM, transform);
+    let effects = Some("Effects");
+    for s in VignetteStyle::ALL {
+        add(format!("effects.vignette.{s:?}"), format!("Vignette Style: {}", s.label()), EFFECTS, effects);
+    }
+    add("effects.depth.show".into(), "Show Depth".into(), EFFECTS, effects);
+    add("effects.depth.surface".into(), "Show Surface".into(), EFFECTS, effects);
+    add("effects.depth.remake".into(), "Remake the Depth Map".into(), EFFECTS, effects);
+    add("effects.depth.make".into(), "Make the Depth Map".into(), EFFECTS, effects);
+    add("effects.blur.picker".into(), "Lens Blur: Focus Selector".into(), EFFECTS, effects);
+    add("effects.relight.picker".into(), "Relight: Light Selector".into(), EFFECTS, effects);
+    add("effects.relight.subject".into(), "Relight: Light the Subject".into(), EFFECTS, effects);
+    add("effects.relight.advanced".into(), "Relight: Advanced Settings".into(), EFFECTS, effects);
+    add("effects.surface.make".into(), "Make the Surface Map".into(), EFFECTS, effects);
+    add("tools.edit".into(), "Edit: Close the Tool (Crop, Remove, Masking)".into(), "Develop", None);
+    for (id, name) in [
+        ("visible", "Show / Hide the Mask"),
+        ("gpu", "Masks: Use GPU for AI"),
+        ("depth", "Masks: Refine with Depth"),
+        ("rename", "Rename the Mask…"),
+        ("duplicate", "Duplicate the Mask"),
+        ("delete", "Delete the Mask"),
+        ("reset", "Reset the Mask's Sliders"),
+        ("component.invert", "Invert the Mask Part"),
+        ("component.delete", "Delete the Mask Part"),
+        ("brush.erase", "Brush: Erase"),
+        ("color.none", "Mask Color: None"),
+        ("object.brush", "Object: Brush Over It"),
+        ("object.rect", "Object: Draw a Box"),
+    ] {
+        add(format!("masking.{id}"), name.into(), MASKING, None);
+    }
+    let lens = Some("Lens Corrections");
+    for (id, name) in [
+        ("tab.profile", "Lens Corrections: Show Profile"),
+        ("tab.manual", "Lens Corrections: Show Manual"),
+        ("ca", "Remove Chromatic Aberration"),
+        ("profile", "Enable Profile Corrections"),
+        ("setup.auto", "Lens Profile Setup: Auto"),
+        ("setup.custom", "Lens Profile Setup: Custom"),
+        ("constrain", "Lens Corrections: Constrain Crop"),
+        ("download", "Download the Lens Database"),
+        ("update", "Update the Lens Database"),
+    ] {
+        add(format!("lens.{id}"), name.into(), LENS, lens);
+    }
+    for (id, name) in [
+        ("lock", "Crop: Lock Aspect"),
+        ("straighten", "Crop: Straighten Tool"),
+        ("auto", "Crop: Auto Straighten"),
+        ("constrain", "Crop: Constrain to Image"),
+    ] {
+        add(format!("crop.{id}"), name.into(), CROP, None);
+    }
+    use imaging::develop::{DustPolarity, DustSource, SpotMode};
+    for m in [SpotMode::Remove, SpotMode::Heal, SpotMode::Clone] {
+        add(format!("remove.mode.{m:?}"), format!("Spot Mode: {}", m.label()), REMOVE, None);
+    }
+    for (id, name) in [
+        ("best", "Remove: Best Quality"),
+        ("depth", "Remove: Refine with Depth"),
+        ("area.add", "Spot Area: Add"),
+        ("area.subtract", "Spot Area: Subtract"),
+        ("refill", "Refill the Spot"),
+        ("earlier", "The Spot's Earlier Fill"),
+        ("later", "The Spot's Later Fill"),
+        ("sample", "Remove: Sample From"),
+        ("reset", "Delete Every Spot"),
+        ("dust.find", "Find Sensor Dust"),
+        ("dust.clear", "Clear Found Sensor Dust"),
+        ("scratches", "Dust & Scratches: On / Off"),
+        ("scratches.recalculate", "Dust & Scratches: Recalculate"),
+        ("scratches.ai", "Dust & Scratches: Use AI"),
+        ("scratches.show", "Dust & Scratches: Show Found"),
+        ("scratches.subtract", "Dust & Scratches: Subtract Brush"),
+        ("scratches.clear", "Dust & Scratches: Clear Subtracted"),
+        ("people.find", "Find People"),
+        ("people.shadows", "Find People: Shadows"),
+        ("people.none", "People: Leave Everyone In"),
+        ("people.all", "People: Remove Everyone Found"),
+        ("people.remove", "Remove the People Picked"),
+    ] {
+        add(format!("remove.{id}"), name.into(), REMOVE, None);
+    }
+    for s in DustSource::ALL {
+        add(
+            format!("remove.scratches.source.{s:?}"),
+            format!("Dust & Scratches: Find in {}", s.label()),
+            REMOVE,
+            None,
+        );
+    }
+    for p in DustPolarity::ALL {
+        add(
+            format!("remove.scratches.defects.{p:?}"),
+            format!("Dust & Scratches: Defects {}", p.label()),
+            REMOVE,
+            None,
+        );
+    }
+    for (id, name) in super::crop::aspect_controls() {
+        add(id.trim_start_matches("develop.").to_owned(), name, CROP, None);
+    }
+    for (id, name) in super::masking::menu_controls() {
+        add(id.trim_start_matches("develop.").to_owned(), name, MASKING, None);
+    }
+    out
+}
+
 /// The Basic panel's sliders out of the box: Alt+letter raises, Alt+Shift+letter lowers.
 fn slider_default(s: Slider) -> Option<Key> {
     Some(match s {
@@ -308,6 +474,20 @@ pub fn commands() -> &'static [Command] {
                 scope: Scope::Develop,
                 run,
                 defaults: keys,
+            });
+        }
+        for (id, name, section, scope) in super::app_keys::items() {
+            out.push(Command { id, name, section, panel: None, scope, run: Run::App, defaults: Vec::new() });
+        }
+        for (id, name, section, panel) in controls() {
+            out.push(Command {
+                id,
+                name,
+                section,
+                panel,
+                scope: Scope::Develop,
+                run: Run::Control,
+                defaults: Vec::new(),
             });
         }
         for (slider, name, section, panel) in sliders() {
@@ -428,6 +608,12 @@ pub fn label_for(action: Action) -> Option<String> {
         .find_map(|c| keymap.bindings(c).first().map(Binding::label))
 }
 
+/// The first key command `id` has, as shown in menus.
+pub fn label_for_id(id: &str) -> Option<String> {
+    let keymap = CURRENT.read().ok()?;
+    commands().iter().find(|c| c.id == id).and_then(|c| keymap.bindings(c).first().map(Binding::label))
+}
+
 /// How far one key press moves `slider` (`kelvin`: Temp is in Kelvin; a relative Temp
 /// moves by a fiftieth of the Kelvin step).
 pub fn step(slider: Slider, kelvin: bool) -> f32 {
@@ -435,9 +621,12 @@ pub fn step(slider: Slider, kelvin: bool) -> f32 {
     if slider == Slider::Temp && !kelvin { (step / 50.0).max(1.0) } else { step }
 }
 
-/// Slider keys waiting for their row, the picked slider, and the order rows were drawn.
+/// Slider keys waiting for their row, the picked slider, the order rows were drawn, and
+/// control keys waiting for their control.
 #[derive(Clone, Default)]
 struct Sliders {
+    /// (control id, the pass it was asked in).
+    pressed: Vec<(String, u64)>,
     /// (slider, how many steps (signed), the pass it was asked in).
     waiting: Vec<(Slider, f32, u64)>,
     picked: Option<Slider>,
@@ -454,8 +643,46 @@ fn with_sliders<R>(ctx: &egui::Context, f: impl FnOnce(&mut Sliders, u64) -> R) 
     ctx.data_mut(|d| {
         let s = d.get_temp_mut_or_default::<Sliders>(egui::Id::unique("hotkeys_sliders"));
         s.waiting.retain(|w| w.2 + WAIT_PASSES >= pass);
+        s.pressed.retain(|w| w.1 + WAIT_PASSES >= pass);
         f(s, pass)
     })
+}
+
+/// Press control `id` when it is next drawn.
+pub fn press(ctx: &egui::Context, id: &str) {
+    with_sliders(ctx, |s, pass| s.pressed.push((id.to_owned(), pass)));
+}
+
+/// Control `id`'s key was pressed (true once).
+pub fn fired(ctx: &egui::Context, id: &str) -> bool {
+    with_sliders(ctx, |s, _| {
+        let at = s.pressed.iter().position(|p| p.0 == id);
+        at.map(|i| s.pressed.remove(i)).is_some()
+    })
+}
+
+/// A control with a hot key: `.hot(id)` instead of `.clicked()`, and `.hot_flip` after
+/// a checkbox. Ids are listed in [`controls`]; a choice in a menu, not drawn while the
+/// menu is closed, checks [`fired`] beside it instead.
+pub trait Hot: Sized {
+    /// Clicked, or its key pressed.
+    fn hot(self, id: &str) -> bool;
+    /// A checkbox: its key flips `value`.
+    fn hot_flip(self, id: &str, value: &mut bool) -> Self;
+}
+
+impl Hot for egui::Response {
+    fn hot(self, id: &str) -> bool {
+        self.clicked() || (self.enabled() && fired(&self.ctx, id))
+    }
+
+    fn hot_flip(mut self, id: &str, value: &mut bool) -> Self {
+        if self.enabled() && fired(&self.ctx, id) {
+            *value = !*value;
+            self.mark_changed();
+        }
+        self
+    }
 }
 
 /// Move `slider` by `steps` when its row is next drawn.
@@ -683,5 +910,106 @@ mod tests {
             frame(&none, &rows);
         }
         assert_eq!(frame(&none, &[Slider::Whites])[0].0, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod every_control {
+    //! The rule (see `.claude/rules/hotkeys.md`): every button, checkbox and choice in the
+    //! panels, toolbars and menus has a hot key. A control shows it has one by going
+    //! through [`super::Hot`] (`.hot(id)`, `.hot_flip(id, ..)`), by running an `Action::`,
+    //! or by a `// key: <id>` comment naming the command whose key does it (a menu's choice,
+    //! checked with `hotkeys::fired` beside the menu). Exempt: a control marked
+    //! `// no hotkey: <why>`, a function marked `// hotkeys: none (<why>)` above it (a
+    //! dialog), and the files in [`EXEMPT`].
+
+    use super::commands;
+
+    /// Files that are dialogs (or the shortcuts editor) through and through.
+    const EXEMPT: [&str; 5] = ["export.rs", "import.rs", "edit_in.rs", "keymap.rs", "icons.rs"];
+    /// What makes a control.
+    const CONTROLS: [&str; 9] = [
+        "Button::new(",
+        ".button(",
+        "small_button(",
+        "checkbox(",
+        "selectable_label(",
+        "selectable_value(",
+        "pill(ui",
+        "mode_button(ui",
+        "toggle_switch(ui",
+    ];
+    /// What gives it a key, in the statement.
+    const KEYED: [&str; 4] = [".hot(", ".hot_flip(", "Action::", "menu_cmd("];
+
+    /// `id` is a command's id, or (ending in `*`) the start of some.
+    fn known(id: &str) -> bool {
+        match id.strip_suffix('*') {
+            Some(start) => commands().iter().any(|c| c.id.starts_with(start)),
+            None => commands().iter().any(|c| c.id == id),
+        }
+    }
+
+    /// The controls without a key, and the `// key:` comments naming no command.
+    pub(super) fn unkeyed() -> Vec<String> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui");
+        let mut out = Vec::new();
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".rs") || EXEMPT.contains(&name.as_str()) || name == "hotkeys.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            let mut exempt_fn = false;
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                // A function at the file's top level starts: is it marked?
+                let top = ["fn ", "pub fn ", "pub(super) fn ", "pub(crate) fn "];
+                if top.iter().any(|t| line.starts_with(t)) {
+                    exempt_fn = lines[i.saturating_sub(6)..i].iter().any(|l| l.contains("hotkeys: none"));
+                    continue;
+                }
+                if let Some(id) =
+                    line.split("// key: ").nth(1).map(|r| r.split_whitespace().next().unwrap_or(""))
+                {
+                    if !known(id) {
+                        out.push(format!("{name}:{}: no command {id}", i + 1));
+                    }
+                    continue;
+                }
+                if exempt_fn || !CONTROLS.iter().any(|c| code.contains(c)) || code.contains("fn ") {
+                    continue;
+                }
+                let after = lines[i..(i + 7).min(lines.len())].join(
+                    "
+",
+                );
+                let marked = lines[i.saturating_sub(3)..(i + 2).min(lines.len())]
+                    .iter()
+                    .any(|l| l.contains("no hotkey") || l.contains("// key: "));
+                if marked || KEYED.iter().any(|k| after.contains(k)) {
+                    continue;
+                }
+                out.push(format!("{name}:{}: {}", i + 1, line.trim()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_control_has_a_hot_key() {
+        let missing = unkeyed();
+        assert!(
+            missing.is_empty(),
+            "controls without a hot key (or `// no hotkey: why`):
+{}",
+            missing.join(
+                "
+"
+            )
+        );
     }
 }

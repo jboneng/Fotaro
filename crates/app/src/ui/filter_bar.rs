@@ -21,9 +21,24 @@ pub fn height(f: &FilterBar) -> f32 {
         + if f.metadata_on { META_ROW } else { 0.0 }
 }
 
+// hotkeys: none (draws a button; its callers have the keys)
 fn mode_button(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
     let color = if on { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
     ui.add(egui::Button::new(RichText::new(text).color(color)).frame(false).selected(on))
+}
+
+/// A row's switch (Text, Attribute, Metadata): that row alone, or (`also`, Shift) with
+/// the others; again: none.
+pub(super) fn pick_mode(f: &mut FilterBar, flag: ModeSwitch, also: bool) {
+    let on = *flag(f);
+    if also {
+        *flag(f) = !on;
+    } else {
+        let only_this = on && [f.text_on, f.attribute_on, f.metadata_on].iter().filter(|b| **b).count() == 1;
+        f.none();
+        *flag(f) = !only_this;
+    }
+    f.enabled = true;
 }
 
 pub fn show(app: &mut FotaroApp, ui: &mut egui::Ui) {
@@ -45,20 +60,15 @@ pub fn show(app: &mut FotaroApp, ui: &mut egui::Ui) {
             ];
             for (name, flag) in modes {
                 let on = *flag(&mut f);
+                // (Their keys: see `app_keys`.)
                 if mode_button(ui, name, on).clicked() {
-                    if shift {
-                        *flag(&mut f) = !on;
-                    } else {
-                        let only_this = on
-                            && [f.text_on, f.attribute_on, f.metadata_on].iter().filter(|b| **b).count() == 1;
-                        f.none();
-                        *flag(&mut f) = !only_this;
-                    }
-                    f.enabled = true;
+                    // key: library.filter.*
+                    pick_mode(&mut f, flag, shift);
                 }
             }
             let none = !(f.text_on || f.attribute_on || f.metadata_on);
             if mode_button(ui, "None", none).clicked() {
+                // key: library.filter.none
                 f.none();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -70,7 +80,7 @@ pub fn show(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     ("No Filter", theme::TEXT_WEAK)
                 };
                 if ui
-                    .add(egui::Button::new(RichText::new(label).color(color)).frame(false))
+                    .add(egui::Button::new(RichText::new(label).color(color)).frame(false)) // key: ToggleFilters
                     .on_hover_text("Enable / disable filters (Ctrl+L)")
                     .clicked()
                 {
@@ -120,13 +130,13 @@ fn text_row(ui: &mut egui::Ui, f: &mut FilterBar, focus: bool) {
         ui,
         |ui| {
             for t in TextField::ALL {
-                ui.selectable_value(&mut f.text_field, t, t.label());
+                ui.selectable_value(&mut f.text_field, t, t.label()); // key: library.filter.text_field.*
             }
         },
     );
     egui::ComboBox::from_id_salt("text_op").width(110.0).selected_text(f.text_op.label()).show_ui(ui, |ui| {
         for o in TextOp::ALL {
-            ui.selectable_value(&mut f.text_op, o, o.label());
+            ui.selectable_value(&mut f.text_op, o, o.label()); // key: library.filter.text_op.*
         }
     });
     let resp = ui.add(egui::TextEdit::singleline(&mut f.text).hint_text("Search").desired_width(220.0));
@@ -134,6 +144,7 @@ fn text_row(ui: &mut egui::Ui, f: &mut FilterBar, focus: bool) {
         resp.request_focus();
     }
     if !f.text.is_empty() && ui.small_button("✕").on_hover_text("Clear").clicked() {
+        // key: library.filter.text.clear
         f.text.clear();
     }
 }
@@ -177,7 +188,7 @@ fn attribute_row(ui: &mut egui::Ui, f: &mut FilterBar) {
         ui,
         |ui| {
             for o in NumOp::ALL {
-                ui.selectable_value(&mut f.rating_op, o, o.label());
+                ui.selectable_value(&mut f.rating_op, o, o.label()); // key: library.filter.rating_op.*
             }
         },
     );
@@ -220,6 +231,7 @@ fn attribute_row(ui: &mut egui::Ui, f: &mut FilterBar) {
     for (kind, name) in [(FileKind::Raw, "Raw"), (FileKind::Image, "Other")] {
         let on = f.kinds.contains(&kind);
         if ui.add(egui::Button::new(RichText::new(name).size(11.5)).selected(on)).clicked() {
+            // key: library.filter.kind.*
             toggle(&mut f.kinds, kind);
         }
     }
@@ -245,7 +257,7 @@ fn metadata_row(ui: &mut egui::Ui, f: &mut FilterBar, facets: &[Vec<catalog::Fac
                                 .selected_text(RichText::new(column.label()).strong())
                                 .show_ui(ui, |ui| {
                                     for c in MetaColumn::ALL {
-                                        if ui.selectable_label(c == column, c.label()).clicked()
+                                        if ui.selectable_label(c == column, c.label()).clicked() // no hotkey: one per metadata column
                                             && c != column
                                         {
                                             f.columns[i] = c;

@@ -1349,6 +1349,27 @@ impl FotaroApp {
             }
             Run::PickSlider(dir) => hotkeys::pick_next(ctx, dir),
             Run::StepPicked(dir) => hotkeys::step_picked(ctx, f32::from(dir)),
+            Run::App => crate::ui::app_keys::run(self, ctx, &c.id),
+            Run::Control => {
+                // A tool's control opens the tool.
+                if let Some(s) = &mut self.session
+                    && s.develop.photo.is_some()
+                {
+                    let d = &mut s.develop;
+                    if c.id.starts_with("develop.masking.") && d.masking.is_none() {
+                        (d.cropping, d.removing) = (None, None);
+                        crate::ui::set_masking(d, true);
+                    }
+                    if c.id.starts_with("develop.remove.") && d.removing.is_none() {
+                        (d.cropping, d.masking) = (None, None);
+                        crate::ui::set_removing(d, true);
+                    }
+                    if c.id.starts_with("develop.crop.") && d.cropping.is_none() {
+                        crate::ui::set_cropping(d, true);
+                    }
+                }
+                hotkeys::press(ctx, &c.id);
+            }
         }
     }
 

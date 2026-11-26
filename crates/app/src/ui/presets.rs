@@ -67,22 +67,24 @@ pub fn presets_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         );
         ui.menu_button("+", |ui| {
             if ui.add_enabled(has_photo, egui::Button::new("Create Preset…")).clicked() {
+                // key: develop.presets.create
                 ask = Some(Ask::NewPreset);
             }
             ui.separator();
             if ui
-                .button("Import Presets…")
+                .button("Import Presets…") // key: develop.presets.import
                 .on_hover_text("Lightroom presets: .xmp and .lrtemplate files")
                 .clicked()
             {
                 ask = Some(Ask::Import(false));
             }
             if ui.button("Import Folder of Presets…").clicked() {
+                // key: develop.presets.import_folder
                 ask = Some(Ask::Import(true));
             }
             if crate::presets::lightroom_folder().is_some()
                 && ui
-                    .button("Import from Lightroom")
+                    .button("Import from Lightroom") // key: develop.presets.import_lightroom
                     .on_hover_text("Every develop preset Lightroom has on this computer")
                     .clicked()
             {
@@ -153,23 +155,26 @@ pub fn presets_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
             resp.context_menu(|ui| {
                 if ui
-                    .add_enabled(own && has_photo, egui::Button::new("Update with Current Settings"))
+                    .add_enabled(own && has_photo, egui::Button::new("Update with Current Settings")) // no hotkey: a preset's own menu
                     .clicked()
                 {
                     ask = Some(Ask::Update(i));
                     ui.close();
                 }
                 if ui.add_enabled(own, egui::Button::new("Rename…")).clicked() {
+                    // no hotkey: a preset's own menu
                     app.presets_ui.rename =
                         Some((RenameTarget::Preset(i), app.presets.presets[i].name().to_string()));
                     ui.close();
                 }
                 if ui.add_enabled(own, egui::Button::new("Show in Explorer")).clicked() {
+                    // no hotkey: a preset's own menu
                     ask = Some(Ask::Reveal(i));
                     ui.close();
                 }
                 ui.separator();
                 if ui.add_enabled(own, egui::Button::new("Delete")).clicked() {
+                    // no hotkey: a preset's own menu
                     ask = Some(Ask::Delete(i));
                     ui.close();
                 }
@@ -199,7 +204,7 @@ pub fn snapshots_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add_enabled(d.photo.is_some(), egui::Button::new("+"))
+                .add_enabled(d.photo.is_some(), egui::Button::new("+")) // key: NewSnapshot
                 .on_hover_text("Keep the current settings as a snapshot (Ctrl+N)")
                 .clicked()
             {
@@ -219,15 +224,18 @@ pub fn snapshots_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         resp.context_menu(|ui| {
             if ui.button("Update with Current Settings").clicked() {
+                // no hotkey: a snapshot's own menu
                 ask = Some(Ask::EditSnapshot(snap.id, SnapshotEdit::Update));
                 ui.close();
             }
             if ui.button("Rename…").clicked() {
+                // no hotkey: a snapshot's own menu
                 ask = Some(Ask::EditSnapshot(snap.id, SnapshotEdit::Rename(snap.name.clone())));
                 ui.close();
             }
             ui.separator();
             if ui.button("Delete").clicked() {
+                // no hotkey: a snapshot's own menu
                 ask = Some(Ask::EditSnapshot(snap.id, SnapshotEdit::Delete));
                 ui.close();
             }
@@ -247,6 +255,19 @@ fn snapshot_name() -> String {
 }
 
 /// Ctrl+N in Develop: a new snapshot, then name it.
+/// The + menu's items by their keys (see `app_keys`).
+pub fn run_menu(app: &mut FotaroApp, what: &str) {
+    let has_photo = app.session.as_ref().is_some_and(|s| s.develop.photo.is_some());
+    let ask = match what {
+        "create" if has_photo => Ask::NewPreset,
+        "import" => Ask::Import(false),
+        "import_folder" => Ask::Import(true),
+        "import_lightroom" if crate::presets::lightroom_folder().is_some() => Ask::ImportLightroom,
+        _ => return,
+    };
+    run(app, ask);
+}
+
 pub fn take_snapshot(app: &mut FotaroApp) {
     run(app, Ask::TakeSnapshot);
 }
@@ -354,6 +375,7 @@ pub fn dialogs(app: &mut FotaroApp, ctx: &egui::Context) {
     rename_dialog(app, ctx);
 }
 
+// hotkeys: none (a dialog's fields)
 /// Checkboxes for the groups, under their panels' names, with Check All / None.
 fn group_ticks(ui: &mut egui::Ui, ticked: &mut Vec<SettingsGroup>) {
     ui.horizontal(|ui| {
@@ -389,6 +411,7 @@ fn group_ticks(ui: &mut egui::Ui, ticked: &mut Vec<SettingsGroup>) {
     ticked.sort();
 }
 
+// hotkeys: none (a dialog)
 fn new_preset_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(np) = &mut app.presets_ui.new_preset else { return };
     let folders: Vec<String> = app.presets.folders().into_iter().filter(|f| f != BUILT_IN).collect();
@@ -468,6 +491,7 @@ fn new_preset_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     }
 }
 
+// hotkeys: none (a dialog)
 fn copy_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(groups) = &mut app.presets_ui.copy else { return };
     let (mut copy, mut cancel) = (false, false);
@@ -501,6 +525,7 @@ fn copy_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     }
 }
 
+// hotkeys: none (a dialog)
 fn rename_dialog(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some((target, name)) = &mut app.presets_ui.rename else { return };
     let target = *target;

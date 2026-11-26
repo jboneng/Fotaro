@@ -591,24 +591,32 @@ fn is_symbol(key: Key) -> bool {
 pub fn markdown() -> String {
     let mut out = String::from(
         "# Keyboard shortcuts\n\n\
-         Generated from `crates/app/src/ui/shortcuts.rs` — do not edit by hand.\n\
+         Generated from `crates/app/src/ui/shortcuts.rs` and `hotkeys.rs` — do not edit by hand.\n\
          Run `UPDATE_DOCS=1 cargo test -p fotaro shortcuts` to regenerate.\n\n\
+         These are the keys out of the box. Every one can be changed, and every other slider, \
+         button and menu item given one, in **Edit ▸ Keyboard Shortcuts…** (Ctrl+/), where each \
+         slider's step is set too.\n\n\
          `Ctrl` is `Cmd` on macOS. These follow Lightroom Classic's Library and Develop modules.\n\
-         Shortcuts work in both modules unless marked (Library) or listed under Develop.\n",
+         Shortcuts work in both modules unless marked (Library) or (Develop).\n",
     );
     let mut group = "";
-    for s in SHORTCUTS {
-        if s.group != group {
-            group = s.group;
-            out.push_str(&format!("\n## {group}\n\n| Shortcut | Action | Status |\n|---|---|---|\n"));
+    let keymap = Keymap::default();
+    for c in commands().iter().filter(|c| !c.defaults.is_empty()) {
+        if c.section != group {
+            group = c.section;
+            out.push_str(&format!("\n## {group}\n\n| Shortcut | Action |\n|---|---|\n"));
         }
-        let status = match s.status {
-            Status::Available => "✅".to_string(),
-            Status::Planned(phase) => format!("planned ({phase})"),
+        let keys: Vec<String> = keymap
+            .bindings(c)
+            .iter()
+            .map(|b| format!("`{}`", b.label_with("Ctrl").replace('\\', "\\\\").replace('|', "\\|")))
+            .collect();
+        let only = match c.scope {
+            Scope::Library => " (Library)",
+            Scope::Develop if !c.section.starts_with("Develop") => " (Develop)",
+            _ => "",
         };
-        let label = s.binding.label_with("Ctrl").replace('\\', "\\\\").replace('|', "\\|");
-        let only = if s.scope == Scope::Library { " (Library)" } else { "" };
-        out.push_str(&format!("| `{label}` | {}{only} | {status} |\n", s.description));
+        out.push_str(&format!("| {} | {}{only} |\n", keys.join(" "), c.name));
     }
     out.push_str(
         "\n## Auto Advance\n\n\

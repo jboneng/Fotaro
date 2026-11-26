@@ -28,6 +28,7 @@ pub(super) fn shortcut_for(action: Action) -> Option<String> {
     super::hotkeys::label_for(action)
 }
 
+// hotkeys: none (draws menu items; its callers have the keys)
 /// A menu item that runs a shortcut action, showing its key binding.
 fn menu_action(ui: &mut egui::Ui, app: &mut FotaroApp, text: &str, action: Action) {
     let planned =
@@ -44,13 +45,19 @@ fn menu_action(ui: &mut egui::Ui, app: &mut FotaroApp, text: &str, action: Actio
     }
 }
 
-fn menu_cmd(ui: &mut egui::Ui, app: &mut FotaroApp, text: &str, enabled: bool, cmd: Command) {
-    if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
+// hotkeys: none (draws menu items; its callers have the keys)
+fn menu_cmd(ui: &mut egui::Ui, app: &mut FotaroApp, id: &str, text: &str, enabled: bool, cmd: Command) {
+    let mut button = egui::Button::new(text);
+    if let Some(key) = super::hotkeys::label_for_id(id) {
+        button = button.shortcut_text(key);
+    }
+    if ui.add_enabled(enabled, button).clicked() {
         app.run(cmd);
         ui.close();
     }
 }
 
+// hotkeys: none (draws menu items; its callers have the keys)
 fn menu_toggle(ui: &mut egui::Ui, app: &mut FotaroApp, text: &str, on: bool, action: Action) {
     let mut button = egui::Button::new(text).selected(on);
     if let Some(sc) = shortcut_for(action) {
@@ -72,8 +79,8 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
 
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
-            menu_cmd(ui, app, "New Catalog…", true, Command::NewCatalog);
-            menu_cmd(ui, app, "Open Catalog…", true, Command::OpenCatalog);
+            menu_cmd(ui, app, "menu.file.new_catalog", "New Catalog…", true, Command::NewCatalog);
+            menu_cmd(ui, app, "menu.file.open_catalog", "Open Catalog…", true, Command::OpenCatalog);
             ui.separator();
             if has_catalog {
                 menu_action(ui, app, "Import Photos…", Action::Import);
@@ -82,7 +89,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 ui.menu_button("Export with Preset", |ui| super::export::preset_menu(ui, app));
             }
             ui.separator();
-            menu_cmd(ui, app, "Exit", true, Command::Quit);
+            menu_cmd(ui, app, "menu.file.exit", "Exit", true, Command::Quit);
         });
         let develop = app.module == Module::Develop;
         ui.menu_button("Edit", |ui| {
@@ -92,6 +99,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     .as_ref()
                     .map_or((false, false), |s| (s.develop.can_undo(), s.develop.can_redo()));
                 for (text, action, enabled) in [("Undo", Action::Undo, undo), ("Redo", Action::Redo, redo)] {
+                    // key: Undo (and Redo)
                     let mut button = egui::Button::new(text);
                     if let Some(sc) = shortcut_for(action) {
                         button = button.shortcut_text(sc);
@@ -107,7 +115,14 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             menu_action(ui, app, "Select None", Action::SelectNone);
             ui.separator();
             menu_action(ui, app, "Keyboard Shortcuts…", Action::ShowShortcuts);
-            menu_cmd(ui, app, "External Editing Settings…", true, Command::OpenEditSettings);
+            menu_cmd(
+                ui,
+                app,
+                "menu.edit.external_editing",
+                "External Editing Settings…",
+                true,
+                Command::OpenEditSettings,
+            );
         });
         if develop {
             // LrC's Develop module menu.
@@ -126,8 +141,15 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         ui.menu_button("Library", |ui| {
             let sync = folder_source.map_or(Command::Planned("", ""), Command::SyncFolder);
-            menu_cmd(ui, app, "Synchronize Folder…", folder_source.is_some(), sync);
-            if ui.checkbox(&mut app.ui.include_subfolders, "Show Photos in Subfolders").changed()
+            menu_cmd(
+                ui,
+                app,
+                "menu.library.sync_folder",
+                "Synchronize Folder…",
+                folder_source.is_some(),
+                sync,
+            );
+            if ui.checkbox(&mut app.ui.include_subfolders, "Show Photos in Subfolders").changed() // key: menu.library.subfolders
                 && let Some(s) = &app.session
                 && let catalog::Source::Folder { id, .. } = s.source
             {
@@ -138,6 +160,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             menu_cmd(
                 ui,
                 app,
+                "menu.library.new_collection",
                 "New Collection…",
                 has_catalog,
                 Command::CreateCollection { parent: None, kind: catalog::CollectionKind::Collection },
@@ -145,6 +168,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             menu_cmd(
                 ui,
                 app,
+                "menu.library.new_smart",
                 "New Smart Collection…",
                 has_catalog,
                 Command::CreateCollection { parent: None, kind: catalog::CollectionKind::Smart },
@@ -152,6 +176,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             menu_cmd(
                 ui,
                 app,
+                "menu.library.new_set",
                 "New Collection Set…",
                 has_catalog,
                 Command::CreateCollection { parent: None, kind: catalog::CollectionKind::Set },
@@ -169,7 +194,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             if ui
                 .add_enabled(
                     has_catalog,
-                    egui::Button::new("Treat JPEG Files Next to Raw Files as Separate Photos")
+                    egui::Button::new("Treat JPEG Files Next to Raw Files as Separate Photos") // key: menu.library.separate_jpeg
                         .selected(separate),
                 )
                 .on_hover_text("Applies to photos added from now on (as in Lightroom Classic)")
@@ -184,12 +209,26 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             ui.separator();
             ui.menu_button("Previews", |ui| {
                 let any = app.session.as_ref().is_some_and(|s| !s.selected.is_empty());
-                menu_cmd(ui, app, "Build Standard-Sized Previews", any, Command::BuildPreviews);
+                menu_cmd(
+                    ui,
+                    app,
+                    "menu.library.build_previews",
+                    "Build Standard-Sized Previews",
+                    any,
+                    Command::BuildPreviews,
+                );
             });
         });
         ui.menu_button("Photo", |ui| {
             let reveal = active_path.clone().map_or(Command::Planned("", ""), Command::Reveal);
-            menu_cmd(ui, app, crate::platform::REVEAL_LABEL, active_path.is_some(), reveal);
+            menu_cmd(
+                ui,
+                app,
+                "menu.photo.reveal",
+                crate::platform::REVEAL_LABEL,
+                active_path.is_some(),
+                reveal,
+            );
             ui.separator();
             ui.menu_button("Set Flag", |ui| {
                 menu_action(ui, app, "Flagged", Action::SetFlag { flag: Flag::Picked, advance: false });
@@ -242,11 +281,18 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             menu_action(ui, app, "Add Keywords…", Action::Keywording);
             ui.separator();
             menu_action(ui, app, "Save Metadata to Files", Action::SaveMetadata);
-            menu_cmd(ui, app, "Read Metadata from Files", has_catalog, Command::ReadMetadata);
+            menu_cmd(
+                ui,
+                app,
+                "menu.metadata.read",
+                "Read Metadata from Files",
+                has_catalog,
+                Command::ReadMetadata,
+            );
             ui.separator();
             let auto = app.ui.auto_write_xmp;
             if ui
-                .add(egui::Button::new("Automatically Write Changes into XMP").selected(auto))
+                .add(egui::Button::new("Automatically Write Changes into XMP").selected(auto)) // key: menu.metadata.auto_xmp
                 .on_hover_text("Write ratings, labels, keywords and IPTC to XMP sidecars as you change them")
                 .clicked()
             {
@@ -270,6 +316,7 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     [(Lights::On, "Lights On"), (Lights::Dim, "Lights Dim"), (Lights::Off, "Lights Off")]
                 {
                     if ui.add(egui::Button::new(name).selected(app.lights == l)).clicked() {
+                        // key: menu.view.lights.*
                         app.run(Command::SetLights(l));
                         ui.close();
                     }
@@ -298,12 +345,14 @@ fn menu_bar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             menu_action(ui, app, "Keyboard Shortcuts…", Action::ShowShortcuts);
             ui.separator();
             if ui.button("Check for Updates…").clicked() {
+                // key: menu.help.check_updates
                 app.updater.check(ui.ctx(), true);
                 ui.close();
             }
-            ui.checkbox(&mut app.ui.check_updates, "Check for Updates Automatically");
+            ui.checkbox(&mut app.ui.check_updates, "Check for Updates Automatically"); // key: menu.help.auto_updates
             ui.separator();
             if ui.button(format!("About {}", crate::APP_NAME)).clicked() {
+                // key: menu.help.about
                 app.show_about = true;
                 ui.close();
             }
@@ -321,7 +370,7 @@ fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
         let color = if strong { theme::TOP_BAR } else { theme::UPDATE };
         let fill = if strong { theme::UPDATE } else { Color32::TRANSPARENT };
         ui.add(
-            egui::Button::new(RichText::new(text).size(11.5).color(color))
+            egui::Button::new(RichText::new(text).size(11.5).color(color)) // no hotkey: draws the update notice's buttons
                 .fill(fill)
                 .stroke(egui::Stroke::new(1.0, theme::UPDATE))
                 .corner_radius(9.0),
@@ -334,7 +383,7 @@ fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
             ui.label(RichText::new("Checking for updates").size(11.5).color(theme::TEXT_WEAK));
         }
         State::Available(release) => {
-            let resp = pill(ui, format!("⬆ {} {} available", crate::APP_NAME, release.version), false);
+            let resp = pill(ui, format!("⬆ {} {} available", crate::APP_NAME, release.version), false); // no hotkey: shown only when an update is out
             let can_install = release.asset.is_some();
             let resp = resp.on_hover_ui(|ui| {
                 ui.set_max_width(380.0);
@@ -367,10 +416,12 @@ fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
             resp.context_menu(|ui| {
                 if ui.button("What's New…").clicked() {
+                    // no hotkey: the update notice's own menu
                     ctx.open_url(egui::OpenUrl::new_tab(&release.page));
                     ui.close();
                 }
                 if ui.button("Skip This Version").clicked() {
+                    // no hotkey: the update notice's own menu
                     app.ui.skipped_update = Some(release.version.clone());
                     app.updater.dismiss();
                     ui.close();
@@ -401,6 +452,7 @@ fn update_indicator(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 format!("Open the {} {} installer", crate::APP_NAME, release.version)
             };
             if pill(ui, text, true).on_hover_text(hover).clicked() {
+                // no hotkey: shown only when an update is ready
                 let progress = app.session.as_ref().map(|s| s.jobs.progress()).unwrap_or_default();
                 if progress.import.is_some() || progress.export.is_some() {
                     let what = if progress.import.is_some() { "import" } else { "export" };
@@ -434,6 +486,7 @@ fn top_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                             .color(theme::TEXT),
                     );
                     if ui.small_button("✕").on_hover_text("Stop the import").clicked() {
+                        // key: jobs.stop_import
                         app.run(Command::CancelImport);
                     }
                 });
@@ -453,6 +506,7 @@ fn top_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                             .color(theme::TEXT),
                     );
                     if ui.small_button("✕").on_hover_text("Stop the export").clicked() {
+                        // key: jobs.stop_export
                         app.run(Command::CancelExport);
                     }
                 });
@@ -519,17 +573,17 @@ fn welcome(app: &mut FotaroApp, ui: &mut egui::Ui) {
         let default = FotaroApp::default_catalog_dir();
         let exists = default.join("catalog.db").is_file();
         let label = if exists { "Open Default Catalog" } else { "Create Catalog" };
-        if ui.add(egui::Button::new(RichText::new(label).size(14.0)).min_size(egui::vec2(220.0, 30.0))).clicked() {
+        if ui.add(egui::Button::new(RichText::new(label).size(14.0)).min_size(egui::vec2(220.0, 30.0))).clicked() { // key: menu.file.default_catalog
             app.run(Command::CreateDefaultCatalog);
         }
         ui.label(RichText::new(default.display().to_string()).size(10.5).color(theme::TEXT_WEAK));
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space((ui.available_width() - 230.0).max(0.0) / 2.0);
-            if ui.button("New Catalog…").clicked() {
+            if ui.button("New Catalog…").clicked() { // key: menu.file.new_catalog
                 app.run(Command::NewCatalog);
             }
-            if ui.button("Open Catalog…").clicked() {
+            if ui.button("Open Catalog…").clicked() { // key: menu.file.open_catalog
                 app.run(Command::OpenCatalog);
             }
         });
@@ -543,7 +597,7 @@ fn edge_toggle(ctx: &egui::Context, id: &str, pos: egui::Pos2, anchor: Align2, t
         .pivot(anchor)
         .fixed_pos(pos)
         .show(ctx, |ui| {
-            ui.add(egui::Button::new(RichText::new(text).size(9.0).color(theme::TEXT_WEAK)).frame(false))
+            ui.add(egui::Button::new(RichText::new(text).size(9.0).color(theme::TEXT_WEAK)).frame(false)) // key: ToggleLeftPanel (and the other panels' toggles)
                 .on_hover_text("Show panel")
                 .clicked()
         })
@@ -766,6 +820,7 @@ fn overlays(app: &mut FotaroApp, ctx: &egui::Context, full: egui::Rect) {
             .show(ctx, |ui| {
                 ui.label(err);
                 if ui.button("OK").clicked() {
+                    // no hotkey: closes the error message
                     app.error = None;
                 }
             });
@@ -785,6 +840,7 @@ pub(super) fn timed<R>(name: &str, f: impl FnOnce() -> R) -> R {
     r
 }
 
+// hotkeys: none (a dialog's fields)
 /// Modal dialogs: Remove folder confirmation, Create Folder and Rename prompts.
 /// A keyword name field with validation and an OK button. Returns the name to apply.
 /// `Ok(Some(name))` to apply, `Err(())` on Cancel.
@@ -820,6 +876,7 @@ fn keyword_name_prompt(ui: &mut egui::Ui, name: &mut String, ok_label: &str) -> 
     result
 }
 
+// hotkeys: none (dialogs: their OK, Cancel and fields)
 fn dialogs(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(dialog) = app.dialog.as_mut() else { return };
     // Live "N photos match" for the smart collection editor.

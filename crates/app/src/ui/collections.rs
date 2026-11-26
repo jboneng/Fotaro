@@ -65,6 +65,7 @@ pub fn panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 ("Create Collection Set…", CollectionKind::Set),
             ] {
                 if ui.button(label).clicked() {
+                    // key: menu.library.new_*
                     commands.push(Command::CreateCollection { parent: None, kind });
                     ui.close();
                 }
@@ -141,6 +142,7 @@ pub fn panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         resp.context_menu(|ui| {
             let mut item = |ui: &mut egui::Ui, text: &str, cmd: Command| {
                 if ui.button(text).clicked() {
+                    // no hotkey: a collection's own menu
                     commands.push(cmd);
                     ui.close();
                 }
@@ -192,6 +194,7 @@ pub fn panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     }
 }
 
+// hotkeys: none (one item per collection)
 /// "Add to Collection" items for a photo context menu.
 pub fn add_to_collection_menu(ui: &mut egui::Ui, app: &mut FotaroApp) {
     let Some(s) = &app.session else { return };
@@ -210,6 +213,7 @@ pub fn add_to_collection_menu(ui: &mut egui::Ui, app: &mut FotaroApp) {
         }
         ui.separator();
         if ui.button("New Collection…").clicked() {
+            // key: menu.library.new_collection
             app.run(Command::CreateCollection { parent: None, kind: CollectionKind::Collection });
             ui.close();
         }
@@ -282,6 +286,7 @@ const LABELS: [(Option<&str>, &str); 6] = [
     (None, "None"),
 ];
 
+// hotkeys: none (a dialog's fields)
 /// LrC's smart collection editor: "Match [all|any] of the following rules".
 pub fn rules_editor(ui: &mut egui::Ui, rules: &mut SmartRules) {
     ui.horizontal(|ui| {
@@ -327,6 +332,7 @@ pub fn rules_editor(ui: &mut egui::Ui, rules: &mut SmartRules) {
     }
 }
 
+// hotkeys: none (a dialog's fields)
 fn rule_value(ui: &mut egui::Ui, rule: &mut Criterion) {
     match rule {
         Criterion::Rating { op, stars } => {

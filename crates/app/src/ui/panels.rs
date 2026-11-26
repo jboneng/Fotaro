@@ -83,12 +83,14 @@ impl SectionStack {
         }
         header.context_menu(|ui| {
             if ui.checkbox(&mut self.solo, "Solo Mode").changed() && self.solo {
+                // no hotkey: the panel header's own menu (one per side)
                 for t in all_titles {
                     self.open.insert((*t).to_owned(), *t == title);
                 }
             }
             ui.separator();
             if ui.button("Expand All").clicked() {
+                // no hotkey: the panel header's own menu (one per side)
                 self.solo = false;
                 for t in all_titles {
                     self.open.insert((*t).to_owned(), true);
@@ -96,6 +98,7 @@ impl SectionStack {
                 ui.close();
             }
             if ui.button("Collapse All").clicked() {
+                // no hotkey: the panel header's own menu (one per side)
                 for t in all_titles {
                     self.open.insert((*t).to_owned(), false);
                 }

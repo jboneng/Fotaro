@@ -21,6 +21,7 @@ use imaging::develop::{
     DetailParam, EffectParam, MAX_GUIDES, SharpenView, TransformParam, Upright, VignetteStyle,
 };
 
+use super::hotkeys::{self, Hot};
 use super::panels::Side;
 use super::shortcuts::Action;
 use super::theme;
@@ -399,7 +400,11 @@ fn profile_row(
     error: &mut Option<String>,
 ) {
     use imaging::develop::{LutProfile, import_lut, list_luts, lut_available};
-    let mut importing = false;
+    let mut importing = hotkeys::fired(ui.ctx(), "develop.basic.profile.import");
+    if hotkeys::fired(ui.ctx(), "develop.basic.profile.none") && st.profile.is_some() {
+        st.profile = None;
+        *done = Some(None);
+    }
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_W, 20.0], egui::Label::new(weak("Profile:")));
         ui.add_space(4.0);
@@ -408,6 +413,7 @@ fn profile_row(
             .selected_text(shown)
             .width(150.0)
             .show_ui(ui, |ui| {
+                // key: develop.basic.profile.none
                 if ui.selectable_label(st.profile.is_none(), "None").clicked() && st.profile.is_some() {
                     st.profile = None;
                     *done = Some(None);
@@ -415,6 +421,7 @@ fn profile_row(
                 for l in list_luts() {
                     let on = st.profile.as_ref().is_some_and(|p| p.hash == l.hash);
                     if ui.selectable_label(on, &l.name).clicked() && !on {
+                        // no hotkey: one per LUT
                         let amount = st.profile.as_ref().map_or(100.0, |p| p.amount);
                         st.profile = Some(LutProfile { name: l.name, hash: l.hash, amount });
                         *done = Some(None);
@@ -422,6 +429,7 @@ fn profile_row(
                 }
                 ui.separator();
                 if ui.button("Import LUT…").on_hover_text("3D LUTs (.cube files)").clicked() {
+                    // key: develop.basic.profile.import
                     importing = true;
                 }
             })
@@ -485,8 +493,11 @@ fn basic(app: &mut FotaroApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_W, 20.0], egui::Label::new(weak("Treatment:")));
         ui.add_space(4.0);
-        for (t, name) in [(Treatment::Color, "Color"), (Treatment::BlackAndWhite, "Black & White")] {
-            if ui.selectable_label(st.treatment == t, name).clicked() && st.treatment != t {
+        for (t, name, id) in [
+            (Treatment::Color, "Color", "develop.basic.treatment.color"),
+            (Treatment::BlackAndWhite, "Black & White", "develop.basic.treatment.bw"),
+        ] {
+            if ui.selectable_label(st.treatment == t, name).hot(id) && st.treatment != t {
                 st.treatment = t;
                 done = Some(None);
             }
@@ -498,7 +509,7 @@ fn basic(app: &mut FotaroApp, ui: &mut egui::Ui) {
     // White balance: selector, preset menu, Temp, Tint.
     ui.horizontal(|ui| {
         if ui
-            .add(egui::Button::new(RichText::new("⊹").size(15.0)).selected(picking))
+            .add(egui::Button::new(RichText::new("⊹").size(15.0)).selected(picking)) // key: WhiteBalanceSelector
             .on_hover_text("White Balance Selector (W): click a neutral area of the photo")
             .clicked()
         {
@@ -507,10 +518,16 @@ fn basic(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.label(weak("WB:"));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let before = st.wb;
+            for p in presets {
+                if hotkeys::fired(ui.ctx(), &format!("develop.basic.wb.{p:?}")) {
+                    st.wb = *p;
+                }
+            }
             egui::ComboBox::from_id_salt("dev_wb").selected_text(st.wb.label()).width(110.0).show_ui(
                 ui,
                 |ui| {
                     for p in presets {
+                        // key: develop.basic.wb.*
                         ui.selectable_value(&mut st.wb, *p, p.label());
                     }
                 },
@@ -572,7 +589,7 @@ fn basic(app: &mut FotaroApp, ui: &mut egui::Ui) {
 
     let mut auto = false;
     sub_header(ui, "Tone", |ui| {
-        auto = ui.button("Auto").on_hover_text("Auto Tone (Ctrl+U)").clicked();
+        auto = ui.button("Auto").on_hover_text("Auto Tone (Ctrl+U)").clicked(); // key: AutoTone
     });
     for slider in Slider::TONE.into_iter().chain(Slider::PRESENCE) {
         if slider == Slider::Texture {
@@ -1137,7 +1154,7 @@ pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             if let Some(s) = &mut app.session {
                 let d = &mut s.develop;
                 let (mut on, mut t) = (d.visualize_spots, d.spot_threshold);
-                ui.checkbox(&mut on, "Visualize Spots")
+                ui.checkbox(&mut on, "Visualize Spots") // key: VisualizeSpots
                     .on_hover_text("Show edges as white on black, so dust and blemishes stand out (A)");
                 ui.add_enabled_ui(on, |ui| {
                     ui.spacing_mut().slider_width = 140.0;
@@ -1173,11 +1190,16 @@ fn tone_curve(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut done: Option<Option<String>> = None;
 
     // Mode, and in Point mode the channel and the presets.
+    for c in CurveChannel::ALL {
+        if hotkeys::fired(ui.ctx(), &format!("develop.curve.channel.{c:?}")) {
+            (d.curve_point_mode, d.curve_channel) = (true, c);
+        }
+    }
     ui.horizontal(|ui| {
-        if ui.selectable_label(!d.curve_point_mode, "Parametric").clicked() {
+        if ui.selectable_label(!d.curve_point_mode, "Parametric").hot("develop.curve.parametric") {
             d.curve_point_mode = false;
         }
-        if ui.selectable_label(d.curve_point_mode, "Point").clicked() {
+        if ui.selectable_label(d.curve_point_mode, "Point").hot("develop.curve.point") {
             d.curve_point_mode = true;
         }
         if d.curve_point_mode {
@@ -1187,7 +1209,7 @@ fn tone_curve(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     .width(64.0)
                     .show_ui(ui, |ui| {
                         for c in CurveChannel::ALL {
-                            ui.selectable_value(&mut d.curve_channel, c, c.label());
+                            ui.selectable_value(&mut d.curve_channel, c, c.label()); // key: develop.curve.channel.*
                         }
                     });
             });
@@ -1347,29 +1369,45 @@ fn tone_curve(app: &mut FotaroApp, ui: &mut egui::Ui) {
             painter.circle(to_screen(q[0], q[1]), 3.5, fill, egui::Stroke::new(1.5, color));
         }
     }
+    let ctx = ui.ctx().clone();
+    let mut reset_channel = point_mode && hotkeys::fired(&ctx, "develop.curve.reset.channel");
+    let mut reset_points = hotkeys::fired(&ctx, "develop.curve.reset.points");
+    let mut reset_parametric = hotkeys::fired(&ctx, "develop.curve.reset.parametric");
     resp.context_menu(|ui| {
+        // key: develop.curve.reset.channel
         if point_mode && ui.button(format!("Reset {} Curve", ch.label())).clicked() {
-            st.curve.points_mut(ch).clear();
-            done = Some(None);
+            reset_channel = true;
             ui.close();
         }
+        // key: develop.curve.reset.points
         if ui.button("Reset Point Curves").clicked() {
-            CurveChannel::ALL.iter().for_each(|c| st.curve.points_mut(*c).clear());
-            done = Some(None);
+            reset_points = true;
             ui.close();
         }
+        // key: develop.curve.reset.parametric
         if ui.button("Reset Parametric Curve").clicked() {
-            st.curve = ToneCurve {
-                rgb: st.curve.rgb.clone(),
-                red: st.curve.red.clone(),
-                green: st.curve.green.clone(),
-                blue: st.curve.blue.clone(),
-                ..Default::default()
-            };
-            done = Some(None);
+            reset_parametric = true;
             ui.close();
         }
     });
+    if reset_channel {
+        st.curve.points_mut(ch).clear();
+        done = Some(None);
+    }
+    if reset_points {
+        CurveChannel::ALL.iter().for_each(|c| st.curve.points_mut(*c).clear());
+        done = Some(None);
+    }
+    if reset_parametric {
+        st.curve = ToneCurve {
+            rgb: st.curve.rgb.clone(),
+            red: st.curve.red.clone(),
+            green: st.curve.green.clone(),
+            blue: st.curve.blue.clone(),
+            ..Default::default()
+        };
+        done = Some(None);
+    }
 
     if point_mode {
         // LrC's Point Curve menu (for the RGB curve).
@@ -1379,10 +1417,17 @@ fn tone_curve(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 .iter()
                 .find(|(_, p)| st.curve.points_or_linear(CurveChannel::Rgb) == p.to_vec())
                 .map_or("Custom", |(name, _)| *name);
+            for (name, points) in POINT_PRESETS {
+                if hotkeys::fired(ui.ctx(), &format!("develop.curve.preset.{name}")) {
+                    st.curve.rgb = if name == "Linear" { Vec::new() } else { points.to_vec() };
+                    done = Some(None);
+                }
+            }
             egui::ComboBox::from_id_salt("curve_preset").selected_text(current).width(120.0).show_ui(
                 ui,
                 |ui| {
                     for (name, points) in POINT_PRESETS {
+                        // key: develop.curve.preset.*
                         if ui.selectable_label(current == name, name).clicked() {
                             st.curve.rgb = if name == "Linear" { Vec::new() } else { points.to_vec() };
                             done = Some(None);
@@ -1511,7 +1556,10 @@ fn hsl_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 (Some(HslGroup::Luminance), "Luminance"),
                 (None, "All"),
             ] {
-                if ui.selectable_label(d.hsl_tab == tab, name).clicked() {
+                if ui
+                    .selectable_label(d.hsl_tab == tab, name)
+                    .hot(&format!("develop.hsl.tab.{}", name.to_lowercase()))
+                {
                     d.hsl_tab = tab;
                 }
             }
@@ -1634,7 +1682,11 @@ fn color_grading(app: &mut FotaroApp, ui: &mut egui::Ui) {
             (Some(GradeWheel::Highlights), "Highlights"),
             (Some(GradeWheel::Global), "Global"),
         ] {
-            if ui.selectable_label(d.grading_view == view, name).clicked() {
+            let id = format!(
+                "develop.grading.view.{}",
+                view.map_or("all".to_owned(), |w| format!("{w:?}").to_lowercase())
+            );
+            if ui.selectable_label(d.grading_view == view, name).hot(&id) {
                 d.grading_view = view;
             }
         }
@@ -1735,7 +1787,7 @@ fn detail_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         if ui
             .add(egui::Button::new(RichText::new("⊹").size(15.0)).selected(d.picking_detail))
             .on_hover_text("Click a point of the photo to show it in the preview")
-            .clicked()
+            .hot("develop.detail.picker")
         {
             d.picking_detail = !d.picking_detail;
             d.picking_wb = false;
@@ -1747,7 +1799,7 @@ fn detail_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             if ui
                 .add(egui::Button::new(arrow).frame(false))
                 .on_hover_text(if d.detail_box_open { "Hide the preview" } else { "Show the preview" })
-                .clicked()
+                .hot("develop.detail.preview")
             {
                 d.detail_box_open = !d.detail_box_open;
             }
@@ -1905,7 +1957,7 @@ fn transform_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             if ui
                 .add(egui::Button::new(RichText::new(mode.label()).size(11.5)).selected(current))
                 .on_hover_text(tip)
-                .clicked()
+                .hot(&format!("develop.transform.upright.{mode:?}"))
             {
                 upright = Some(mode);
             }
@@ -1916,7 +1968,7 @@ fn transform_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.label(weak(format!(
             "Drag on the photo to draw a guide along a line that should be vertical or level ({n} of {MAX_GUIDES}). Drag an end to move it; right-click a guide to remove it."
         )));
-        if n > 0 && ui.small_button("Clear Guides").clicked() {
+        if n > 0 && ui.small_button("Clear Guides").hot("develop.transform.clear_guides") {
             d.set_guides(Vec::new());
             st = d.settings.clone();
             done = Some(None);
@@ -1926,6 +1978,7 @@ fn transform_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     if ui
         .checkbox(&mut constrain, "Constrain Crop")
         .on_hover_text("Crop to the largest part of the frame the transformed photo covers")
+        .hot_flip("develop.transform.constrain", &mut constrain)
         .changed()
     {
         st.transform.constrain_crop = constrain;
@@ -2119,11 +2172,17 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.label(weak("Style:"));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let before = st.effects.vignette_style;
+            for style in VignetteStyle::ALL {
+                if hotkeys::fired(ui.ctx(), &format!("develop.effects.vignette.{style:?}")) {
+                    st.effects.vignette_style = style;
+                }
+            }
             egui::ComboBox::from_id_salt("dev_vignette_style")
                 .selected_text(before.label())
                 .width(140.0)
                 .show_ui(ui, |ui| {
                     for style in VignetteStyle::ALL {
+                        // key: develop.effects.vignette.*
                         ui.selectable_value(&mut st.effects.vignette_style, style, style.label());
                     }
                 });
@@ -2158,11 +2217,11 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                         .add_enabled(mapped, button)
                         .on_hover_text("Light Selector: click the photo where the light should fall")
                         .on_disabled_hover_text("Needs the photo's depth map: move a slider to have it made")
-                        .clicked();
+                        .hot("develop.effects.relight.picker");
                     subject = ui
                         .add_enabled(idle, egui::Button::new("Subject").small())
                         .on_hover_text("Find the subject and put the light on it")
-                        .clicked();
+                        .hot("develop.effects.relight.subject");
                     if finding {
                         ui.add(egui::Spinner::new().size(11.0));
                     }
@@ -2187,7 +2246,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                         .add_enabled(mapped, button)
                         .on_hover_text("Focus Selector: click the photo where it should be sharp")
                         .on_disabled_hover_text("Needs the photo's depth map: raise Amount to have it made")
-                        .clicked();
+                        .hot("develop.effects.blur.picker");
                 });
                 if toggle {
                     d.picking_light = false;
@@ -2201,13 +2260,23 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 sub_header(ui, "Depth", |_| {});
                 let tip = "See the photo's depth map instead of the photo: white is near, black is far";
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut d.show_depth, "Show Depth").on_hover_text(tip).changed() {
+                    if ui
+                        .checkbox(&mut d.show_depth, "Show Depth")
+                        .on_hover_text(tip)
+                        .hot_flip("develop.effects.depth.show", &mut d.show_depth)
+                        .changed()
+                    {
                         d.show_surface = false;
                         d.request_renders();
                     }
                     let tip = "See which way the photo's surfaces face instead of the photo: \
                                redder leans right, greener up, bluer faces the camera";
-                    if ui.checkbox(&mut d.show_surface, "Show Surface").on_hover_text(tip).changed() {
+                    if ui
+                        .checkbox(&mut d.show_surface, "Show Surface")
+                        .on_hover_text(tip)
+                        .hot_flip("develop.effects.depth.surface", &mut d.show_surface)
+                        .changed()
+                    {
                         d.show_depth = false;
                         d.request_renders();
                     }
@@ -2218,7 +2287,7 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                             if ui
                                 .add_enabled(idle, egui::Button::new("Remake").small())
                                 .on_hover_text(tip)
-                                .clicked()
+                                .hot("develop.effects.depth.remake")
                             {
                                 d.remake_depth();
                             }
@@ -2237,7 +2306,8 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                             ui.label(weak("Working out how far away everything is…").size(11.5));
                         } else {
                             ui.label(weak("Needs a depth map of the photo").size(11.5));
-                            if d.fog_declined && ui.small_button("Make It").clicked() {
+                            if d.fog_declined && ui.small_button("Make It").hot("develop.effects.depth.make")
+                            {
                                 d.fog_declined = false;
                             }
                         }
@@ -2263,7 +2333,11 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     let clicked = ui.add(egui::Label::new(title).sense(Sense::click())).clicked();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let arrow = if open { "⏷" } else { "⏴" };
-                        if ui.add(egui::Button::new(arrow).frame(false)).clicked() || clicked {
+                        if ui
+                            .add(egui::Button::new(arrow).frame(false))
+                            .hot("develop.effects.relight.advanced")
+                            || clicked
+                        {
                             d.relight_advanced = !open;
                         }
                     });
@@ -2344,7 +2418,9 @@ fn effects_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                         ui.label(weak("Working out which way everything faces…").size(11.5));
                     } else {
                         ui.label(weak("Needs a surface map of the photo").size(11.5));
-                        if d.surface_declined && ui.small_button("Make It").clicked() {
+                        if d.surface_declined
+                            && ui.small_button("Make It").hot("develop.effects.surface.make")
+                        {
                             d.surface_declined = false;
                             d.request_renders();
                         }

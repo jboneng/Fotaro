@@ -9,6 +9,7 @@ use imaging::develop::{
 };
 
 use super::develop::{Spec, slider_row_as, weak};
+use super::hotkeys::Hot;
 use super::masking::{Canvas, header, pill};
 use super::theme;
 use crate::app::{Command, FotaroApp};
@@ -690,6 +691,7 @@ pub(super) fn canvas(
     done
 }
 
+// hotkeys: none (draws a button; its callers have the keys)
 /// A Heal / Clone button: filled when chosen.
 fn mode_button(ui: &mut egui::Ui, text: &str, on: bool) -> egui::Response {
     let r = pill(ui, text, false);
@@ -736,7 +738,10 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     SpotMode::Clone => "Copy the source as it is",
                     SpotMode::Remove => "Fill with what is around it (an AI model)",
                 };
-                if mode_button(ui, mode.label(), values.mode == mode).on_hover_text(tip).clicked() {
+                if mode_button(ui, mode.label(), values.mode == mode)
+                    .on_hover_text(tip)
+                    .hot(&format!("develop.remove.mode.{mode:?}"))
+                {
                     values.mode = mode;
                     done = Some(None);
                 }
@@ -750,7 +755,12 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 let tip = "Fill new Remove spots with the larger model (big-LaMa): better on \
                            large areas and textures. The first time it takes about half a \
                            minute to prepare, then under a second a spot on the GPU";
-                if ui.checkbox(&mut best, "Best quality").on_hover_text(tip).changed() {
+                if ui
+                    .checkbox(&mut best, "Best quality")
+                    .on_hover_text(tip)
+                    .hot_flip("develop.remove.best", &mut best)
+                    .changed()
+                {
                     d.remove_best = best;
                     // Its model is another download: ask again.
                     d.fill_allowed = false;
@@ -765,7 +775,12 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                            away as what is behind the removed thing, going by a depth map of \
                            the photo (made first if the photo has none, which takes a little \
                            longer). Found people are also listed nearest first";
-                if ui.checkbox(&mut refine, "Refine with depth").on_hover_text(tip).changed() {
+                if ui
+                    .checkbox(&mut refine, "Refine with depth")
+                    .on_hover_text(tip)
+                    .hot_flip("develop.remove.depth", &mut refine)
+                    .changed()
+                {
                     d.set_remove_depth(refine);
                 }
             });
@@ -816,7 +831,8 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     (true, "Subtract", "Paint to take area away from this spot (or Ctrl+drag)"),
                 ] {
                     let on = tool.area == Some(erase);
-                    if mode_button(ui, label, on).on_hover_text(tip).clicked() {
+                    let id = if erase { "develop.remove.area.subtract" } else { "develop.remove.area.add" };
+                    if mode_button(ui, label, on).on_hover_text(tip).hot(id) {
                         tool.area = (!on).then_some(erase);
                     }
                 }
@@ -834,18 +850,18 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 let tip = "Fill this spot again, another way: with more or less of its surroundings \
                            for the model to go by, and its texture from other places. The fills \
                            made are kept: step through them with the arrows";
-                if ui.add_enabled(!busy, egui::Button::new("Refill").small()).on_hover_text(tip).clicked() {
+                if ui.add_enabled(!busy, egui::Button::new("Refill").small()).on_hover_text(tip).hot("develop.remove.refill") {
                     refill = Some(i);
                 }
                 let (made, shown) = st.spots[i].fills();
                 if made > 1 && shown < made {
-                    if ui.add_enabled(shown > 0, egui::Button::new("◂").small()).clicked()
+                    if ui.add_enabled(shown > 0, egui::Button::new("◂").small()).hot("develop.remove.earlier")
                         && st.spots[i].step_fill(false)
                     {
                         done = Some(Some("Remove: Earlier Fill".into()));
                     }
                     ui.label(weak(format!("{} of {made}", shown + 1)).size(11.5));
-                    if ui.add_enabled(shown + 1 < made, egui::Button::new("▸").small()).clicked()
+                    if ui.add_enabled(shown + 1 < made, egui::Button::new("▸").small()).hot("develop.remove.later")
                         && st.spots[i].step_fill(true)
                     {
                         done = Some(Some("Remove: Later Fill".into()));
@@ -857,7 +873,12 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 let mut sample = st.spots[i].sample;
                 let tip = "Take this fill's texture and grain from a place you choose: drag the \
                            thin outline with the arrow to it. The fill is made again for it";
-                if ui.checkbox(&mut sample, "Sample from").on_hover_text(tip).changed() {
+                if ui
+                    .checkbox(&mut sample, "Sample from")
+                    .on_hover_text(tip)
+                    .hot_flip("develop.remove.sample", &mut sample)
+                    .changed()
+                {
                     let s = &mut st.spots[i];
                     s.sample = sample;
                     // A place beside the spot to start from.
@@ -871,9 +892,11 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if let Some(i) = tool.selected {
+                // key: NewSource
                 if st.spots[i].mode != SpotMode::Remove && pill(ui, "New Source", false).on_hover_text("Pick another source for this spot (/)").clicked() {
                     new_source = true;
                 }
+                // key: RemoveFromCollection (Delete)
                 if pill(ui, "Delete", false).on_hover_text("Delete this spot (Delete)").clicked() {
                     st.spots.remove(i);
                     tool.selected = None;
@@ -884,7 +907,7 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 if pill(ui, "Close", false).on_hover_text("Done (Q)").clicked() {
                     leave = true;
                 }
-                if !st.spots.is_empty() && pill(ui, "Reset", false).on_hover_text("Remove every spot").clicked() {
+                if !st.spots.is_empty() && pill(ui, "Reset", false).on_hover_text("Remove every spot").hot("develop.remove.reset") {
                     st.spots.clear();
                     tool.selected = None;
                     done = Some(Some("Reset Spots".into()));
@@ -1001,7 +1024,7 @@ fn distractions(
             let tip = "Find the soft, round spots dust on the sensor leaves in smooth areas \
                        (skies, walls), as Heal spots you can check, move or delete. Finding \
                        again replaces the found spots you haven't changed";
-            if pill(ui, "Find", false).on_hover_text(tip).clicked() {
+            if pill(ui, "Find", false).on_hover_text(tip).hot("develop.remove.dust.find") {
                 asks.find_dust = true;
             }
         });
@@ -1028,7 +1051,7 @@ fn distractions(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if pill(ui, "Clear Found", false)
                     .on_hover_text("Delete the found spots you haven't changed")
-                    .clicked()
+                    .hot("develop.remove.dust.clear")
                 {
                     st.spots.retain(|s| !s.found);
                     tool.selected = None;
@@ -1047,7 +1070,10 @@ fn distractions(
         let tip = "Find a film scan's dust, hairs and scratches and fill them from around \
                    them. With an infrared pass (NegPy's _IR file beside the scan) they are \
                    found from that";
-        if super::icons::toggle_switch(ui, on, egui::vec2(24.0, 13.0)).on_hover_text(tip).clicked() {
+        if super::icons::toggle_switch(ui, on, egui::vec2(24.0, 13.0))
+            .on_hover_text(tip)
+            .hot("develop.remove.scratches")
+        {
             match &mut layer {
                 Some(l) => l.enabled = !on,
                 None => {
@@ -1066,7 +1092,7 @@ fn distractions(
                     .add_enabled_ui(!busy, |ui| pill(ui, "Recalculate", false))
                     .inner
                     .on_hover_text(tip)
-                    .clicked()
+                    .hot("develop.remove.scratches.recalculate")
                 {
                     asks.recalculate = true;
                 }
@@ -1094,7 +1120,7 @@ fn distractions(
                     .inner
                     .on_hover_text(tip)
                     .on_disabled_hover_text("This photo has no infrared pass (a file named like it, ending in _IR)");
-                if r.clicked() && l.source != source {
+                if r.hot(&format!("develop.remove.scratches.source.{source:?}")) && l.source != source {
                     l.source = source;
                     asks.dust_changed = true;
                 }
@@ -1111,7 +1137,9 @@ fn distractions(
                         DustPolarity::Dark => "Dark specks and hairs: scans of slides",
                         DustPolarity::Both => "Either way: finds more of the picture's own fine detail too",
                     };
-                    if mode_button(ui, polarity.label(), l.polarity == polarity).on_hover_text(tip).clicked()
+                    if mode_button(ui, polarity.label(), l.polarity == polarity)
+                        .on_hover_text(tip)
+                        .hot(&format!("develop.remove.scratches.defects.{polarity:?}"))
                         && l.polarity != polarity
                     {
                         l.polarity = polarity;
@@ -1126,7 +1154,12 @@ fn distractions(
                 let tip = "Find defects with an AI model (Microsoft's scratch detector, run on this \
                            computer): far fewer false finds on detailed pictures, but it takes about \
                            a minute a photo the first time (then the sliders are quick)";
-                if ui.checkbox(&mut l.ai, "Use AI (slower, cleaner)").on_hover_text(tip).changed() {
+                if ui
+                    .checkbox(&mut l.ai, "Use AI (slower, cleaner)")
+                    .on_hover_text(tip)
+                    .hot_flip("develop.remove.scratches.ai", &mut l.ai)
+                    .changed()
+                {
                     asks.dust_changed = true;
                 }
             });
@@ -1140,7 +1173,12 @@ fn distractions(
         ui.horizontal(|ui| {
             ui.add_space(super::develop::LABEL_W - 40.0);
             let tip = "Show what was found in red";
-            if ui.checkbox(&mut d.show_dust, "Show found").on_hover_text(tip).changed() {
+            if ui
+                .checkbox(&mut d.show_dust, "Show found")
+                .on_hover_text(tip)
+                .hot_flip("develop.remove.scratches.show", &mut d.show_dust)
+                .changed()
+            {
                 asks.show_changed = true;
             }
         });
@@ -1151,7 +1189,10 @@ fn distractions(
             row_label(ui, "Brush");
             let tip = "Paint over found areas that aren't dust to leave them as they are (they \
                        show in red while the brush is on). The wheel or [ ] sets its size";
-            if mode_button(ui, "Subtract", tool.subtract).on_hover_text(tip).clicked() {
+            if mode_button(ui, "Subtract", tool.subtract)
+                .on_hover_text(tip)
+                .hot("develop.remove.scratches.subtract")
+            {
                 tool.subtract = !tool.subtract;
                 if tool.subtract {
                     (tool.selected, tool.area) = (None, None);
@@ -1161,7 +1202,10 @@ fn distractions(
             if !l.erase.is_empty() {
                 let n = l.erase.len();
                 let tip = format!("Remove the {n} subtracted stroke{}", if n == 1 { "" } else { "s" });
-                if pill(ui, &format!("Clear ({n})"), false).on_hover_text(tip).clicked() {
+                if pill(ui, &format!("Clear ({n})"), false)
+                    .on_hover_text(tip)
+                    .hot("develop.remove.scratches.clear")
+                {
                     l.erase.clear();
                     asks.dust_changed = true;
                 }
@@ -1186,11 +1230,18 @@ fn distractions(
                        list, to leave it in. Then Remove";
             let busy = d.people_job.is_some();
             let label = if d.people.is_empty() { "Find" } else { "Find Again" };
-            if ui.add_enabled_ui(!busy, |ui| pill(ui, label, false)).inner.on_hover_text(tip).clicked() {
+            if ui
+                .add_enabled_ui(!busy, |ui| pill(ui, label, false))
+                .inner
+                .on_hover_text(tip)
+                .hot("develop.remove.people.find")
+            {
                 asks.find_people = true;
             }
             let tip = "Find people with the shadow they cast on the ground, so that it goes                        when they do. Only shadows that can be told for sure are taken (lit                        ground around them); the orange outline shows what will go. Find again                        after changing this";
-            ui.checkbox(&mut d.people_shadows, "Shadows").on_hover_text(tip);
+            ui.checkbox(&mut d.people_shadows, "Shadows")
+                .on_hover_text(tip)
+                .hot_flip("develop.remove.people.shadows", &mut d.people_shadows);
         });
     });
     ui.add_space(4.0);
@@ -1203,10 +1254,16 @@ fn distractions(
         ui.horizontal(|ui| {
             ui.label(weak(format!("{n} found, {picked} to remove")).size(12.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if pill(ui, "None", false).on_hover_text("Leave everyone in").clicked() {
+                if pill(ui, "None", false)
+                    .on_hover_text("Leave everyone in")
+                    .hot("develop.remove.people.none")
+                {
                     d.people.iter_mut().for_each(|p| p.picked = false);
                 }
-                if pill(ui, "All", false).on_hover_text("Remove everyone found").clicked() {
+                if pill(ui, "All", false)
+                    .on_hover_text("Remove everyone found")
+                    .hot("develop.remove.people.all")
+                {
                     d.people.iter_mut().for_each(|p| p.picked = true);
                 }
             });
@@ -1215,6 +1272,7 @@ fn distractions(
         egui::ScrollArea::vertical().id_salt("found-people").max_height(170.0).show(ui, |ui| {
             for (i, p) in d.people.iter_mut().enumerate() {
                 let text = format!("Person {}  ·  {:.0}% sure", i + 1, p.score * 100.0);
+                // no hotkey: one per person found
                 let r = ui.checkbox(&mut p.picked, RichText::new(text).size(12.0));
                 if r.hovered() {
                     hover = Some(i);
@@ -1230,7 +1288,7 @@ fn distractions(
                     .add_enabled_ui(picked > 0, |ui| pill(ui, &format!("Remove ({picked})"), false))
                     .inner
                     .on_hover_text(tip)
-                    .clicked()
+                    .hot("develop.remove.people.remove")
                 {
                     asks.remove_people = true;
                 }

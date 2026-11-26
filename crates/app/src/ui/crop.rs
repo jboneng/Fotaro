@@ -10,6 +10,7 @@ use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Stroke, V
 use imaging::develop::{Crop, MAX_CROP_ANGLE, Slider};
 
 use super::develop::{Spec, rotate, slider_row, unrotate, weak};
+use super::hotkeys::{self, Hot};
 use super::masking::{header, pill};
 use super::theme;
 use crate::app::{Command, FotaroApp};
@@ -342,6 +343,16 @@ pub(super) fn canvas(
 }
 
 /// LrC's aspect presets, as width / height of a landscape crop (`None`: the photo's own).
+/// The aspect choices: (id, name) for the hot keys list.
+pub(super) fn aspect_controls() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = ASPECTS
+        .iter()
+        .map(|(label, _)| (format!("develop.crop.aspect.{label}"), format!("Crop Aspect: {label}")))
+        .collect();
+    out.push(("develop.crop.aspect.Custom".into(), "Crop Aspect: Custom".into()));
+    out
+}
+
 const ASPECTS: [(&str, Option<f32>); 9] = [
     ("Original", None),
     ("1 x 1", Some(1.0)),
@@ -395,20 +406,34 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Aspect").size(12.5).color(theme::TEXT));
             let current = aspect_label(crop.ratio(aspect), aspect);
+            for (label, preset) in ASPECTS {
+                if hotkeys::fired(ui.ctx(), &format!("develop.crop.aspect.{label}")) {
+                    st.transform.crop = with_preset(&crop, preset, aspect, d.crop_constrain);
+                    d.crop_lock = true;
+                    done = Some(Some(format!("Crop: {label}")));
+                }
+            }
+            if hotkeys::fired(ui.ctx(), "develop.crop.aspect.Custom") {
+                d.crop_lock = false;
+            }
             egui::ComboBox::from_id_salt("crop_aspect").selected_text(current).width(130.0).show_ui(ui, |ui| {
                 for (label, preset) in ASPECTS {
+                    // key: develop.crop.aspect.*
                     if ui.selectable_label(current == label, label).clicked() {
                         st.transform.crop = with_preset(&crop, preset, aspect, d.crop_constrain);
                         d.crop_lock = true;
                         done = Some(Some(format!("Crop: {label}")));
                     }
                 }
+                // key: develop.crop.aspect.Custom
                 if ui.selectable_label(current == "Custom", "Custom").clicked() {
                     d.crop_lock = false;
                 }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.checkbox(&mut d.crop_lock, "Lock").on_hover_text("Keep the crop's shape while resizing");
+                ui.checkbox(&mut d.crop_lock, "Lock")
+                    .on_hover_text("Keep the crop's shape while resizing")
+                    .hot_flip("develop.crop.lock", &mut d.crop_lock);
             });
         });
         ui.add_space(4.0);
@@ -435,10 +460,13 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add_space(super::develop::LABEL_W - 40.0);
             let label = if tool.straighten { "Straighten: draw a line" } else { "Straighten" };
-            if pill(ui, label, false).on_hover_text("Draw along something that should be level or plumb").clicked() {
+            if pill(ui, label, false)
+                .on_hover_text("Draw along something that should be level or plumb")
+                .hot("develop.crop.straighten")
+            {
                 tool.straighten = !tool.straighten;
             }
-            if pill(ui, "Auto", false).on_hover_text("Level the photo from its lines").clicked() {
+            if pill(ui, "Auto", false).on_hover_text("Level the photo from its lines").hot("develop.crop.auto") {
                 auto = true;
             }
         });
@@ -446,6 +474,7 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         if ui
             .checkbox(&mut d.crop_constrain, "Constrain to Image")
             .on_hover_text("Keep the crop on the photo (no white corners when turned)")
+            .hot_flip("develop.crop.constrain", &mut d.crop_constrain)
             .changed()
             && d.crop_constrain
             && !st.transform.crop.inside(aspect)
@@ -455,12 +484,12 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if pill(ui, "Reset", false).on_hover_text("The whole photo, not turned (Ctrl+Alt+R)").clicked() {
+            if pill(ui, "Reset", false).on_hover_text("The whole photo, not turned (Ctrl+Alt+R)").clicked() { // key: ResetCrop
                 st.transform.crop = Crop::default();
                 done = Some(Some("Reset Crop".into()));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if pill(ui, "Close", false).on_hover_text("Done cropping (R or Enter)").clicked() {
+                if pill(ui, "Close", false).on_hover_text("Done cropping (R or Enter)").clicked() { // key: CropTool
                     leave = true;
                 }
             });

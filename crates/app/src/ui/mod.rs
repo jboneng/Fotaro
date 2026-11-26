@@ -1,5 +1,6 @@
 //! Lightroom Classic–style user interface.
 
+pub mod app_keys;
 mod collections;
 mod crop;
 mod develop;

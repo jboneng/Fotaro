@@ -102,6 +102,7 @@ pub fn keywording(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 for k in matches {
                     let path = s.keyword_path(k.id).join(" > ");
                     if ui.small_button(&k.name).on_hover_text(&path).clicked() {
+                        // no hotkey: one per keyword
                         let keep = entry.rfind([',', ';']).map_or("", |i| &entry[..=i]).to_owned();
                         ui.data_mut(|d| d.insert_temp(entry_id, String::new()));
                         commands.push(Command::AddKeywords(format!("{keep} {path}")));
@@ -147,6 +148,7 @@ pub fn keyword_list(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
     ui.horizontal(|ui| {
         if ui.small_button("+").on_hover_text("Create Keyword Tag…").clicked() {
+            // key: library.keywords.create
             commands.push(Command::CreateKeyword(None));
         }
         ui.add(TextEdit::singleline(&mut filter).hint_text("Filter Keywords").desired_width(f32::INFINITY));
@@ -198,6 +200,7 @@ pub fn keyword_list(app: &mut FotaroApp, ui: &mut egui::Ui) {
                     if kids.is_some() {
                         let tri = if expanded { "▼" } else { "▶" };
                         if ui.add(egui::Button::new(RichText::new(tri).size(9.0)).frame(false)).clicked() {
+                            // no hotkey: one per keyword
                             toggles.push(k.id);
                         }
                     } else {
@@ -224,14 +227,17 @@ pub fn keyword_list(app: &mut FotaroApp, ui: &mut egui::Ui) {
                 .response;
             resp.context_menu(|ui| {
                 if ui.button(format!("Create Keyword Tag inside \"{}\"…", k.name)).clicked() {
+                    // no hotkey: a keyword's own menu
                     commands.push(Command::CreateKeyword(Some(k.id)));
                     ui.close();
                 }
                 if ui.button("Edit Keyword Tag…").clicked() {
+                    // no hotkey: a keyword's own menu
                     commands.push(Command::RenameKeyword(k.id));
                     ui.close();
                 }
                 if ui.button(format!("Delete \"{}\"…", k.name)).clicked() {
+                    // no hotkey: a keyword's own menu
                     commands.push(Command::DeleteKeyword(k.id));
                     ui.close();
                 }

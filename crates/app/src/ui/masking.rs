@@ -11,6 +11,7 @@ use imaging::develop::{
 };
 
 use super::develop::{Spec, rotate, slider_row, slider_row_as, unrotate, weak};
+use super::hotkeys::{self, Hot};
 use super::theme;
 use crate::app::{Command, FotaroApp};
 use crate::develop::{
@@ -737,6 +738,40 @@ fn tool_menu(ui: &mut egui::Ui, mut pick: impl FnMut(MenuPick)) {
     }
 }
 
+/// The choices of [`tool_menu`], with the ids their keys go by.
+fn picks() -> [(MenuPick, &'static str); 10] {
+    [
+        (MenuPick::Ai(AiKind::Subject), "subject"),
+        (MenuPick::Ai(AiKind::Sky), "sky"),
+        (MenuPick::Ai(AiKind::Background), "background"),
+        (MenuPick::Ai(AiKind::DepthNear), "depth_near"),
+        (MenuPick::Ai(AiKind::DepthFar), "depth_far"),
+        (MenuPick::Ai(AiKind::Depth), "depth"),
+        (MenuPick::Tool(ShapeKind::Object), "object"),
+        (MenuPick::Tool(ShapeKind::Brush), "brush"),
+        (MenuPick::Tool(ShapeKind::Linear), "linear"),
+        (MenuPick::Tool(ShapeKind::Radial), "radial"),
+    ]
+}
+
+/// The ways to make a mask, or add to one, from the masks panel's menus: (id, name) for
+/// the hot keys list.
+pub(super) fn menu_controls() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (target, name) in
+        [("new", "New Mask"), ("add", "Add"), ("subtract", "Subtract"), ("intersect", "Intersect")]
+    {
+        for (pick, id) in picks() {
+            let label = match pick {
+                MenuPick::Tool(k) => k.label().to_owned(),
+                MenuPick::Ai(k) => k.label().to_owned(),
+            };
+            out.push((format!("develop.masking.{target}.{id}"), format!("{name}: {label}")));
+        }
+    }
+    out
+}
+
 /// While an AI mask is being made: what is happening, with a bar or a spinner.
 pub(super) fn ai_progress(ui: &mut egui::Ui, job: &crate::develop::AiJob) {
     let (share, what) = job.progress();
@@ -759,6 +794,7 @@ pub(super) fn ai_progress(ui: &mut egui::Ui, job: &crate::develop::AiJob) {
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
 }
 
+// hotkeys: none (asks before a download: Download or Cancel)
 /// Before the first AI mask: what has to be downloaded, and agreeing to it.
 pub(super) fn ai_consent(app: &mut FotaroApp, ctx: &egui::Context) {
     let Some(s) = &mut app.session else { return };
@@ -890,6 +926,26 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
             frame.show(ui, |ui| {
                 ui.set_width(220.0);
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+                // The menus' choices, by their keys (adding to a mask needs one selected).
+                let ctx = ui.ctx().clone();
+                for (target, name) in [
+                    (ToolTarget::NewMask, "new"),
+                    (ToolTarget::Component(CombineMode::Add), "add"),
+                    (ToolTarget::Component(CombineMode::Subtract), "subtract"),
+                    (ToolTarget::Component(CombineMode::Intersect), "intersect"),
+                ] {
+                    if name != "new" && m.selected.is_none() {
+                        continue;
+                    }
+                    for (pick, id) in picks() {
+                        if hotkeys::fired(&ctx, &format!("develop.masking.{name}.{id}")) {
+                            match pick {
+                                MenuPick::Tool(kind) => m.tool = Some(MaskTool { kind, target }),
+                                MenuPick::Ai(k) => ai = Some((k, target)),
+                            }
+                        }
+                    }
+                }
                 // Header: title, and a + for a new mask.
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Masks").size(13.5).color(theme::TEXT_STRONG));
@@ -912,6 +968,31 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                     ui.label(weak("No masks yet. Click + or press K, M or Shift+M, then draw on the photo."));
                 }
                 let (mut remove, mut duplicate): (Option<usize>, Option<usize>) = (None, None);
+                // The selected mask's menu, and its component's, by their keys.
+                if let Some(i) = m.selected.filter(|i| *i < st.masks.len()) {
+                    if hotkeys::fired(&ctx, "develop.masking.duplicate") {
+                        duplicate = Some(i);
+                    }
+                    if hotkeys::fired(&ctx, "develop.masking.visible") {
+                        st.masks[i].visible = !st.masks[i].visible;
+                        done = true;
+                    }
+                    if hotkeys::fired(&ctx, "develop.masking.rename") {
+                        m.renaming = Some(i);
+                        m.rename_text = st.masks[i].name.clone();
+                    }
+                    let j = m.component;
+                    if j < st.masks[i].components.len()
+                        && hotkeys::fired(&ctx, "develop.masking.component.delete")
+                    {
+                        st.masks[i].components.remove(j);
+                        if st.masks[i].components.is_empty() {
+                            remove = Some(i);
+                        }
+                        m.component = 0;
+                        done = true;
+                    }
+                }
                 for i in 0..st.masks.len() {
                     let current = m.selected == Some(i);
                     // The mask row: tool glyph, name, and the show / hide switch.
@@ -997,7 +1078,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                     }
                     let toggle = ui
                         .put(switch, |ui: &mut egui::Ui| {
-                            super::icons::toggle_switch(ui, visible, switch.size())
+                            super::icons::toggle_switch(ui, visible, switch.size()) // key: develop.masking.visible
                         })
                         .on_hover_text(if visible { "Hide this mask" } else { "Show this mask" });
                     if toggle.clicked() {
@@ -1012,16 +1093,19 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                     }
                     resp.context_menu(|ui| {
                         if ui.button("Rename…").clicked() {
+                            // key: develop.masking.rename
                             m.renaming = Some(i);
                             m.rename_text = st.masks[i].name.clone();
                             ui.close();
                         }
                         if ui.button("Duplicate Mask").clicked() {
+                            // key: develop.masking.duplicate
                             duplicate = Some(i);
                             ui.close();
                         }
                         ui.separator();
                         if ui.button("Delete Mask").clicked() {
+                            // key: develop.masking.delete
                             remove = Some(i);
                             ui.close();
                         }
@@ -1085,9 +1169,11 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                         }
                         resp.context_menu(|ui| {
                             if ui.checkbox(&mut comp.invert, "Invert").changed() {
+                                // key: develop.masking.component.invert
                                 done = true;
                             }
                             if ui.button("Delete").clicked() {
+                                // key: develop.masking.component.delete
                                 remove_component = Some(j);
                                 ui.close();
                             }
@@ -1104,7 +1190,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                     ui.horizontal(|ui| {
                         ui.add_space(24.0);
                         for mode in [CombineMode::Add, CombineMode::Subtract, CombineMode::Intersect] {
-                            let resp = pill(ui, mode.label(), true);
+                            let resp = pill(ui, mode.label(), true); // key: develop.masking.add.* (and subtract, intersect)
                             egui::Popup::menu(&resp).show(|ui| {
                                 tool_menu(ui, |pick| match pick {
                                     MenuPick::Tool(kind) => {
@@ -1157,7 +1243,12 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                                     for (rect, label) in [(false, "Brush"), (true, "Rectangle")] {
                                         let on = object_rect == rect;
                                         let text = RichText::new(label).size(11.5);
-                                        if ui.add(egui::Button::new(text).selected(on)).clicked() {
+                                        let id = if rect {
+                                            "develop.masking.object.rect"
+                                        } else {
+                                            "develop.masking.object.brush"
+                                        };
+                                        if ui.add(egui::Button::new(text).selected(on)).hot(id) {
                                             object_rect = rect;
                                         }
                                     }
@@ -1178,7 +1269,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                         let switch = super::icons::toggle_switch(ui, gpu, egui::vec2(24.0, 13.0));
                         let tip = "Run Select Subject, Sky and Background on the graphics card (DirectML) \
                                    when it can: several times faster than the processor";
-                        if switch.on_hover_text(tip).clicked() {
+                        if switch.on_hover_text(tip).hot("develop.masking.gpu") {
                             gpu = !gpu;
                         }
                     });
@@ -1192,7 +1283,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                                    behind the subject, going by a depth map of the photo (made \
                                    first if the photo has none, which takes a little longer). \
                                    Masks already made stay as they are";
-                        if switch.on_hover_text(tip).clicked() {
+                        if switch.on_hover_text(tip).hot("develop.masking.depth") {
                             refine = !refine;
                         }
                     });
@@ -1203,7 +1294,7 @@ pub(super) fn masks_panel(app: &mut FotaroApp, ctx: &egui::Context, anchor: Rect
                     ui.label(RichText::new("Show Overlay").size(12.0).color(theme::TEXT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(6.0);
-                        let switch = super::icons::toggle_switch(ui, m.overlay, egui::vec2(24.0, 13.0));
+                        let switch = super::icons::toggle_switch(ui, m.overlay, egui::vec2(24.0, 13.0)); // key: MaskOverlay
                         if switch.on_hover_text("Show the selected mask in red (O)").clicked() {
                             m.overlay = !m.overlay;
                         }
@@ -1312,7 +1403,9 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         let Some((i, j)) = sel else {
             ui.label(weak("Create a mask with + in the Masks panel, or press K (Brush), M (Linear Gradient) or Shift+M (Radial Gradient), then draw on the photo."));
             if m.tool.is_some_and(|t| t.kind == ShapeKind::Brush) {
-                ui.checkbox(&mut d.brush.erase, "Erase").on_hover_text("Paint to remove (or hold Alt)");
+                ui.checkbox(&mut d.brush.erase, "Erase")
+                    .on_hover_text("Paint to remove (or hold Alt)")
+                    .hot_flip("develop.masking.brush.erase", &mut d.brush.erase);
                 brush_settings(ui, &mut d.brush);
             }
             return;
@@ -1329,12 +1422,18 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             ui.add_space(super::develop::LABEL_W - 60.0);
             ui.label(RichText::new(comp.shape.label()).size(12.5).color(theme::TEXT_WEAK));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.checkbox(&mut comp.invert, "Invert").changed() {
+                if ui
+                    .checkbox(&mut comp.invert, "Invert")
+                    .hot_flip("develop.masking.component.invert", &mut comp.invert)
+                    .changed()
+                {
                     done = Some(None);
                 }
                 if kind == ShapeKind::Brush {
                     ui.add_space(8.0);
-                    ui.checkbox(&mut d.brush.erase, "Erase").on_hover_text("Paint to remove (or hold Alt)");
+                    ui.checkbox(&mut d.brush.erase, "Erase")
+                    .on_hover_text("Paint to remove (or hold Alt)")
+                    .hot_flip("develop.masking.brush.erase", &mut d.brush.erase);
                 }
             });
         });
@@ -1362,7 +1461,9 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("New brush").size(12.5).color(theme::TEXT_STRONG));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.checkbox(&mut d.brush.erase, "Erase").on_hover_text("Paint to remove (or hold Alt)");
+                    ui.checkbox(&mut d.brush.erase, "Erase")
+                    .on_hover_text("Paint to remove (or hold Alt)")
+                    .hot_flip("develop.masking.brush.erase", &mut d.brush.erase);
                 });
             });
         }
@@ -1405,6 +1506,10 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
             painter.rect_stroke(rect, 2.0, Stroke::new(1.0, Color32::from_gray(0x20)), egui::StrokeKind::Outside);
             let resp = resp.on_hover_text("A colour to tint the masked area with");
+            if color.is_some() && hotkeys::fired(ui.ctx(), "develop.masking.color.none") {
+                st.masks[i].adjust.color = None;
+                done = Some(Some(format!("{}: Color None", st.masks[i].name)));
+            }
             egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 ui.set_max_width(160.0);
                 let [mut h, mut s] = color.unwrap_or([0.0, 0.0]);
@@ -1422,7 +1527,7 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
                         _ => "None".to_owned(),
                     }));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if color.is_some() && pill(ui, "None", false).clicked() {
+                        if color.is_some() && pill(ui, "None", false).clicked() { // key: develop.masking.color.none
                             st.masks[i].adjust.color = None;
                             done = Some(Some(format!("{}: Color None", st.masks[i].name)));
                         }
@@ -1432,17 +1537,20 @@ pub(super) fn right_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if pill(ui, "Reset Sliders", false).on_hover_text("Set this mask's sliders back to 0").clicked() {
+            if pill(ui, "Reset Sliders", false)
+                .on_hover_text("Set this mask's sliders back to 0")
+                .hot("develop.masking.reset")
+            {
                 st.masks[i].adjust = Default::default();
                 done = Some(Some(format!("{}: Reset", st.masks[i].name)));
             }
-            if pill(ui, "Delete Mask", false).clicked() {
+            if pill(ui, "Delete Mask", false).hot("develop.masking.delete") {
                 st.masks.remove(i);
                 m.selected = None;
                 done = Some(None);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if pill(ui, "Close", false).on_hover_text("Leave masking (Shift+W)").clicked() {
+                if pill(ui, "Close", false).on_hover_text("Leave masking (Shift+W)").clicked() { // key: Masking
                     leave = true;
                 }
             });
@@ -1487,7 +1595,7 @@ pub(super) fn masking_button(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let editing = d.cropping.is_none() && d.removing.is_none() && d.masking.is_none();
     let (edit, color) = tool(ui, slot(3.0), editing, "edit_tool");
     super::icons::sliders(ui.painter(), slot(3.0).center(), 7.5, color);
-    if edit.on_hover_text("Edit: the adjustment panels").clicked() && !editing {
+    if edit.on_hover_text("Edit: the adjustment panels").hot("develop.tools.edit") && !editing {
         if d.cropping.is_some() {
             super::crop::set_cropping(d, false);
         }

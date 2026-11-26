@@ -6,6 +6,7 @@ use eframe::egui::{self, Align, Layout, RichText};
 use imaging::develop::{LensSetup, Slider};
 
 use super::develop::{LABEL_W, Spec, slider_row_as, sub_header, weak};
+use super::hotkeys::{self, Hot};
 use crate::app::{Command, FotaroApp};
 use crate::lens::LensTab;
 
@@ -25,8 +26,11 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
     let mut done: Option<Option<String>> = None;
     let mut measure = false;
     ui.horizontal(|ui| {
-        for (tab, name) in [(LensTab::Profile, "Profile"), (LensTab::Manual, "Manual")] {
-            if ui.selectable_label(d.lens.tab == tab, name).clicked() {
+        for (tab, name, id) in [
+            (LensTab::Profile, "Profile", "develop.lens.tab.profile"),
+            (LensTab::Manual, "Manual", "develop.lens.tab.manual"),
+        ] {
+            if ui.selectable_label(d.lens.tab == tab, name).hot(id) {
                 d.lens.tab = tab;
             }
         }
@@ -38,7 +42,12 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             let mut ca = l.remove_ca;
             let tip = "Measure the colour fringes along edges towards the corners (lateral \
                        chromatic aberration) and line the colours up. Works without a profile";
-            if ui.checkbox(&mut ca, "Remove Chromatic Aberration").on_hover_text(tip).changed() {
+            if ui
+                .checkbox(&mut ca, "Remove Chromatic Aberration")
+                .on_hover_text(tip)
+                .hot_flip("develop.lens.ca", &mut ca)
+                .changed()
+            {
                 l.remove_ca = ca;
                 if ca {
                     l.ca = None;
@@ -56,7 +65,12 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             }
             let mut on = l.profile_enable;
             let tip = "Correct the lens's distortion, vignetting and colour fringes from its profile";
-            if ui.checkbox(&mut on, "Enable Profile Corrections").on_hover_text(tip).changed() {
+            if ui
+                .checkbox(&mut on, "Enable Profile Corrections")
+                .on_hover_text(tip)
+                .hot_flip("develop.lens.profile", &mut on)
+                .changed()
+            {
                 l.profile_enable = on;
                 if on {
                     d.lens.load(&ctx);
@@ -83,6 +97,7 @@ pub(super) fn lens_panel(app: &mut FotaroApp, ui: &mut egui::Ui) {
             if ui
                 .checkbox(&mut constrain, "Constrain Crop")
                 .on_hover_text("Crop to the part of the frame the corrected photo covers")
+                .hot_flip("develop.lens.constrain", &mut constrain)
                 .changed()
             {
                 st.transform.constrain_crop = constrain;
@@ -160,6 +175,13 @@ fn profile_box(
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_W - 20.0, 18.0], egui::Label::new(weak("Setup:")));
         let before = l.setup;
+        for (setup, id) in
+            [(LensSetup::Auto, "develop.lens.setup.auto"), (LensSetup::Custom, "develop.lens.setup.custom")]
+        {
+            if hotkeys::fired(ui.ctx(), id) {
+                l.setup = setup;
+            }
+        }
         egui::ComboBox::from_id_salt("lens_setup")
             .selected_text(match l.setup {
                 LensSetup::Auto => "Auto",
@@ -167,8 +189,10 @@ fn profile_box(
             })
             .width(110.0)
             .show_ui(ui, |ui| {
+                // key: develop.lens.setup.auto
                 ui.selectable_value(&mut l.setup, LensSetup::Auto, "Auto")
                     .on_hover_text("The lens the photo says it was taken with");
+                // key: develop.lens.setup.custom
                 ui.selectable_value(&mut l.setup, LensSetup::Custom, "Custom")
                     .on_hover_text("A lens chosen here");
             });
@@ -199,7 +223,7 @@ fn profile_box(
         let shown = current.as_ref().map_or_else(|| "Choose a lens…".to_string(), |p| p.lens.clone());
         let resp = ui.add_sized(
             [ui.available_width().max(120.0), 20.0],
-            egui::Button::new(RichText::new(shown).size(11.5)).truncate(),
+            egui::Button::new(RichText::new(shown).size(11.5)).truncate(), // no hotkey: opens the list of lenses to pick from
         );
         if resp.clicked() {
             d.lens.search.clear();
@@ -346,7 +370,7 @@ fn lens_picker(
     let row = |ui: &mut egui::Ui, i: usize, lit: bool| {
         let x = &db.lenses[i];
         let on = lit || current == Some(x.model.as_str());
-        ui.selectable_label(on, RichText::new(lens_name(x)).size(11.5))
+        ui.selectable_label(on, RichText::new(lens_name(x)).size(11.5)) // no hotkey: one per lens
     };
     let words: Vec<String> = state.search.to_lowercase().split_whitespace().map(String::from).collect();
     ui.add_space(2.0);
@@ -446,7 +470,7 @@ fn lens_picker(
     }
     if has_camera {
         ui.separator();
-        ui.checkbox(&mut state.any_mount, RichText::new("Lenses for other mounts too").size(11.5))
+        ui.checkbox(&mut state.any_mount, RichText::new("Lenses for other mounts too").size(11.5)) // no hotkey: in the list of lenses
             .on_hover_text(
                 "For a lens used on an adapter: list every lens, not only those for this camera's mount",
             );
@@ -474,7 +498,7 @@ fn database_line(ui: &mut egui::Ui, d: &mut crate::develop::DevelopState, ctx: &
     }
     if !d.lens.available() {
         ui.label(weak("Lens profiles come from the Lensfun database (about 0.5 MB to download).").size(11.0));
-        if ui.button("Download Lens Database").clicked() {
+        if ui.button("Download Lens Database").hot("develop.lens.download") {
             d.lens.download(ctx);
         }
         return;
@@ -488,7 +512,11 @@ fn database_line(ui: &mut egui::Ui, d: &mut crate::develop::DevelopState, ctx: &
         ui.label(weak(format!("Lens data: Lensfun {when}")).size(10.5))
             .on_hover_text("lensfun.github.io, licensed CC BY-SA 3.0");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.small_button("Update").on_hover_text("Download the newest lens database").clicked() {
+            if ui
+                .small_button("Update")
+                .on_hover_text("Download the newest lens database")
+                .hot("develop.lens.update")
+            {
                 d.lens.download(ctx);
             }
         });

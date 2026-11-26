@@ -328,6 +328,7 @@ fn paint_needs_saving(painter: &egui::Painter, center: egui::Pos2) {
     );
 }
 
+// hotkeys: none (the photo's right-click menu: its items are actions with keys, and Photo ▸ Reveal)
 fn photo_context_menu(resp: &egui::Response, app: &mut FotaroApp, photo: &PhotoRow) {
     resp.context_menu(|ui| {
         if ui.button(crate::platform::REVEAL_LABEL).clicked() {
@@ -969,6 +970,7 @@ pub fn filmstrip(app: &mut FotaroApp, ui: &mut egui::Ui) {
     // Header: source breadcrumb, counts and the active file name.
     ui.horizontal(|ui| {
         ui.add_space(8.0);
+        // key: GridView
         let grid = ui.add(egui::Button::new("▦").frame(false)).on_hover_text("Grid (G)");
         if grid.clicked() {
             app.view = View::Grid;
@@ -987,6 +989,7 @@ pub fn filmstrip(app: &mut FotaroApp, ui: &mut egui::Ui) {
         if members > 1 && !app.ui.show_version_strip {
             ui.add_space(8.0);
             let b =
+                // key: ToggleStack
                 ui.small_button(format!("Stack: {members} ▴")).on_hover_text("Show the version strip (S)");
             if b.clicked() {
                 app.ui.show_version_strip = true;
@@ -1069,6 +1072,7 @@ pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ];
         for (v, icon, size, tip, action) in views {
             if ui
+                // key: GridView (and the other views)
                 .add(egui::Button::new(RichText::new(icon).size(size)).selected(app.view == v))
                 .on_hover_text(tip)
                 .clicked()
@@ -1081,6 +1085,7 @@ pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
         let mut sort = app.ui.sort;
         let dir = if sort.descending { "Z↑A" } else { "A↓Z" };
         if ui
+            // key: library.sort.reverse
             .add(egui::Button::new(RichText::new(dir).size(10.5)).frame(false))
             .on_hover_text("Reverse sort direction")
             .clicked()
@@ -1091,6 +1096,7 @@ pub fn toolbar(app: &mut FotaroApp, ui: &mut egui::Ui) {
             ui,
             |ui| {
                 for key in catalog::SortKey::ALL {
+                    // key: library.sort.*
                     ui.selectable_value(&mut sort.key, key, key.label());
                 }
             },
