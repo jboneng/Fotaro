@@ -36,7 +36,8 @@ pub fn reveal(path: &Path) {
 /// happen while drawing.
 #[derive(Default)]
 pub struct FreeSpaceCache {
-    values: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Per volume: (free, total) bytes.
+    values: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>>,
     refreshing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     last_refresh: Option<std::time::Instant>,
 }
@@ -44,16 +45,19 @@ pub struct FreeSpaceCache {
 impl FreeSpaceCache {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// Cached free bytes for a volume key from [`volume_of`]; schedules a refresh when stale.
-    pub fn get(&mut self, volume: &str) -> Option<u64> {
+    /// Cached (free, total) bytes for a volume key from [`volume_of`]; schedules a refresh
+    /// when stale.
+    pub fn get(&mut self, volume: &str) -> Option<(u64, u64)> {
         let value = self.values.lock().unwrap().get(volume).copied();
         let stale = self.last_refresh.is_none_or(|t| t.elapsed() > Self::MAX_AGE) || value.is_none();
         if stale && !self.refreshing.swap(true, std::sync::atomic::Ordering::SeqCst) {
             self.last_refresh = Some(std::time::Instant::now());
             let (values, refreshing, key) = (self.values.clone(), self.refreshing.clone(), volume.to_owned());
             std::thread::spawn(move || {
-                if let Ok(free) = fs4::available_space(Path::new(&key)) {
-                    values.lock().unwrap().insert(key, free);
+                let path = Path::new(&key);
+                if let Ok(free) = fs4::available_space(path) {
+                    let total = fs4::total_space(path).unwrap_or(0);
+                    values.lock().unwrap().insert(key, (free, total));
                 }
                 refreshing.store(false, std::sync::atomic::Ordering::SeqCst);
             });
@@ -65,7 +69,7 @@ impl FreeSpaceCache {
 /// Group a folder path under its volume, the way LrC's Folders panel does.
 /// Returns (volume key, display name). On Windows a network share
 /// (`\\server\share\…`, also written `\\?\UNC\server\share\…`) is a volume of its own,
-/// named "share on server"; its key is the share's root, for free space.
+/// named "share (server)"; its key is the share's root, for free space.
 pub fn volume_of(path: &Path) -> (String, String) {
     volume_and_parts(path).0
 }
@@ -92,7 +96,7 @@ fn volume_and_parts(path: &Path) -> ((String, String), Vec<String>) {
             let mut parts = split(unc).into_iter();
             let server = parts.next().unwrap_or_default();
             let share = parts.next().unwrap_or_default();
-            let name = if share.is_empty() { server.clone() } else { format!("{share} on {server}") };
+            let name = if share.is_empty() { server.clone() } else { format!("{share} ({server})") };
             return ((format!(r"\\{server}\{share}\"), name), parts.collect());
         }
         let drive: String = plain.chars().take_while(|c| *c != '\\').collect();
@@ -253,7 +257,7 @@ mod tests {
             for p in [r"\\?\UNC\nas\Media\2026 bilder\Trip", r"\\nas\Media\2026 bilder\Trip"] {
                 assert_eq!(
                     volume_of(Path::new(p)),
-                    (r"\\nas\Media\".to_owned(), "Media on nas".to_owned()),
+                    (r"\\nas\Media\".to_owned(), "Media (nas)".to_owned()),
                     "{p}"
                 );
                 assert_eq!(parts_below_volume(Path::new(p)), ["2026 bilder", "Trip"]);

@@ -169,6 +169,43 @@ pub fn remove(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
     painter.add(Shape::convex_polygon(pad.to_vec(), color, Stroke::NONE));
 }
 
+/// A folder: a body with a tab, outlined (filled when `filled`).
+pub fn folder(painter: &egui::Painter, center: Pos2, r: f32, color: Color32, filled: bool) {
+    let body = egui::Rect::from_center_size(center + vec2(0.0, r * 0.15), vec2(2.0 * r, 1.45 * r));
+    let tab = egui::Rect::from_min_size(body.left_top() - vec2(0.0, r * 0.32), vec2(r * 0.85, r * 0.45));
+    if filled {
+        painter.rect_filled(tab, 1.0, color);
+        painter.rect_filled(body, 1.5, color);
+    } else {
+        let s = Stroke::new(1.0, color);
+        painter.rect_stroke(tab, 1.0, s, egui::StrokeKind::Inside);
+        painter.rect_filled(body, 1.5, Color32::from_rgb(0x33, 0x33, 0x33));
+        painter.rect_stroke(body, 1.5, s, egui::StrokeKind::Inside);
+    }
+}
+
+/// A disk: a flat box with a light at the right.
+pub fn drive(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    let body = egui::Rect::from_center_size(center, vec2(2.2 * r, 1.2 * r));
+    painter.rect_stroke(body, 2.0, Stroke::new(1.2, color), egui::StrokeKind::Inside);
+    painter.circle_filled(body.right_center() - vec2(r * 0.45, 0.0), r * 0.16, color);
+}
+
+/// A network share: a disk on a line.
+pub fn network_drive(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
+    drive(painter, center - vec2(0.0, r * 0.35), r * 0.9, color);
+    let s = Stroke::new(1.2, color);
+    let foot = center + vec2(0.0, r * 0.95);
+    painter.line_segment([center + vec2(0.0, r * 0.2), foot], s);
+    painter.line_segment([foot - vec2(r, 0.0), foot + vec2(r, 0.0)], s);
+}
+
+/// A small "?" on a dot: something that could not be found.
+pub fn missing_badge(painter: &egui::Painter, center: Pos2, color: Color32) {
+    painter.circle_filled(center, 4.5, color);
+    painter.text(center, egui::Align2::CENTER_CENTER, "?", egui::FontId::proportional(8.5), Color32::BLACK);
+}
+
 /// Edit (the panels' sliders): three lines with a knob each, at different places.
 pub fn sliders(painter: &egui::Painter, center: Pos2, r: f32, color: Color32) {
     let s = Stroke::new(1.5, color);

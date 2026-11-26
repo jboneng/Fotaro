@@ -91,6 +91,15 @@ pub fn items() -> Vec<(String, String, &'static str, Scope)> {
     add("library.filter.kind.raw".into(), "Kind Filter: Raw".into(), FILTER, lib);
     add("library.filter.kind.other".into(), "Kind Filter: Other".into(), FILTER, lib);
     add("library.folders.add".into(), "Add Folder…".into(), PANELS, lib);
+    for (id, name) in [
+        ("next", "Next Folder"),
+        ("previous", "Previous Folder"),
+        ("expand_all", "Expand All Folders"),
+        ("collapse_all", "Collapse All Folders"),
+        ("reveal", "Show the Selected Folder"),
+    ] {
+        add(format!("library.folders.{id}"), name.into(), PANELS, lib);
+    }
     add("library.keywords.create".into(), "Create Keyword Tag…".into(), PANELS, lib);
     for (p, name) in
         [(MetadataPreset::Default, "Default"), (MetadataPreset::Exif, "EXIF"), (MetadataPreset::Iptc, "IPTC")]
@@ -140,6 +149,12 @@ pub fn run(app: &mut FotaroApp, ctx: &egui::Context, id: &str) {
             },
         }
         app.run(Command::SetSort(sort));
+        return;
+    }
+    if let Some(what) = rest("library.folders.")
+        && what != "add"
+    {
+        folders(app, ctx, what);
         return;
     }
     if let Some(p) = rest("library.metadata.") {
@@ -210,6 +225,46 @@ pub fn run(app: &mut FotaroApp, ctx: &egui::Context, id: &str) {
         _ => return,
     };
     app.run(cmd);
+}
+
+/// The Folders panel, by its keys. It shows (with the folder in view) for all but the
+/// expand and collapse ones.
+fn folders(app: &mut FotaroApp, ctx: &egui::Context, what: &str) {
+    let Some(s) = &app.session else { return };
+    match what {
+        "expand_all" => {
+            app.ui.closed_folders.clear();
+            app.ui.closed_volumes.clear();
+            return;
+        }
+        "collapse_all" => {
+            let parents: std::collections::BTreeSet<i64> =
+                s.folders.iter().filter_map(|f| f.parent_id).collect();
+            for f in s.folders.iter().filter(|f| parents.contains(&f.id)) {
+                app.ui.closed_folders.insert(f.path.to_string_lossy().into_owned());
+            }
+            return;
+        }
+        "next" | "previous" => {
+            let rows = super::sidebars::folder_rows(ctx);
+            let current = match s.source {
+                catalog::Source::Folder { id, .. } => rows.iter().position(|r| *r == id),
+                _ => None,
+            };
+            let at = match (current, what == "next") {
+                (Some(i), true) => (i + 1).min(rows.len().saturating_sub(1)),
+                (Some(i), false) => i.saturating_sub(1),
+                (None, _) => 0,
+            };
+            let Some(&id) = rows.get(at) else { return };
+            let include_subfolders = app.ui.include_subfolders;
+            app.run(Command::SetSource(catalog::Source::Folder { id, include_subfolders }));
+        }
+        _ => {}
+    }
+    app.ui.show_left = true;
+    app.ui.left.set_open("Folders", true, super::sidebars::LEFT);
+    super::sidebars::reveal_folder(ctx);
 }
 
 /// The Library Filter bar, by its keys: the bar shows, with the row the key is in.

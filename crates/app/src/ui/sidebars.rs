@@ -11,7 +11,7 @@ use crate::app::{Command, FieldValue, FotaroApp, MetadataPreset, View, ZoomLevel
 use crate::platform;
 use catalog::IptcField;
 
-const LEFT: &[&str] = &["Navigator", "Catalog", "Folders", "Collections"];
+pub(crate) const LEFT: &[&str] = &["Navigator", "Catalog", "Folders", "Collections"];
 pub const RIGHT: &[&str] = &["Histogram", "Keywording", "Keyword List", "Metadata"];
 
 fn weak(text: impl Into<String>) -> RichText {
@@ -176,8 +176,11 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
     // The tree structure is computed once per catalog change (see `FolderTree`).
     let tree = &s.folder_tree;
     let folders = &s.folders;
+    let ctx = ui.ctx().clone();
+    let name_of = |i: usize| crate::app::folder_name(&folders[i].path);
+    let kids_of = |i: usize| tree.children.get(&Some(folders[i].id)).map_or(&[][..], Vec::as_slice);
 
-    // A filter: the folders whose names have the text, with the folders above them.
+    // A filter: the folders whose names (or places) have the text, with those above them.
     let filter_id = egui::Id::unique("folder_filter");
     let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
     if folders.len() > 6 || !filter.is_empty() {
@@ -188,14 +191,14 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
         ui.add_space(2.0);
     }
     let needle = filter.trim().to_lowercase();
-    let mut shown = vec![needle.is_empty(); tree.nodes.len()];
-    if !needle.is_empty() {
-        // Children come after their parents: mark matches, then their parents, from the end.
-        for n in (0..tree.nodes.len()).rev() {
-            let node = &tree.nodes[n];
-            let hit =
-                node.name.to_lowercase().contains(&needle) || node.prefix.to_lowercase().contains(&needle);
-            shown[n] = hit || node.children.iter().any(|c| shown[*c]);
+    let filtering = !needle.is_empty();
+    let mut shown = vec![!filtering; folders.len()];
+    if filtering {
+        // Folders are sorted by path: children after their parents.
+        for i in (0..folders.len()).rev() {
+            let caption = tree.captions.get(&i).map(|c| c.join(" ").to_lowercase()).unwrap_or_default();
+            let hit = name_of(i).to_lowercase().contains(&needle) || caption.contains(&needle);
+            shown[i] = hit || kids_of(i).iter().any(|k| shown[*k]);
         }
     }
 
@@ -203,9 +206,37 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
         Source::Folder { id, .. } => Some(id),
         _ => None,
     };
+    let index: std::collections::HashMap<i64, usize> =
+        folders.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
+    let key_of = |i: usize| folders[i].path.to_string_lossy().into_owned();
+
+    // A folder chosen elsewhere (Show Parent Folder, an import, a key) is shown: the
+    // folders above it open, and the panel scrolls to it.
+    let (last_id, clicked_id) = (egui::Id::unique("folders_last"), egui::Id::unique("folders_clicked"));
+    let mut reveal = ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::unique(REVEAL)).unwrap_or(false));
+    let last: Option<i64> = ctx.data(|d| d.get_temp(last_id)).flatten();
+    let clicked: Option<i64> = ctx.data(|d| d.get_temp(clicked_id)).flatten();
+    if selected != last {
+        reveal |= selected.is_some() && selected != clicked;
+        ctx.data_mut(|d| d.insert_temp(last_id, selected));
+    }
+    let mut scroll_to = None;
+    if reveal && let Some(mut at) = selected.and_then(|id| index.get(&id).copied()) {
+        scroll_to = Some(folders[at].id);
+        let (volume, _) = platform::volume_of(&folders[at].path);
+        app.ui.closed_volumes.remove(&volume);
+        while let Some(p) = folders[at].parent_id.and_then(|p| index.get(&p).copied()) {
+            app.ui.closed_folders.remove(&key_of(p));
+            at = p;
+        }
+    }
+
     let include_subfolders = app.ui.include_subfolders;
     let mut commands = Vec::new();
-    let mut toggles: Vec<(Option<i64>, std::path::PathBuf)> = Vec::new();
+    let mut toggles: Vec<String> = Vec::new();
+    let mut set_all: Option<(usize, bool)> = None;
+    let mut toggle_volume: Option<String> = None;
+    let mut rows: Vec<i64> = Vec::new();
     let mut none_shown = true;
 
     for (key, name, tops) in &tree.volumes {
@@ -213,81 +244,62 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
             continue;
         }
         none_shown = false;
-        // Volume header: name and free space.
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(name).color(theme::TEXT_STRONG).strong()).on_hover_text(key.as_str());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(free) = s.free_space.get(key) {
-                    ui.label(weak(format!("{} free", platform::human_bytes(free))).size(10.5));
-                }
-            });
-        });
-
-        let mut stack: Vec<(usize, usize)> = tops.iter().rev().map(|&n| (n, 0)).collect();
-        while let Some((n, depth)) = stack.pop() {
-            if !shown[n] {
+        let open = filtering || !app.ui.closed_volumes.contains(key);
+        let network = key.starts_with(r"\\");
+        if volume_header(ui, name, key, network, open, s.free_space.get(key)).clicked() {
+            toggle_volume = Some(key.clone());
+        }
+        if !open {
+            continue;
+        }
+        let mut stack: Vec<(usize, usize)> = tops.iter().rev().map(|&i| (i, 0)).collect();
+        while let Some((i, depth)) = stack.pop() {
+            if !shown[i] {
                 continue;
             }
-            let node = &tree.nodes[n];
-            let folder = node.folder.map(|i| &folders[i]);
-            let has_kids = node.children.iter().any(|c| shown[*c]);
-            let expanded = !needle.is_empty()
-                || match folder {
-                    Some(f) => !s.collapsed_folders.contains(&f.id),
-                    None => !s.collapsed_groups.contains(&node.path),
-                };
-            let count = match folder {
-                Some(f) if !include_subfolders => f.photo_count,
-                _ => node.total,
-            };
-            let missing = folder.is_some_and(|f| s.missing_folders.contains(&f.id));
+            let f = &folders[i];
+            let kids = kids_of(i);
+            let has_kids = kids.iter().any(|k| shown[*k]);
+            let expanded = filtering || !app.ui.closed_folders.contains(&key_of(i));
+            let count = if include_subfolders { tree.totals[&f.id] } else { f.photo_count };
+            let missing = s.missing_folders.contains(&f.id);
+            let name = name_of(i);
             let row = FolderRow {
                 depth,
                 kids: has_kids.then_some(expanded),
-                prefix: &node.prefix,
-                name: &node.name,
+                name: &name,
+                caption: tree.captions.get(&i).map(Vec::as_slice).unwrap_or_default(),
                 count,
-                selected: folder.is_some_and(|f| selected == Some(f.id)),
-                group: folder.is_none(),
+                selected: selected == Some(f.id),
                 missing,
             };
             let (resp, on_triangle) = folder_row(ui, &row);
-            let tip = match (folder, missing) {
-                (_, true) => format!("{}\nThis folder could not be found.", node.path.display()),
-                (None, _) => {
-                    format!("{}\nNot a catalog folder: the folders under it are.", node.path.display())
-                }
-                (Some(_), false) => node.path.display().to_string(),
+            if scroll_to == Some(f.id) {
+                resp.scroll_to_me(Some(Align::Center));
+            }
+            rows.push(f.id);
+            let tip = if missing {
+                format!("{}\nThis folder could not be found.", f.path.display())
+            } else {
+                f.path.display().to_string()
             };
             let resp = resp.on_hover_text(tip);
-            let toggle = (folder.map(|f| f.id), node.path.clone());
             if resp.clicked() {
-                match folder {
-                    Some(f) if !(on_triangle && has_kids) => {
-                        commands.push(Command::SetSource(Source::Folder { id: f.id, include_subfolders }));
-                    }
-                    _ if has_kids => toggles.push(toggle.clone()),
-                    _ => {}
+                if on_triangle && has_kids {
+                    toggles.push(key_of(i));
+                } else {
+                    ctx.data_mut(|d| d.insert_temp(clicked_id, Some(f.id)));
+                    commands.push(Command::SetSource(Source::Folder { id: f.id, include_subfolders }));
                 }
             }
-            if resp.double_clicked() && has_kids && folder.is_some() {
-                toggles.push(toggle);
+            if resp.double_clicked() && has_kids {
+                toggles.push(key_of(i));
             }
-            match folder {
-                Some(f) => folder_menu(&resp, f, &node.name, missing, &mut commands),
-                None => {
-                    resp.context_menu(|ui| {
-                        // no hotkey: a folder's own menu
-                        if ui.button(platform::REVEAL_LABEL).clicked() {
-                            commands.push(Command::Reveal(node.path.clone()));
-                            ui.close();
-                        }
-                    });
-                }
+            if let Some(all) = folder_menu(&resp, f, &name, missing, !kids.is_empty(), &mut commands) {
+                set_all = Some((i, all));
             }
             if has_kids && expanded {
-                for &k in node.children.iter().rev() {
+                for &k in kids.iter().rev() {
                     stack.push((k, depth + 1));
                 }
             }
@@ -297,19 +309,28 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
     if none_shown {
         ui.label(weak("No folder by that name."));
     }
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(ROWS), rows));
 
-    for (id, path) in toggles {
-        match id {
-            Some(id) => {
-                if !s.collapsed_folders.remove(&id) {
-                    s.collapsed_folders.insert(id);
-                }
+    if let Some(key) = toggle_volume
+        && !app.ui.closed_volumes.remove(&key)
+    {
+        app.ui.closed_volumes.insert(key);
+    }
+    for key in toggles {
+        if !app.ui.closed_folders.remove(&key) {
+            app.ui.closed_folders.insert(key);
+        }
+    }
+    if let Some((i, open)) = set_all {
+        // The folder and every folder under it.
+        let mut todo = vec![i];
+        while let Some(at) = todo.pop() {
+            if open {
+                app.ui.closed_folders.remove(&key_of(at));
+            } else if !kids_of(at).is_empty() {
+                app.ui.closed_folders.insert(key_of(at));
             }
-            None => {
-                if !s.collapsed_groups.remove(&path) {
-                    s.collapsed_groups.insert(path);
-                }
-            }
+            todo.extend_from_slice(kids_of(at));
         }
     }
     for c in commands {
@@ -317,102 +338,200 @@ fn folders(app: &mut FotaroApp, ui: &mut egui::Ui) {
     }
 }
 
+/// Where the Folders panel keeps its rows in order (for Next / Previous Folder), and the
+/// wish to show the selected folder.
+const ROWS: &str = "folders_rows";
+const REVEAL: &str = "folders_reveal";
+
+/// The folders shown in the Folders panel last time it was drawn, top to bottom.
+pub fn folder_rows(ctx: &egui::Context) -> Vec<i64> {
+    ctx.data(|d| d.get_temp(egui::Id::unique(ROWS))).unwrap_or_default()
+}
+
+/// Show the selected folder in the Folders panel (open what is above it, scroll to it).
+pub fn reveal_folder(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(REVEAL), true));
+}
+
+/// A volume's header: its icon, name, free space, and a bar of how full it is. Clicking
+/// it opens or closes it.
+fn volume_header(
+    ui: &mut egui::Ui,
+    name: &str,
+    key: &str,
+    network: bool,
+    open: bool,
+    space: Option<(u64, u64)>,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 27.0), Sense::click());
+    let painter = ui.painter_at(rect);
+    let bg = if resp.hovered() {
+        Color32::from_rgb(0x3a, 0x3a, 0x3a)
+    } else {
+        Color32::from_rgb(0x2e, 0x2e, 0x2e)
+    };
+    painter.rect_filled(rect, 2.0, bg);
+    let mid = rect.top() + 11.0;
+    let tri = egui::pos2(rect.left() + 9.0, mid);
+    let dir = if open { super::icons::Dir::Down } else { super::icons::Dir::Right };
+    super::icons::triangle(&painter, tri, 3.5, dir, theme::TEXT_WEAK);
+    let icon = egui::pos2(rect.left() + 25.0, mid);
+    if network {
+        super::icons::network_drive(&painter, icon, 5.5, theme::TEXT);
+    } else {
+        super::icons::drive(&painter, icon, 5.5, theme::TEXT);
+    }
+    let free_text = space.map(|(free, _)| format!("{} free", platform::human_bytes(free)));
+    let free = free_text.as_ref().map(|t| {
+        painter.text(
+            egui::pos2(rect.right() - 6.0, mid),
+            egui::Align2::RIGHT_CENTER,
+            t,
+            egui::FontId::proportional(10.5),
+            theme::TEXT_WEAK,
+        )
+    });
+    let room = free.map_or(rect.right(), |r| r.left()) - 8.0 - (icon.x + 10.0);
+    let galley =
+        one_line(ui, &[(name, theme::TEXT_STRONG)], egui::FontId::proportional(12.5), room.max(10.0));
+    painter.galley(egui::pos2(icon.x + 10.0, mid - galley.size().y / 2.0), galley, theme::TEXT_STRONG);
+    // How full: grey, amber under a tenth free, red under 3 %.
+    if let Some((free, total)) = space.filter(|(_, t)| *t > 0) {
+        let left = free as f32 / total as f32;
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(icon.x - 6.0, rect.bottom() - 6.0),
+            egui::pos2(rect.right() - 6.0, rect.bottom() - 3.5),
+        );
+        painter.rect_filled(bar, 1.0, Color32::from_rgb(0x22, 0x22, 0x22));
+        let used = egui::Rect::from_min_max(
+            bar.min,
+            egui::pos2(bar.left() + bar.width() * (1.0 - left), bar.bottom()),
+        );
+        let color = if left < 0.03 {
+            Color32::from_rgb(0xc8, 0x4a, 0x3a)
+        } else if left < 0.10 {
+            Color32::from_rgb(0xd0, 0x9a, 0x2a)
+        } else {
+            Color32::from_rgb(0x78, 0x78, 0x78)
+        };
+        painter.rect_filled(used, 1.0, color);
+    }
+    resp.on_hover_text(match space {
+        Some((free, total)) if total > 0 => {
+            format!("{key}\n{} free of {}", platform::human_bytes(free), platform::human_bytes(total))
+        }
+        _ => key.to_owned(),
+    })
+}
+
+/// Text in one line at most `width` wide, ending in "…" when it does not fit.
+fn one_line(
+    ui: &egui::Ui,
+    parts: &[(&str, Color32)],
+    font: egui::FontId,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::default();
+    for (text, color) in parts {
+        job.append(text, 0.0, egui::TextFormat::simple(font.clone(), *color));
+    }
+    job.wrap = egui::text::TextWrapping {
+        max_width: width,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    ui.ctx().fonts_mut(|f| f.layout_job(job))
+}
+
 /// What a Folders panel row shows.
 struct FolderRow<'a> {
     depth: usize,
     /// Has folders under it: expanded or not.
     kids: Option<bool>,
-    /// Folders above it with nothing else in them (dimmer, shortened first when narrow).
-    prefix: &'a str,
     name: &'a str,
+    /// A top-level folder's place (the folders between its volume and it); empty: none.
+    caption: &'a [String],
     count: i64,
     selected: bool,
-    /// Not a catalog folder: only shows where the ones under it are.
-    group: bool,
     missing: bool,
 }
 
-/// A Folders panel row: a triangle (in its own column, so names line up), the name
-/// shortened to fit before the count, and the count. Also returns whether a click was on
-/// the triangle.
+/// A Folders panel row: a triangle (in its own column, so names line up), the folder's
+/// icon and name, the count, and for a top-level folder a dim line saying where it is,
+/// cut from the left when narrow. Also returns whether a click was on the triangle.
 fn folder_row(ui: &mut egui::Ui, row: &FolderRow) -> (egui::Response, bool) {
-    let height = 19.0;
+    let height = if row.caption.is_empty() { 20.0 } else { 34.0 };
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::click());
     let painter = ui.painter_at(rect);
     if row.selected {
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(0x55, 0x55, 0x55));
+        painter.rect_filled(rect, 2.0, Color32::from_rgb(0x55, 0x55, 0x55));
     } else if resp.hovered() {
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(0x3d, 0x3d, 0x3d));
+        painter.rect_filled(rect, 2.0, Color32::from_rgb(0x3d, 0x3d, 0x3d));
     }
-    let x = rect.left() + 4.0 + row.depth as f32 * 12.0;
-    let tri = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(12.0, height));
+    let mid = rect.top() + 10.0;
+    let x = rect.left() + 4.0 + row.depth as f32 * 14.0;
+    let tri = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(12.0, 20.0));
     if let Some(open) = row.kids {
-        let c = tri.center();
-        let points = if open {
-            vec![c + egui::vec2(-3.5, -2.0), c + egui::vec2(3.5, -2.0), c + egui::vec2(0.0, 2.5)]
-        } else {
-            vec![c + egui::vec2(-2.0, -3.5), c + egui::vec2(2.5, 0.0), c + egui::vec2(-2.0, 3.5)]
-        };
-        painter.add(egui::Shape::convex_polygon(points, theme::TEXT_WEAK, egui::Stroke::NONE));
+        let dir = if open { super::icons::Dir::Down } else { super::icons::Dir::Right };
+        super::icons::triangle(&painter, egui::pos2(tri.center().x, mid), 3.5, dir, theme::TEXT_WEAK);
     }
-    // The count, then the name in what is left.
-    let small = egui::FontId::proportional(11.5);
+    let icon = egui::pos2(tri.right() + 8.0, mid);
+    let icon_color = if row.selected { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
+    super::icons::folder(&painter, icon, 5.5, icon_color, row.selected);
+    if row.missing {
+        super::icons::missing_badge(&painter, icon + egui::vec2(5.0, 3.5), theme::MISSING);
+    }
     let count = painter.text(
-        rect.right_center() - egui::vec2(4.0, 0.0),
+        egui::pos2(rect.right() - 6.0, mid),
         egui::Align2::RIGHT_CENTER,
         row.count.to_string(),
-        small,
+        egui::FontId::proportional(11.5),
         theme::TEXT_WEAK,
     );
-    let font = egui::FontId::proportional(12.5);
-    let room = (count.left() - 8.0 - (tri.right() + 2.0)).max(10.0);
-    let name_color = if row.group {
+    let text_x = icon.x + 10.0;
+    let room = (count.left() - 8.0 - text_x).max(10.0);
+    let color = if row.missing {
         theme::TEXT_WEAK
     } else if row.selected {
         theme::TEXT_STRONG
     } else {
         theme::TEXT
     };
-    let width = |text: &str| {
-        ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE).size().x)
-    };
-    let name = if row.missing { format!("{}  ?", row.name) } else { row.name.to_owned() };
-    // The prefix whole if it fits, else its end, else none.
-    let mut prefix = if row.prefix.is_empty() { String::new() } else { format!("{} / ", row.prefix) };
-    while !prefix.is_empty() && width(&prefix) + width(&name) > room {
-        let parts: Vec<&str> =
-            prefix.trim_start_matches("… / ").trim_end_matches(" / ").split(" / ").collect();
-        prefix = if parts.len() > 1 { format!("… / {} / ", parts[1..].join(" / ")) } else { String::new() };
-    }
-    let mut job = egui::text::LayoutJob::default();
-    let dim = theme::TEXT_WEAK.gamma_multiply(0.85);
-    job.append(&prefix, 0.0, egui::TextFormat::simple(font.clone(), dim));
-    job.append(&name, 0.0, egui::TextFormat::simple(font.clone(), name_color));
-    job.wrap = egui::text::TextWrapping {
-        max_width: room,
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
-    let at = egui::pos2(tri.right() + 2.0, rect.center().y - galley.size().y / 2.0);
-    painter.galley(at, galley, name_color);
-    if row.missing {
-        // LrC greys out folders it can't find (e.g. an unplugged drive).
-        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(90));
+    let name = one_line(ui, &[(row.name, color)], egui::FontId::proportional(12.5), room);
+    painter.galley(egui::pos2(text_x, mid - name.size().y / 2.0), name, color);
+    if !row.caption.is_empty() {
+        // Where it is: whole if it fits, else its end ("… › real").
+        let font = egui::FontId::proportional(10.5);
+        let room = rect.right() - 6.0 - text_x;
+        let width = |t: &str| {
+            ui.ctx().fonts_mut(|f| f.layout_no_wrap(t.to_owned(), font.clone(), Color32::WHITE).size().x)
+        };
+        let mut from = 0;
+        let mut text = row.caption.join(" › ");
+        while from + 1 < row.caption.len() && width(&text) > room {
+            from += 1;
+            text = format!("… › {}", row.caption[from..].join(" › "));
+        }
+        let dim = theme::TEXT_WEAK.gamma_multiply(0.9);
+        let caption = one_line(ui, &[(&text, dim)], font, room);
+        painter.galley(egui::pos2(text_x, rect.top() + 19.0), caption, dim);
     }
     let on_triangle = resp.interact_pointer_pos().is_some_and(|p| p.x < tri.right() + 2.0);
     (resp, on_triangle)
 }
 
-/// A catalog folder's menu: the same items and order as LrC's Folders panel.
+/// A catalog folder's menu: the same items and order as LrC's Folders panel, then
+/// Expand All / Collapse All for it and the folders under it (returned: open or not).
 fn folder_menu(
     resp: &egui::Response,
     f: &catalog::Folder,
     name: &str,
     missing: bool,
+    has_kids: bool,
     commands: &mut Vec<Command>,
-) {
+) -> Option<bool> {
+    let mut all = None;
     resp.context_menu(|ui| {
         let mut item = |ui: &mut egui::Ui, text: &str, enabled: bool, cmd: Command| {
             // no hotkey: a folder's own menu
@@ -436,7 +555,18 @@ fn folder_menu(
         item(ui, "Show Parent Folder", f.parent_id.is_none(), Command::ShowParentFolder(f.id));
         ui.separator();
         item(ui, platform::REVEAL_LABEL, !missing, Command::Reveal(f.path.clone()));
+        if has_kids {
+            ui.separator();
+            for (text, open) in [("Expand All", true), ("Collapse All", false)] {
+                // no hotkey: a folder's own menu (Library ▸ Panels has the keys for all folders)
+                if ui.button(text).clicked() {
+                    all = Some(open);
+                    ui.close();
+                }
+            }
+        }
     });
+    all
 }
 
 pub fn right(app: &mut FotaroApp, ui: &mut egui::Ui) {
